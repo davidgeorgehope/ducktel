@@ -4,15 +4,124 @@ A lightweight local OpenTelemetry backend. Receives OTLP traces, logs, and metri
 
 Single binary. No external dependencies. Designed for LLM agents to shell out to for telemetry diagnostics.
 
+## Why This Exists
+
+The observability industry is undergoing a structural collapse. Not a market correction — a fundamental compression of the value chain that will reshape how software is monitored and debugged.
+
+For the past decade, observability platforms have monetized three layers: **ingestion** (getting telemetry data in), **storage** (keeping it queryable), and **intelligence** (helping humans understand it). Vendors like Datadog, Dynatrace, and Splunk built billion-dollar businesses by bundling all three behind proprietary formats, query languages, and dashboards.
+
+That bundle is coming apart.
+
+### The forces at work
+
+**From below, storage is commoditizing.** OpenTelemetry standardized the wire format. Parquet and Iceberg standardized columnar storage. DuckDB, ClickHouse, and object stores like S3 made it trivially cheap to store and query telemetry at scale. The marginal cost of storing a GB of logs is collapsing toward $0.023/month. When storage is a commodity, charging $2.50/GB for ingestion becomes indefensible — and enterprises are noticing. Elastic's own research shows 96% of organizations are actively taking steps to control observability costs, with 70% focused on optimizing existing spend rather than expanding.
+
+**From above, AI is eating the intelligence layer.** LLMs can write SQL. They can scan billions of log lines, correlate traces with metrics, perform root cause analysis, and define SLOs by analyzing historical patterns — all in seconds. They don't need dashboards, proprietary query languages, or pre-built visualizations. Give an LLM access to raw telemetry in an open format and a SQL interface, and it replicates what took observability platforms years and thousands of engineers to build.
+
+The emerging stack looks like this:
+
+```
+OpenTelemetry SDKs → Commodity columnar storage → AI agent
+```
+
+Everything in between — the dashboards, the query builders, the alert rule editors, the visualization layers — becomes optional middleware. Not immediately worthless, but structurally threatened.
+
+### What gets replaced
+
+Traditional observability platforms provide value through:
+
+- **Dashboards** → AI generates purpose-built visualizations on demand, used for a single investigation, then discarded. Persistent dashboards are artifacts of human cognitive limitation, not engineering necessity.
+- **Query languages** → AI writes SQL (or whatever the storage engine speaks). Proprietary query languages like LogQL, PromQL, and SPL become friction, not features.
+- **Alert rules** → AI performs continuous inference against raw data, identifying anomalies contextually rather than through static thresholds that humans forgot to update.
+- **Root cause analysis** → AI traces causality across all three signal types natively, joining traces to logs to metrics without requiring humans to manually correlate.
+- **SLO definition** → AI analyzes historical patterns, understands user impact, and sets thresholds that actually reflect system behavior rather than guesses.
+
+### What remains
+
+Ingest and store. That's it. You need something to receive telemetry and something to persist it in a queryable format. Everything above that layer is intelligence — and intelligence is exactly what LLMs do.
+
+**otelite is a proof of concept for this thesis.** It is the minimal backend an AI agent needs to do observability: receive OTLP, write Parquet, expose SQL. No dashboards. No query language. No visualization engine. Just structured data and a query interface that any LLM can use by shelling out to a CLI.
+
+## Design Principles
+
+**OTel-native.** otelite speaks OTLP/HTTP natively — both protobuf and JSON. No proprietary agents, no custom SDKs, no vendor lock-in at the collection layer. If your application is instrumented with OpenTelemetry, otelite accepts it unchanged.
+
+**Parquet-first storage.** Telemetry is flushed to date-partitioned Parquet files. Parquet is columnar, compressed, and universally supported. DuckDB, Spark, Pandas, Polars, and dozens of other tools can read it natively. Your data never gets trapped in a proprietary format.
+
+**SQL is the interface.** Every query goes through DuckDB's SQL engine. This is a deliberate choice — SQL is the most widely understood query language on earth, and more importantly, it's the language LLMs are best at generating. No proprietary DSL to learn, no query builder to click through.
+
+**CLI-first, agent-friendly.** otelite is designed to be called from a shell. An LLM agent investigating an incident can shell out to `otelite query`, get structured JSON back, reason about the results, and issue follow-up queries. The entire diagnostic loop — from anomaly detection to root cause analysis — can happen programmatically without a human touching a browser.
+
+**Single binary, zero dependencies.** `go build` and you have everything. No databases to run, no message queues to configure, no clusters to manage. This matters for local development, CI/CD pipelines, edge deployments, and anywhere you want telemetry without the overhead of a platform.
+
+**Nothing is dropped.** All OTLP fields are preserved in the Parquet schema. Resource attributes, scope metadata, span events, links, exemplars — everything. The schema is wide because the data model is rich, and AI agents can use all of it.
+
+## Architecture
+
+```
+┌──────────────────────┐
+│   OTel-instrumented  │
+│     applications     │
+└──────────┬───────────┘
+           │ OTLP/HTTP (protobuf or JSON)
+           ▼
+┌──────────────────────┐
+│    otelite serve     │
+│                      │
+│  ┌────────────────┐  │
+│  │ OTLP Receiver  │  │
+│  │ /v1/traces     │  │
+│  │ /v1/logs       │  │
+│  │ /v1/metrics    │  │
+│  └───────┬────────┘  │
+│          ▼           │
+│  ┌────────────────┐  │
+│  │ Memory Buffer  │  │
+│  │ + Flush Timer  │  │
+│  └───────┬────────┘  │
+│          ▼           │
+│  ┌────────────────┐  │
+│  │ Parquet Writer │  │
+│  └────────────────┘  │
+└──────────────────────┘
+           │
+           ▼
+┌──────────────────────┐
+│   data/              │
+│   ├── traces/        │
+│   │   └── YYYY-MM-DD │
+│   ├── logs/          │
+│   │   └── YYYY-MM-DD │
+│   └── metrics/       │
+│       └── YYYY-MM-DD │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│   otelite query      │
+│   otelite traces     │
+│   otelite logs       │     ◄── LLM agents shell out here
+│   otelite metrics    │
+│                      │
+│  ┌────────────────┐  │
+│  │ Embedded       │  │
+│  │ DuckDB         │  │
+│  │ (Parquet glob) │  │
+│  └────────────────┘  │
+└──────────────────────┘
+```
+
 ## Install
 
 ```bash
-go install github.com/davidhope/otelite/cmd/otelite@latest
+go install github.com/davidgeorgehope/otelite/cmd/otelite@latest
 ```
 
 Or build from source:
 
 ```bash
+git clone https://github.com/davidgeorgehope/otelite.git
+cd otelite
 go build -o otelite ./cmd/otelite/
 ```
 
@@ -93,6 +202,67 @@ otelite traces --since 30m --format table
 otelite logs --severity error --format csv
 ```
 
+## Agent Integration
+
+otelite is built for LLM agents. Here's how an agent might investigate an incident:
+
+```bash
+# Step 1: What services are reporting?
+otelite services --format json
+
+# Step 2: Any errors in the last hour?
+otelite query "
+  SELECT service_name, count(*) as error_count
+  FROM traces
+  WHERE status_code = 'STATUS_CODE_ERROR'
+    AND start_time >= epoch_us(now() - INTERVAL '1 hour')
+  GROUP BY service_name
+  ORDER BY error_count DESC
+" --format json
+
+# Step 3: What's failing in the worst service?
+otelite query "
+  SELECT span_name, count(*) as failures, avg(duration_ms) as avg_duration
+  FROM traces
+  WHERE service_name = 'payment-service'
+    AND status_code = 'STATUS_CODE_ERROR'
+    AND start_time >= epoch_us(now() - INTERVAL '1 hour')
+  GROUP BY span_name
+  ORDER BY failures DESC
+" --format json
+
+# Step 4: Get a specific failing trace
+otelite query "
+  SELECT span_name, parent_span_id, duration_ms, status_code, attributes
+  FROM traces
+  WHERE trace_id = '...'
+  ORDER BY start_time
+" --format json
+
+# Step 5: Correlate with logs
+otelite query "
+  SELECT timestamp, severity_text, body
+  FROM logs
+  WHERE trace_id = '...'
+  ORDER BY timestamp
+" --format json
+
+# Step 6: Check if this is a latency regression
+otelite query "
+  SELECT metric_name, service_name,
+         sum / count as avg_ms, max as max_ms
+  FROM metrics
+  WHERE metric_name = 'http.request.duration'
+    AND service_name = 'payment-service'
+  ORDER BY timestamp DESC
+  LIMIT 20
+" --format json
+```
+
+Every step returns structured JSON. The agent reasons about each result and decides what to query next. No dashboards opened. No humans clicking through UIs. No context-switching between tabs. Just an AI systematically narrowing from "something's wrong" to "here's the root cause and here's the evidence."
+
+This is what observability looks like when the consumer of telemetry is an LLM, not a human staring at a screen.
+
 ## Schemas
 
 ### Traces
@@ -166,11 +336,7 @@ otelite logs --severity error --format csv
 | is_monotonic | bool | Whether a sum is monotonic |
 | aggregation_temporality | string | DELTA or CUMULATIVE |
 
-## Sending telemetry
-
-Point any OpenTelemetry SDK or collector at `http://localhost:4318` using the OTLP/HTTP exporter. All three signal types are supported.
-
-## Storage layout
+## Storage Layout
 
 ```
 data/
@@ -187,7 +353,30 @@ data/
 
 Files are date-partitioned and named by minute. DuckDB auto-discovers all Parquet files via glob at query time. Nothing is dropped — all OTLP fields are preserved.
 
-## Example queries
+## Sending Telemetry
+
+Point any OpenTelemetry SDK or collector at `http://localhost:4318` using the OTLP/HTTP exporter. All three signal types are supported.
+
+Example OTel Collector config:
+
+```yaml
+exporters:
+  otlphttp:
+    endpoint: http://localhost:4318
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      exporters: [otlphttp]
+    logs:
+      exporters: [otlphttp]
+    metrics:
+      exporters: [otlphttp]
+```
+
+## Example Queries
 
 ```sql
 -- Slowest spans in the last hour
@@ -240,3 +429,23 @@ JOIN logs l ON t.trace_id = l.trace_id AND t.span_id = l.span_id
 WHERE t.status_code = 'STATUS_CODE_ERROR'
 ORDER BY t.start_time DESC;
 ```
+
+## The Bigger Picture
+
+otelite isn't trying to be Datadog. It's not trying to be Grafana. It's not trying to be a platform at all.
+
+It's an answer to a question: *What's the minimum viable backend when the consumer of telemetry is an AI agent instead of a human?
+
+The answer turns out to be surprisingly small. An OTLP receiver, a Parquet writer, and a SQL engine. That's the whole thing. Everything observability platforms spent a decade building on top of that foundation — the dashboards, the query builders, the alerting engines, the visualization layers — was scaffolding for human cognition. Necessary scaffolding, when humans were the ones interpreting telemetry. But scaffolding nonetheless.
+
+When an LLM can write SQL, read structured output, reason about distributed systems, and iterate on queries faster than any human can click through a UI — the scaffolding becomes overhead.
+
+This isn't a prediction about the distant future. The pieces exist today. OpenTelemetry standardized collection. Parquet and DuckDB commoditized storage and query. LLMs can do the reasoning. otelite just wires them together in the simplest possible way and gets out of the road.
+
+## Status
+
+Early stage. The core ingest → store → query loop works. Contributions welcome.
+
+## License
+
+MIT
