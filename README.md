@@ -14,7 +14,7 @@ That bundle is coming apart.
 
 ### The forces at work
 
-**From below, storage is commoditizing.** OpenTelemetry standardized the wire format. Parquet and Iceberg standardized columnar storage. DuckDB, ClickHouse, and object stores like S3 made it trivially cheap to store and query telemetry at scale. The marginal cost of storing a GB of logs is collapsing toward $0.023/month. When storage is a commodity, charging $2.50/GB for ingestion becomes indefensible — and enterprises are noticing. Elastic's own research shows 96% of organizations are actively taking steps to control observability costs, with 70% focused on optimizing existing spend rather than expanding.
+**From below, storage is commoditizing.** OpenTelemetry standardized the wire format. Parquet and Iceberg standardized columnar storage. DuckDB, ClickHouse, and object stores like S3 made it trivially cheap to store and query telemetry at scale. The marginal cost of storing a GB of logs is collapsing toward $0.023/month. When storage is a commodity, charging $2.50/GB for ingestion becomes indefensible — and enterprises are noticing. Research shows 96% of organizations are actively taking steps to control observability costs, with 70% focused on optimizing existing spend rather than expanding.
 
 **From above, AI is eating the intelligence layer.** LLMs can write SQL. They can scan billions of log lines, correlate traces with metrics, perform root cause analysis, and define SLOs by analyzing historical patterns — all in seconds. They don't need dashboards, proprietary query languages, or pre-built visualizations. Give an LLM access to raw telemetry in an open format and a SQL interface, and it replicates what took observability platforms years and thousands of engineers to build.
 
