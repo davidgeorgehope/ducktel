@@ -6,7 +6,7 @@ Single binary. No external dependencies. Designed for LLM agents to shell out to
 
 ## Why This Exists
 
-The observability industry is undergoing a structural collapse. Not a market correction — a fundamental compression of the value chain that will reshape how software is monitored and debugged.
+The observability industry is undergoing a huge disruption. A fundamental compression of the value chain that will reshape how software is monitored and debugged.
 
 For the past decade, observability platforms have monetized three layers: **ingestion** (getting telemetry data in), **storage** (keeping it queryable), and **intelligence** (helping humans understand it). Vendors like Datadog, Dynatrace, and Splunk built billion-dollar businesses by bundling all three behind proprietary formats, query languages, and dashboards.
 
