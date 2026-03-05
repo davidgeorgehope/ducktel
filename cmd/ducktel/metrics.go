@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/davidhope/otelite/internal/cli"
-	"github.com/davidhope/otelite/internal/query"
+	"github.com/davidgeorgehope/ducktel/internal/cli"
+	"github.com/davidgeorgehope/ducktel/internal/query"
 )
 
 func metricsCmd() *cobra.Command {

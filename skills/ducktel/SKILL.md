@@ -1,14 +1,14 @@
 ---
-name: otelite
+name: ducktel
 description: >
-  Work with otelite — a lightweight, single-binary OpenTelemetry backend for LLM agent diagnostics.
-  Use when querying OTLP traces/logs/metrics via the otelite CLI, writing DuckDB SQL against Parquet-stored
-  telemetry, diagnosing issues from OTel data, developing the otelite Go codebase, or running the OTLP receiver.
-  TRIGGER when: code imports otelite packages, user mentions otelite CLI commands (serve, query, traces, logs,
-  metrics, schema, services), or user works with the otelite project directory.
+  Work with ducktel — a lightweight, single-binary OpenTelemetry backend for LLM agent diagnostics.
+  Use when querying OTLP traces/logs/metrics via the ducktel CLI, writing DuckDB SQL against Parquet-stored
+  telemetry, diagnosing issues from OTel data, developing the ducktel Go codebase, or running the OTLP receiver.
+  TRIGGER when: code imports ducktel packages, user mentions ducktel CLI commands (serve, query, traces, logs,
+  metrics, schema, services), or user works with the ducktel project directory.
 ---
 
-# otelite
+# ducktel
 
 A lightweight, single-binary OpenTelemetry backend. Receives OTLP/HTTP, stores to Parquet, queries via embedded DuckDB.
 
@@ -17,11 +17,11 @@ A lightweight, single-binary OpenTelemetry backend. Receives OTLP/HTTP, stores t
 ```
 OTel-instrumented apps
     ↓ OTLP/HTTP (protobuf or JSON)
-otelite serve  (receiver → buffer → Parquet writer)
+ducktel serve  (receiver → buffer → Parquet writer)
     ↓
 data/{traces,logs,metrics}/YYYY-MM-DD/HH-MM.parquet
     ↓
-otelite query/traces/logs/metrics  (embedded DuckDB)
+ducktel query/traces/logs/metrics  (embedded DuckDB)
     ↓
 JSON / table / CSV output → LLM agents or humans
 ```
@@ -30,28 +30,28 @@ JSON / table / CSV output → LLM agents or humans
 
 All commands accept `--data-dir` (default: `./data`) and `--format json|table|csv` (default: `json`).
 
-### `otelite serve`
+### `ducktel serve`
 
 Start the OTLP HTTP receiver.
 
 ```bash
-otelite serve                          # default: port 4318, flush every 30s
-otelite serve --port 9090              # custom port
-otelite serve --flush-interval 10s     # flush every 10 seconds
+ducktel serve                          # default: port 4318, flush every 30s
+ducktel serve --port 9090              # custom port
+ducktel serve --flush-interval 10s     # flush every 10 seconds
 ```
 
 Endpoints: `POST /v1/traces`, `POST /v1/logs`, `POST /v1/metrics`, `GET /` (health).
 
-### `otelite query [sql]`
+### `ducktel query [sql]`
 
 Execute raw DuckDB SQL against the `traces`, `logs`, or `metrics` views.
 
 ```bash
-otelite query "SELECT * FROM traces LIMIT 5"
-otelite query "SELECT service_name, count(*) FROM traces GROUP BY 1" --format table
+ducktel query "SELECT * FROM traces LIMIT 5"
+ducktel query "SELECT service_name, count(*) FROM traces GROUP BY 1" --format table
 ```
 
-### `otelite traces`
+### `ducktel traces`
 
 Query traces with convenience filters.
 
@@ -62,7 +62,7 @@ Query traces with convenience filters.
 | `--status` | Filter by status: error, ok, unset | `--status error` |
 | `--limit` | Max spans (default: 20) | `--limit 100` |
 
-### `otelite logs`
+### `ducktel logs`
 
 Query logs with convenience filters.
 
@@ -74,7 +74,7 @@ Query logs with convenience filters.
 | `--search` | Case-insensitive body text search | `--search "timeout"` |
 | `--limit` | Max logs (default: 50) | `--limit 200` |
 
-### `otelite metrics`
+### `ducktel metrics`
 
 Query metrics with convenience filters.
 
@@ -86,11 +86,11 @@ Query metrics with convenience filters.
 | `--type` | Filter: gauge, sum, histogram, summary | `--type histogram` |
 | `--limit` | Max points (default: 50) | `--limit 100` |
 
-### `otelite schema [view]`
+### `ducktel schema [view]`
 
 Show column names and types. Default view: `traces`. Valid: `traces`, `logs`, `metrics`.
 
-### `otelite services`
+### `ducktel services`
 
 List distinct service names from traces.
 

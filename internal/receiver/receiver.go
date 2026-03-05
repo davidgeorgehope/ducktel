@@ -20,7 +20,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/davidhope/otelite/internal/writer"
+	"github.com/davidgeorgehope/ducktel/internal/writer"
 )
 
 type Consumer interface {

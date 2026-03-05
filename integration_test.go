@@ -1,4 +1,4 @@
-package otelite_test
+package ducktel_test
 
 import (
 	"bytes"
@@ -19,15 +19,15 @@ import (
 	tracev1 "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/davidhope/otelite/internal/query"
-	"github.com/davidhope/otelite/internal/receiver"
-	"github.com/davidhope/otelite/internal/writer"
+	"github.com/davidgeorgehope/ducktel/internal/query"
+	"github.com/davidgeorgehope/ducktel/internal/receiver"
+	"github.com/davidgeorgehope/ducktel/internal/writer"
 )
 
 func startTestServer(t *testing.T) (string, *writer.Writer, func()) {
 	t.Helper()
 
-	dataDir, err := os.MkdirTemp("", "otelite-test-*")
+	dataDir, err := os.MkdirTemp("", "ducktel-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}

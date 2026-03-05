@@ -3,27 +3,31 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/davidhope/otelite/internal/cli"
-	"github.com/davidhope/otelite/internal/query"
+	"github.com/davidgeorgehope/ducktel/internal/cli"
+	"github.com/davidgeorgehope/ducktel/internal/query"
 )
 
-func servicesCmd() *cobra.Command {
+func queryCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "services",
-		Short: "List distinct service names",
+		Use:   "query [sql]",
+		Short: "Execute a SQL query against traces",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			sql := strings.Join(args, " ")
+
 			engine, err := query.Open(dataDir)
 			if err != nil {
 				return fmt.Errorf("opening query engine: %w", err)
 			}
 			defer engine.Close()
 
-			results, columns, err := engine.Query("SELECT DISTINCT service_name FROM traces ORDER BY 1")
+			results, columns, err := engine.Query(sql)
 			if err != nil {
-				return fmt.Errorf("querying services: %w", err)
+				return fmt.Errorf("query failed: %w", err)
 			}
 
 			return cli.FormatResults(os.Stdout, results, columns, format)

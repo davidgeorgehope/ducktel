@@ -1,4 +1,4 @@
-# otelite
+# ducktel
 
 A lightweight local OpenTelemetry backend. Receives OTLP traces, logs, and metrics over HTTP, stores them as partitioned Parquet files, and makes them queryable via embedded DuckDB through a CLI.
 
@@ -40,17 +40,17 @@ Traditional observability platforms provide value through:
 
 Ingest and store. That's it. You need something to receive telemetry and something to persist it in a queryable format. Everything above that layer is intelligence — and intelligence is exactly what LLMs do.
 
-**otelite is a proof of concept for this thesis.** It is the minimal backend an AI agent needs to do observability: receive OTLP, write Parquet, expose SQL. No dashboards. No query language. No visualization engine. Just structured data and a query interface that any LLM can use by shelling out to a CLI.
+**ducktel is a proof of concept for this thesis.** It is the minimal backend an AI agent needs to do observability: receive OTLP, write Parquet, expose SQL. No dashboards. No query language. No visualization engine. Just structured data and a query interface that any LLM can use by shelling out to a CLI.
 
 ## Design Principles
 
-**OTel-native.** otelite speaks OTLP/HTTP natively — both protobuf and JSON. No proprietary agents, no custom SDKs, no vendor lock-in at the collection layer. If your application is instrumented with OpenTelemetry, otelite accepts it unchanged.
+**OTel-native.** ducktel speaks OTLP/HTTP natively — both protobuf and JSON. No proprietary agents, no custom SDKs, no vendor lock-in at the collection layer. If your application is instrumented with OpenTelemetry, ducktel accepts it unchanged.
 
 **Parquet-first storage.** Telemetry is flushed to date-partitioned Parquet files. Parquet is columnar, compressed, and universally supported. DuckDB, Spark, Pandas, Polars, and dozens of other tools can read it natively. Your data never gets trapped in a proprietary format.
 
 **SQL is the interface.** Every query goes through DuckDB's SQL engine. This is a deliberate choice — SQL is the most widely understood query language on earth, and more importantly, it's the language LLMs are best at generating. No proprietary DSL to learn, no query builder to click through.
 
-**CLI-first, agent-friendly.** otelite is designed to be called from a shell. An LLM agent investigating an incident can shell out to `otelite query`, get structured JSON back, reason about the results, and issue follow-up queries. The entire diagnostic loop — from anomaly detection to root cause analysis — can happen programmatically without a human touching a browser.
+**CLI-first, agent-friendly.** ducktel is designed to be called from a shell. An LLM agent investigating an incident can shell out to `ducktel query`, get structured JSON back, reason about the results, and issue follow-up queries. The entire diagnostic loop — from anomaly detection to root cause analysis — can happen programmatically without a human touching a browser.
 
 **Single binary, zero dependencies.** `go build` and you have everything. No databases to run, no message queues to configure, no clusters to manage. This matters for local development, CI/CD pipelines, edge deployments, and anywhere you want telemetry without the overhead of a platform.
 
@@ -66,7 +66,7 @@ Ingest and store. That's it. You need something to receive telemetry and somethi
            │ OTLP/HTTP (protobuf or JSON)
            ▼
 ┌──────────────────────┐
-│    otelite serve     │
+│    ducktel serve     │
 │                      │
 │  ┌────────────────┐  │
 │  │ OTLP Receiver  │  │
@@ -98,10 +98,10 @@ Ingest and store. That's it. You need something to receive telemetry and somethi
            │
            ▼
 ┌──────────────────────┐
-│   otelite query      │
-│   otelite traces     │
-│   otelite logs       │     ◄── LLM agents shell out here
-│   otelite metrics    │
+│   ducktel query      │
+│   ducktel traces     │
+│   ducktel logs       │     ◄── LLM agents shell out here
+│   ducktel metrics    │
 │                      │
 │  ┌────────────────┐  │
 │  │ Embedded       │  │
@@ -114,15 +114,15 @@ Ingest and store. That's it. You need something to receive telemetry and somethi
 ## Install
 
 ```bash
-go install github.com/davidgeorgehope/otelite/cmd/otelite@latest
+go install github.com/davidgeorgehope/ducktel/cmd/ducktel@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/davidgeorgehope/otelite.git
-cd otelite
-go build -o otelite ./cmd/otelite/
+git clone https://github.com/davidgeorgehope/ducktel.git
+cd ducktel
+go build -o ducktel ./cmd/ducktel/
 ```
 
 ## Usage
@@ -130,7 +130,7 @@ go build -o otelite ./cmd/otelite/
 ### Start the collector
 
 ```bash
-otelite serve
+ducktel serve
 ```
 
 Listens on `:4318` for OTLP/HTTP (protobuf and JSON). Accepts all three signal types:
@@ -154,43 +154,43 @@ Options:
 Run arbitrary SQL against any signal type:
 
 ```bash
-otelite query "SELECT service_name, span_name, duration_ms FROM traces ORDER BY duration_ms DESC LIMIT 10"
-otelite query "SELECT severity_text, body FROM logs WHERE severity_text = 'ERROR'"
-otelite query "SELECT metric_name, value_double FROM metrics WHERE metric_type = 'gauge'"
+ducktel query "SELECT service_name, span_name, duration_ms FROM traces ORDER BY duration_ms DESC LIMIT 10"
+ducktel query "SELECT severity_text, body FROM logs WHERE severity_text = 'ERROR'"
+ducktel query "SELECT metric_name, value_double FROM metrics WHERE metric_type = 'gauge'"
 ```
 
 ### List services
 
 ```bash
-otelite services
+ducktel services
 ```
 
 ### Browse traces
 
 ```bash
-otelite traces --service my-api --since 1h --status error --limit 50
+ducktel traces --service my-api --since 1h --status error --limit 50
 ```
 
 ### Browse logs
 
 ```bash
-otelite logs --service my-api --since 1h --severity error
-otelite logs --search "timeout" --limit 100
+ducktel logs --service my-api --since 1h --severity error
+ducktel logs --search "timeout" --limit 100
 ```
 
 ### Browse metrics
 
 ```bash
-otelite metrics --service my-api --name http.request.duration --type histogram
-otelite metrics --since 30m
+ducktel metrics --service my-api --name http.request.duration --type histogram
+ducktel metrics --since 30m
 ```
 
 ### Show schema
 
 ```bash
-otelite schema traces
-otelite schema logs
-otelite schema metrics
+ducktel schema traces
+ducktel schema logs
+ducktel schema metrics
 ```
 
 ### Output formats
@@ -198,20 +198,20 @@ otelite schema metrics
 All query commands support `--format json` (default), `--format table`, or `--format csv`:
 
 ```bash
-otelite traces --since 30m --format table
-otelite logs --severity error --format csv
+ducktel traces --since 30m --format table
+ducktel logs --severity error --format csv
 ```
 
 ## Agent Integration
 
-otelite is built for LLM agents. Here's how an agent might investigate an incident:
+ducktel is built for LLM agents. Here's how an agent might investigate an incident:
 
 ```bash
 # Step 1: What services are reporting?
-otelite services --format json
+ducktel services --format json
 
 # Step 2: Any errors in the last hour?
-otelite query "
+ducktel query "
   SELECT service_name, count(*) as error_count
   FROM traces
   WHERE status_code = 'STATUS_CODE_ERROR'
@@ -221,7 +221,7 @@ otelite query "
 " --format json
 
 # Step 3: What's failing in the worst service?
-otelite query "
+ducktel query "
   SELECT span_name, count(*) as failures, avg(duration_ms) as avg_duration
   FROM traces
   WHERE service_name = 'payment-service'
@@ -232,7 +232,7 @@ otelite query "
 " --format json
 
 # Step 4: Get a specific failing trace
-otelite query "
+ducktel query "
   SELECT span_name, parent_span_id, duration_ms, status_code, attributes
   FROM traces
   WHERE trace_id = '...'
@@ -240,7 +240,7 @@ otelite query "
 " --format json
 
 # Step 5: Correlate with logs
-otelite query "
+ducktel query "
   SELECT timestamp, severity_text, body
   FROM logs
   WHERE trace_id = '...'
@@ -248,7 +248,7 @@ otelite query "
 " --format json
 
 # Step 6: Check if this is a latency regression
-otelite query "
+ducktel query "
   SELECT metric_name, service_name,
          sum / count as avg_ms, max as max_ms
   FROM metrics
@@ -432,7 +432,7 @@ ORDER BY t.start_time DESC;
 
 ## The Bigger Picture
 
-otelite isn't trying to be Datadog. It's not trying to be Grafana. It's not trying to be a platform at all.
+ducktel isn't trying to be Datadog. It's not trying to be Grafana. It's not trying to be a platform at all.
 
 It's an answer to a question: *What's the minimum viable backend when the consumer of telemetry is an AI agent instead of a human?
 
@@ -440,7 +440,7 @@ The answer turns out to be surprisingly small. An OTLP receiver, a Parquet write
 
 When an LLM can write SQL, read structured output, reason about distributed systems, and iterate on queries faster than any human can click through a UI — the scaffolding becomes overhead.
 
-This isn't a prediction about the distant future. The pieces exist today. OpenTelemetry standardized collection. Parquet and DuckDB commoditized storage and query. LLMs can do the reasoning. otelite just wires them together in the simplest possible way and gets out of the road.
+This isn't a prediction about the distant future. The pieces exist today. OpenTelemetry standardized collection. Parquet and DuckDB commoditized storage and query. LLMs can do the reasoning. ducktel just wires them together in the simplest possible way and gets out of the road.
 
 ## Status
 

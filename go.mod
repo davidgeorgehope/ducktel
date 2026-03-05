@@ -1,4 +1,4 @@
-module github.com/davidhope/otelite
+module github.com/davidgeorgehope/ducktel
 
 go 1.25.3
 

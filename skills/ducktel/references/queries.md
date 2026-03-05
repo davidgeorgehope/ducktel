@@ -1,6 +1,6 @@
-# otelite SQL Query Patterns
+# ducktel SQL Query Patterns
 
-All queries run via `otelite query "SQL"` or the embedded DuckDB engine. Three views: `traces`, `logs`, `metrics`.
+All queries run via `ducktel query "SQL"` or the embedded DuckDB engine. Three views: `traces`, `logs`, `metrics`.
 
 ## Trace Queries
 
@@ -146,20 +146,20 @@ Systematic investigation pattern for LLM agents:
 
 ```bash
 # Step 1: What services exist?
-otelite services --format json
+ducktel services --format json
 
 # Step 2: Where are the errors?
-otelite query "SELECT service_name, count(*) FILTER (WHERE status_code = 'STATUS_CODE_ERROR') AS errors, count(*) AS total FROM traces GROUP BY 1 ORDER BY errors DESC" --format json
+ducktel query "SELECT service_name, count(*) FILTER (WHERE status_code = 'STATUS_CODE_ERROR') AS errors, count(*) AS total FROM traces GROUP BY 1 ORDER BY errors DESC" --format json
 
 # Step 3: Drill into error spans for top service
-otelite traces --service <NAME> --status error --limit 10
+ducktel traces --service <NAME> --status error --limit 10
 
 # Step 4: Get a trace waterfall
-otelite query "SELECT span_name, duration_ms, parent_span_id FROM traces WHERE trace_id = '<ID>' ORDER BY start_time"
+ducktel query "SELECT span_name, duration_ms, parent_span_id FROM traces WHERE trace_id = '<ID>' ORDER BY start_time"
 
 # Step 5: Correlate with logs
-otelite query "SELECT severity_text, body FROM logs WHERE trace_id = '<ID>' ORDER BY timestamp"
+ducktel query "SELECT severity_text, body FROM logs WHERE trace_id = '<ID>' ORDER BY timestamp"
 
 # Step 6: Check metrics for the service
-otelite metrics --service <NAME> --since 1h
+ducktel metrics --service <NAME> --since 1h
 ```

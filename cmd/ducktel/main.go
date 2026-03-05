@@ -14,9 +14,9 @@ var (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "otelite",
+		Use:   "ducktel",
 		Short: "Lightweight local OpenTelemetry backend",
-		Long:  "otelite receives OTLP traces, logs, and metrics over HTTP, stores them as Parquet files, and makes them queryable via DuckDB.",
+		Long:  "ducktel receives OTLP traces, logs, and metrics over HTTP, stores them as Parquet files, and makes them queryable via DuckDB.",
 	}
 
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "./data", "Directory for trace data storage")

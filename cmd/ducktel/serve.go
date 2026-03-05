@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/davidhope/otelite/internal/receiver"
-	"github.com/davidhope/otelite/internal/writer"
+	"github.com/davidgeorgehope/ducktel/internal/receiver"
+	"github.com/davidgeorgehope/ducktel/internal/writer"
 )
 
 func serveCmd() *cobra.Command {

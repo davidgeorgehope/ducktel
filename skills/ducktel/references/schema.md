@@ -1,4 +1,4 @@
-# otelite Schema Reference
+# ducktel Schema Reference
 
 ## traces
 

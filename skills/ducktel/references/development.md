@@ -1,9 +1,9 @@
-# otelite Development Guide
+# ducktel Development Guide
 
 ## Project Structure
 
 ```
-cmd/otelite/
+cmd/ducktel/
   main.go           # Cobra root command, global flags (--data-dir, --format)
   serve.go          # OTLP HTTP receiver command
   query.go          # Raw SQL query command
@@ -49,7 +49,7 @@ type Consumer interface {
 ## Building
 
 ```bash
-go build -o otelite ./cmd/otelite
+go build -o ducktel ./cmd/ducktel
 ```
 
 Requires CGo for DuckDB bindings. Ensure a C compiler is available (gcc/clang).
@@ -85,7 +85,7 @@ Integration tests (`integration_test.go`) spin up a real receiver and writer, se
 
 ## Adding a New CLI Subcommand
 
-1. Create `cmd/otelite/<name>.go` following the pattern in `traces.go`
+1. Create `cmd/ducktel/<name>.go` following the pattern in `traces.go`
 2. Register it in `main.go` with `rootCmd.AddCommand(<name>Cmd())`
 3. Use the `query.Engine` for data access and `cli.FormatResults` for output
 
