@@ -16,7 +16,6 @@ type Query struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description,omitempty"`
 	SQL         string    `json:"sql"`
-	Schedule    string    `json:"schedule,omitempty"` // hint for the agent: "every 60s", "every 5m", etc.
 	Tags        []string  `json:"tags,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`

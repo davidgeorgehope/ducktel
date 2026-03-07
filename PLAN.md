@@ -228,7 +228,7 @@ An LLM with access to `ducktel query` should be able to:
 Saved queries are the LLM's periodic checklist. ducktel stores them but never runs them automatically — there is no scheduler, no webhooks, no notification system. The LLM agent runs them on its own heartbeat loop and reasons about the results.
 
 ### CLI Commands
-- `ducktel saved create <name> <sql> [--description] [--schedule] [--tags]`
+- `ducktel saved create <name> <sql> [--description] [--tags]`
 - `ducktel saved list`
 - `ducktel saved show <name>`
 - `ducktel saved run <name>` — execute one, get JSON result

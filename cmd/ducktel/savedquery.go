@@ -34,16 +34,14 @@ func savedQueryCmd() *cobra.Command {
 func savedQueryCreateCmd() *cobra.Command {
 	var (
 		description string
-		schedule    string
 		tags        []string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "create <name> <sql>",
 		Short: "Save a query for periodic execution by an LLM agent",
-		Long: `Save a SQL query with a name. The schedule is a hint for the LLM agent —
-ducktel itself never runs queries automatically. The agent decides when and
-how often to run them, and what to do with the results.`,
+		Long: `Save a SQL query with a name. ducktel never runs queries automatically.
+The agent decides when to run them and what to do with the results.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store := savedquery.NewStore(dataDir)
@@ -51,7 +49,6 @@ how often to run them, and what to do with the results.`,
 				Name:        args[0],
 				Description: description,
 				SQL:         args[1],
-				Schedule:    schedule,
 				Tags:        tags,
 			}
 			if err := store.Save(q); err != nil {
@@ -62,8 +59,7 @@ how often to run them, and what to do with the results.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&description, "description", "", "Human/LLM-readable description of what this query checks")
-	cmd.Flags().StringVar(&schedule, "schedule", "", "Suggested run frequency hint (e.g. 'every 60s', 'every 5m')")
+	cmd.Flags().StringVar(&description, "description", "", "What this query checks")
 	cmd.Flags().StringSliceVar(&tags, "tags", nil, "Tags for categorization (e.g. errors,latency,slo)")
 
 	return cmd
@@ -87,13 +83,12 @@ func savedQueryListCmd() *cobra.Command {
 			}
 
 			// Table format
-			columns := []string{"name", "description", "schedule", "tags", "updated_at"}
+			columns := []string{"name", "description", "tags", "updated_at"}
 			var results []map[string]interface{}
 			for _, q := range queries {
 				results = append(results, map[string]interface{}{
 					"name":        q.Name,
 					"description": q.Description,
-					"schedule":    q.Schedule,
 					"tags":        strings.Join(q.Tags, ","),
 					"updated_at":  q.UpdatedAt.Format(time.RFC3339),
 				})

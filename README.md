@@ -18,7 +18,7 @@ ducktel serve
 ducktel query "SELECT service_name, count(*) as errors FROM traces WHERE status_code = 'STATUS_CODE_ERROR' GROUP BY 1 ORDER BY 2 DESC" --format json
 
 # Agent saves the diagnostic query for continuous monitoring
-ducktel saved create "error-spike" "SELECT ..." --schedule "every 60s"
+ducktel saved create "error-spike" "SELECT ..."
 
 # Agent runs all saved queries on its heartbeat loop
 ducktel saved run-all
@@ -145,14 +145,14 @@ The query that diagnosed a problem becomes the query that catches it next time. 
 ducktel saved create "payment-errors" \
   "SELECT service_name, count(*) as errors FROM traces WHERE service_name = 'payment-service' AND status_code = 'STATUS_CODE_ERROR' AND start_time >= epoch_us(now() - INTERVAL '5 minutes') GROUP BY 1" \
   --description "Payment service errors in last 5 minutes" \
-  --schedule "every 60s" \
+  \
   --tags payment,errors
 
 # Save a latency check too:
 ducktel saved create "p99-latency" \
   "SELECT service_name, span_name, quantile_cont(duration_ms, 0.99) as p99_ms FROM traces GROUP BY 1,2 ORDER BY p99_ms DESC LIMIT 10" \
   --description "Top 10 slowest endpoints by P99" \
-  --schedule "every 5m" \
+  \
   --tags latency
 
 # On the agent's heartbeat loop — one command, all diagnostics:
@@ -228,7 +228,7 @@ ducktel schema traces|logs|metrics
 Manage saved queries (also available as `ducktel sq`).
 
 ```bash
-ducktel saved create <name> <sql> [--description "..."] [--schedule "every 60s"] [--tags a,b]
+ducktel saved create <name> <sql> [--description "..."] [--tags a,b]
 ducktel saved list [--format json|table]
 ducktel saved show <name>
 ducktel saved run <name>
