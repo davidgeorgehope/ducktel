@@ -30,6 +30,7 @@ func main() {
 	rootCmd.AddCommand(logsCmd())
 	rootCmd.AddCommand(metricsCmd())
 	rootCmd.AddCommand(savedQueryCmd())
+	rootCmd.AddCommand(testHarnessCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
