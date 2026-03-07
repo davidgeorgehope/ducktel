@@ -2,11 +2,13 @@
 
 **Observability for AI agents.** Single binary. OTLP in. SQL out.
 
-Your coding agent can write code, run tests, and deploy services. But when something breaks in production, it's blind. It can't check dashboards. It can't click through Grafana. It can't read a flame graph.
+Observability tools were built for humans. Dashboards to stare at. Alert rules to click through. Flame graphs to squint at. That made sense when humans were the ones debugging production.
 
-ducktel gives agents eyes. It receives OpenTelemetry data, stores it as Parquet files, and exposes everything through SQL — the one query language every LLM already knows. An agent shells out to `ducktel query`, gets structured JSON back, and reasons about what's happening in your system.
+But agents are becoming the ones who deploy code, respond to incidents, and manage infrastructure. And the "AI for observability" tools on the market have it backwards — they're building AI teammates for human SREs. Copilots. Chatbots. Natural language wrappers around dashboards that still assume a human is driving.
 
-No dashboards. No UI. No proprietary query language. Just telemetry and SQL.
+**That's the wrong abstraction.** The agent doesn't need a teammate. It needs a tool. Something it can shell out to, get structured data back, and reason about autonomously. No browser. No UI. No human in the loop.
+
+ducktel is that tool. It receives OpenTelemetry data, stores it as Parquet files, and exposes everything through SQL — the one query language every LLM already knows.
 
 ```bash
 # Start collecting telemetry
@@ -22,15 +24,20 @@ ducktel saved create "error-spike" "SELECT ..." --schedule "every 60s"
 ducktel saved run-all
 ```
 
-## Why agents need their own observability tool
+## Why this exists
 
-Observability tools were built for humans — dashboards to look at, alert rules to click through, visualizations to interpret. AI agents don't need any of that. They need:
+Every "AI SRE" product today puts AI inside a human's observability platform. A chatbot in Datadog. A copilot in Grafana. A natural language interface on top of dashboards that were designed for human eyes.
+
+This helps humans. It doesn't help agents.
+
+An agent operating autonomously — deploying, scaling, remediating — needs something fundamentally different:
 
 1. **Telemetry in** — standard OTLP, no vendor lock-in
-2. **SQL out** — structured results they can reason about
-3. **A CLI** — something they can shell out to, not a browser they can't open
+2. **SQL out** — structured results it can reason about programmatically
+3. **A CLI** — something it can shell out to, not a browser it can't open
+4. **Saved queries** — a checklist it runs on its own schedule, not alert rules a human configures
 
-That's what ducktel is. Everything else — the dashboards, the query builders, the alert rule editors — was scaffolding for human cognition. Necessary when humans interpreted telemetry. Optional when an LLM does it.
+ducktel is the observability backend built for that agent. Not a smarter dashboard. Not an AI teammate. A tool.
 
 ## How it works
 
@@ -373,19 +380,25 @@ Date-partitioned Parquet files. DuckDB reads them via glob at query time. Nothin
 
 ## The bigger picture
 
-AI agents are becoming the primary operators of software systems. They deploy code, respond to incidents, scale infrastructure, and manage releases. But the tools they rely on for understanding system health — dashboards, alert UIs, visualization platforms — were designed for humans.
+There are two ways to bring AI into observability:
 
-This creates a gap. The agent can `kubectl apply` but can't interpret a Grafana panel. It can read logs line by line but can't correlate a trace across services through a web UI. It can write perfect PromQL but has no way to execute it without a human-oriented platform in the middle.
+**1. AI as teammate.** Put a chatbot inside Datadog. Add natural language queries to Grafana. Build a copilot that helps SREs navigate dashboards faster. This is what every "AI SRE" startup is doing. It makes existing tools incrementally better for humans.
 
-Observability platforms monetized three layers: **ingestion**, **storage**, and **intelligence**. OpenTelemetry commoditized ingestion. Parquet and DuckDB commoditized storage. LLMs are commoditizing intelligence. What's left is the wiring — and ducktel is that wiring.
+**2. AI as operator.** Give agents their own tools — purpose-built for programmatic access, structured output, and autonomous reasoning. No dashboards because there's no one to look at them. No alert UIs because the agent decides what matters. No visualization layer because the agent doesn't have eyes.
 
-The emerging stack is simple:
+These are fundamentally different products for fundamentally different users. Option 1 optimizes for humans. Option 2 builds for agents.
+
+ducktel is option 2.
+
+The observability stack agents need is simple:
 
 ```
 OpenTelemetry SDKs → Commodity columnar storage → AI agent
 ```
 
-ducktel makes this stack real in a single binary. No platform. No vendor. No lock-in. Just telemetry, SQL, and an agent that knows what to do with the results.
+OpenTelemetry commoditized ingestion. Parquet and DuckDB commoditized storage. LLMs commoditized intelligence. What's missing is the wiring — a tool that connects telemetry to agents without a human-oriented platform in the middle.
+
+That's ducktel. Single binary. No platform. No vendor. No lock-in.
 
 ## Status
 
