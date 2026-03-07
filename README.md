@@ -1,119 +1,50 @@
-# ducktel
+# ducktel 🦆
 
-**The user of this tool is not a human. It's an LLM.**
+**Observability for AI agents.** Single binary. OTLP in. SQL out.
 
-ducktel is a lightweight local OpenTelemetry backend. It receives OTLP traces, logs, and metrics over HTTP, stores them as partitioned Parquet files, and makes them queryable via embedded DuckDB through a CLI.
+Your coding agent can write code, run tests, and deploy services. But when something breaks in production, it's blind. It can't check dashboards. It can't click through Grafana. It can't read a flame graph.
 
-Single binary. No external dependencies. No dashboards. No alerting infrastructure. No webhooks. No notification channels.
+ducktel gives agents eyes. It receives OpenTelemetry data, stores it as Parquet files, and exposes everything through SQL — the one query language every LLM already knows. An agent shells out to `ducktel query`, gets structured JSON back, and reasons about what's happening in your system.
 
-An LLM agent shells out to `ducktel query`, gets structured JSON back, and reasons about the results. The agent *is* the dashboard. The agent *is* the alerting engine. The agent *is* the intelligence layer. Everything ducktel does is designed for that consumer — not for a human staring at a screen.
+No dashboards. No UI. No proprietary query language. Just telemetry and SQL.
 
-## Why This Exists
+```bash
+# Start collecting telemetry
+ducktel serve
 
-The observability industry is undergoing a huge disruption. A fundamental compression of the value chain that will reshape how software is monitored and debugged.
+# Agent investigates an incident
+ducktel query "SELECT service_name, count(*) as errors FROM traces WHERE status_code = 'STATUS_CODE_ERROR' GROUP BY 1 ORDER BY 2 DESC" --format json
 
-For the past decade, observability platforms have monetized three layers: **ingestion** (getting telemetry data in), **storage** (keeping it queryable), and **intelligence** (helping humans understand it). Vendors like Datadog, Dynatrace, and Splunk built billion-dollar businesses by bundling all three behind proprietary formats, query languages, and dashboards.
+# Agent saves the diagnostic query for continuous monitoring
+ducktel saved create "error-spike" "SELECT ..." --schedule "every 60s"
 
-That bundle is coming apart.
-
-### The forces at work
-
-**From below, storage is commoditizing.** OpenTelemetry standardized the wire format. Parquet and Iceberg standardized columnar storage. DuckDB, ClickHouse, and object stores like S3 made it trivially cheap to store and query telemetry at scale. The marginal cost of storing a GB of logs is collapsing toward $0.023/month. When storage is a commodity, charging $2.50/GB for ingestion becomes indefensible — and enterprises are noticing. Research shows 96% of organizations are actively taking steps to control observability costs, with 70% focused on optimizing existing spend rather than expanding.
-
-**From above, AI is eating the intelligence layer.** LLMs can write SQL. They can scan billions of log lines, correlate traces with metrics, perform root cause analysis, and define SLOs by analyzing historical patterns — all in seconds. They don't need dashboards, proprietary query languages, or pre-built visualizations. Give an LLM access to raw telemetry in an open format and a SQL interface, and it replicates what took observability platforms years and thousands of engineers to build.
-
-The emerging stack looks like this:
-
-```
-OpenTelemetry SDKs → Commodity columnar storage → AI agent
+# Agent runs all saved queries on its heartbeat loop
+ducktel saved run-all
 ```
 
-Everything in between — the dashboards, the query builders, the alert rule editors, the visualization layers — becomes optional middleware. Not immediately worthless, but structurally threatened.
+## Why agents need their own observability tool
 
-### What gets replaced
+Observability tools were built for humans — dashboards to look at, alert rules to click through, visualizations to interpret. AI agents don't need any of that. They need:
 
-Traditional observability platforms provide value through:
+1. **Telemetry in** — standard OTLP, no vendor lock-in
+2. **SQL out** — structured results they can reason about
+3. **A CLI** — something they can shell out to, not a browser they can't open
 
-- **Dashboards** → AI generates purpose-built visualizations on demand, used for a single investigation, then discarded. Persistent dashboards are artifacts of human cognitive limitation, not engineering necessity.
-- **Query languages** → AI writes SQL (or whatever the storage engine speaks). Proprietary query languages like LogQL, PromQL, and SPL become friction, not features.
-- **Alert rules** → AI performs continuous inference against raw data, identifying anomalies contextually rather than through static thresholds that humans forgot to update.
-- **Root cause analysis** → AI traces causality across all three signal types natively, joining traces to logs to metrics without requiring humans to manually correlate.
-- **SLO definition** → AI analyzes historical patterns, understands user impact, and sets thresholds that actually reflect system behavior rather than guesses.
+That's what ducktel is. Everything else — the dashboards, the query builders, the alert rule editors — was scaffolding for human cognition. Necessary when humans interpreted telemetry. Optional when an LLM does it.
 
-### What remains
-
-Ingest and store. That's it. You need something to receive telemetry and something to persist it in a queryable format. Everything above that layer is intelligence — and intelligence is exactly what LLMs do.
-
-**ducktel is a proof of concept for this thesis.** It is the minimal backend an AI agent needs to do observability: receive OTLP, write Parquet, expose SQL. No dashboards. No query language. No visualization engine. Just structured data and a query interface that any LLM can use by shelling out to a CLI.
-
-## Design Principles
-
-**OTel-native.** ducktel speaks OTLP/HTTP natively — both protobuf and JSON. No proprietary agents, no custom SDKs, no vendor lock-in at the collection layer. If your application is instrumented with OpenTelemetry, ducktel accepts it unchanged.
-
-**Parquet-first storage.** Telemetry is flushed to date-partitioned Parquet files. Parquet is columnar, compressed, and universally supported. DuckDB, Spark, Pandas, Polars, and dozens of other tools can read it natively. Your data never gets trapped in a proprietary format.
-
-**SQL is the interface.** Every query goes through DuckDB's SQL engine. This is a deliberate choice — SQL is the most widely understood query language on earth, and more importantly, it's the language LLMs are best at generating. No proprietary DSL to learn, no query builder to click through.
-
-**CLI-first, agent-friendly.** ducktel is designed to be called from a shell. An LLM agent investigating an incident can shell out to `ducktel query`, get structured JSON back, reason about the results, and issue follow-up queries. The entire diagnostic loop — from anomaly detection to root cause analysis — can happen programmatically without a human touching a browser.
-
-**Single binary, zero dependencies.** `go build` and you have everything. No databases to run, no message queues to configure, no clusters to manage. This matters for local development, CI/CD pipelines, edge deployments, and anywhere you want telemetry without the overhead of a platform.
-
-**Nothing is dropped.** All OTLP fields are preserved in the Parquet schema. Resource attributes, scope metadata, span events, links, exemplars — everything. The schema is wide because the data model is rich, and AI agents can use all of it.
-
-## Architecture
+## How it works
 
 ```
-┌──────────────────────┐
-│   OTel-instrumented  │
-│     applications     │
-└──────────┬───────────┘
-           │ OTLP/HTTP (protobuf or JSON)
-           ▼
-┌──────────────────────┐
-│    ducktel serve     │
-│                      │
-│  ┌────────────────┐  │
-│  │ OTLP Receiver  │  │
-│  │ /v1/traces     │  │
-│  │ /v1/logs       │  │
-│  │ /v1/metrics    │  │
-│  └───────┬────────┘  │
-│          ▼           │
-│  ┌────────────────┐  │
-│  │ Memory Buffer  │  │
-│  │ + Flush Timer  │  │
-│  └───────┬────────┘  │
-│          ▼           │
-│  ┌────────────────┐  │
-│  │ Parquet Writer │  │
-│  └────────────────┘  │
-└──────────────────────┘
-           │
-           ▼
-┌──────────────────────┐
-│   data/              │
-│   ├── traces/        │
-│   │   └── YYYY-MM-DD │
-│   ├── logs/          │
-│   │   └── YYYY-MM-DD │
-│   └── metrics/       │
-│       └── YYYY-MM-DD │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│   ducktel query      │
-│   ducktel traces     │
-│   ducktel logs       │     ◄── LLM agents shell out here
-│   ducktel metrics    │
-│                      │
-│  ┌────────────────┐  │
-│  │ Embedded       │  │
-│  │ DuckDB         │  │
-│  │ (Parquet glob) │  │
-│  └────────────────┘  │
-└──────────────────────┘
+Your App (OTel SDK)  →  ducktel serve  →  Parquet files on disk
+                                                    ↓
+                         LLM Agent     ←  ducktel query (SQL → JSON)
 ```
+
+1. **Receive** — OTLP/HTTP receiver accepts traces, logs, and metrics on port 4318
+2. **Store** — data is buffered and flushed to date-partitioned Parquet files
+3. **Query** — embedded DuckDB reads Parquet in-place, returns JSON to the agent
+
+No database to manage. No cluster to configure. Just a binary and a directory of files.
 
 ## Install
 
@@ -129,204 +60,239 @@ cd ducktel
 go build -o ducktel ./cmd/ducktel/
 ```
 
-## Usage
-
-### Start the collector
+## Quick start
 
 ```bash
+# Terminal 1: start the collector
 ducktel serve
-```
 
-Listens on `:4318` for OTLP/HTTP (protobuf and JSON). Accepts all three signal types:
+# Terminal 2: generate test data (built-in e-commerce topology)
+ducktel testdata --duration 30s
 
-- `POST /v1/traces`
-- `POST /v1/logs`
-- `POST /v1/metrics`
-
-Data is buffered in memory and flushed to Parquet files under `./data/{traces,logs,metrics}/YYYY-MM-DD/`.
-
-Options:
-
-```
---port            Port to listen on (default 4318)
---flush-interval  How often to flush to disk (default 30s)
---data-dir        Storage directory (default ./data)
-```
-
-### Query with SQL
-
-Run arbitrary SQL against any signal type:
-
-```bash
-ducktel query "SELECT service_name, span_name, duration_ms FROM traces ORDER BY duration_ms DESC LIMIT 10"
-ducktel query "SELECT severity_text, body FROM logs WHERE severity_text = 'ERROR'"
-ducktel query "SELECT metric_name, value_double FROM metrics WHERE metric_type = 'gauge'"
-```
-
-### List services
-
-```bash
+# Terminal 3: query it
 ducktel services
+ducktel query "SELECT service_name, status_code, count(*) FROM traces GROUP BY 1,2 ORDER BY 3 DESC" --format table
 ```
 
-### Browse traces
+## What an agent can do with ducktel
+
+### Investigate an incident
 
 ```bash
-ducktel traces --service my-api --since 1h --status error --limit 50
-```
-
-### Browse logs
-
-```bash
-ducktel logs --service my-api --since 1h --severity error
-ducktel logs --search "timeout" --limit 100
-```
-
-### Browse metrics
-
-```bash
-ducktel metrics --service my-api --name http.request.duration --type histogram
-ducktel metrics --since 30m
-```
-
-### Show schema
-
-```bash
-ducktel schema traces
-ducktel schema logs
-ducktel schema metrics
-```
-
-### Output formats
-
-All query commands support `--format json` (default), `--format table`, or `--format csv`:
-
-```bash
-ducktel traces --since 30m --format table
-ducktel logs --severity error --format csv
-```
-
-### Saved queries
-
-Saved queries are the LLM's checklist — queries worth running periodically. ducktel stores them but never executes them automatically. There is no scheduler, no webhook, no notification system. The LLM agent decides when to run them (on its own heartbeat loop, cron, or whenever it wants) and what to do with the results.
-
-```bash
-# Save a query the agent discovered during an investigation
-ducktel saved create "error-rate-by-service" \
-  "SELECT service_name, count(*) FILTER (WHERE status_code = 'STATUS_CODE_ERROR') * 100.0 / count(*) as error_pct FROM traces WHERE start_time >= epoch_us(now() - INTERVAL '5 minutes') GROUP BY service_name HAVING error_pct > 0" \
-  --description "Error rate by service over last 5 minutes" \
-  --schedule "every 60s" \
-  --tags errors,slo
-
-# Save a latency check
-ducktel saved create "p99-latency" \
-  "SELECT service_name, span_name, quantile_cont(duration_ms, 0.99) as p99_ms FROM traces WHERE start_time >= epoch_us(now() - INTERVAL '10 minutes') GROUP BY service_name, span_name ORDER BY p99_ms DESC LIMIT 10" \
-  --description "Top 10 slowest endpoints by P99 latency" \
-  --schedule "every 5m" \
-  --tags latency
-
-# List all saved queries
-ducktel saved list
-ducktel saved list --format json
-
-# Show a specific query's details
-ducktel saved show "error-rate-by-service"
-
-# Run a single saved query
-ducktel saved run "error-rate-by-service"
-
-# Run ALL saved queries at once — the agent's heartbeat check
-# One command, all diagnostics, structured JSON output
-ducktel saved run-all
-
-# Delete a query that's no longer relevant
-ducktel saved delete "error-rate-by-service"
-```
-
-The `run-all` command is the key primitive. An LLM agent on a heartbeat loop runs `ducktel saved run-all`, gets back a JSON array of all results, and reasons about what needs attention. The investigative query that found a bug today becomes the monitoring query that catches it tomorrow — no translation layer, no alert rule syntax, just SQL.
-
-## Agent Integration
-
-ducktel is built for LLM agents. Here's how an agent might investigate an incident:
-
-```bash
-# Step 1: What services are reporting?
+# What services are reporting?
 ducktel services --format json
 
-# Step 2: Any errors in the last hour?
+# Where are the errors?
 ducktel query "
   SELECT service_name, count(*) as error_count
   FROM traces
   WHERE status_code = 'STATUS_CODE_ERROR'
-    AND start_time >= epoch_us(now() - INTERVAL '1 hour')
   GROUP BY service_name
   ORDER BY error_count DESC
 " --format json
 
-# Step 3: What's failing in the worst service?
+# What's failing?
 ducktel query "
   SELECT span_name, count(*) as failures, avg(duration_ms) as avg_duration
   FROM traces
   WHERE service_name = 'payment-service'
     AND status_code = 'STATUS_CODE_ERROR'
-    AND start_time >= epoch_us(now() - INTERVAL '1 hour')
   GROUP BY span_name
   ORDER BY failures DESC
 " --format json
 
-# Step 4: Get a specific failing trace
+# Trace the root cause
 ducktel query "
-  SELECT span_name, parent_span_id, duration_ms, status_code, attributes
+  SELECT span_name, parent_span_id, duration_ms, status_code
   FROM traces
   WHERE trace_id = '...'
   ORDER BY start_time
 " --format json
 
-# Step 5: Correlate with logs
+# Correlate with logs
 ducktel query "
-  SELECT timestamp, severity_text, body
+  SELECT severity_text, body
   FROM logs
   WHERE trace_id = '...'
   ORDER BY timestamp
 " --format json
 
-# Step 6: Check if this is a latency regression
+# Cross-signal join: error spans with their log messages
 ducktel query "
-  SELECT metric_name, service_name,
-         sum / count as avg_ms, max as max_ms
-  FROM metrics
-  WHERE metric_name = 'http.request.duration'
-    AND service_name = 'payment-service'
-  ORDER BY timestamp DESC
-  LIMIT 20
+  SELECT t.service_name, t.span_name, t.duration_ms, l.body
+  FROM traces t
+  JOIN logs l ON t.trace_id = l.trace_id AND t.span_id = l.span_id
+  WHERE t.status_code = 'STATUS_CODE_ERROR'
+  ORDER BY t.start_time DESC
 " --format json
 ```
 
-Every step returns structured JSON. The agent reasons about each result and decides what to query next. No dashboards opened. No humans clicking through UIs. No context-switching between tabs. Just an AI systematically narrowing from "something's wrong" to "here's the root cause and here's the evidence."
+Every step returns structured JSON. The agent reasons about each result and decides what to query next. No dashboards, no context-switching, no clicking — just systematic investigation.
 
-This is what observability looks like when the consumer of telemetry is an LLM, not a human staring at a screen.
+### Monitor continuously with saved queries
 
-### The diagnostic-to-monitoring loop
-
-The real power of saved queries: the investigative query that diagnosed an incident becomes the monitoring query that prevents the next one. No context switch, no "now go create an alert rule in a different system."
+The query that diagnosed a problem becomes the query that catches it next time. No translation layer, no alert rule syntax — just SQL.
 
 ```bash
-# Agent just diagnosed a payment service issue. Save the query that found it:
-ducktel saved create "payment-error-spike" \
-  "SELECT count(*) as errors FROM traces WHERE service_name = 'payment-service' AND status_code = 'STATUS_CODE_ERROR' AND start_time >= epoch_us(now() - INTERVAL '5 minutes')" \
-  --description "Errors in payment service over 5min window" \
+# Agent found a payment issue. Save the diagnostic query:
+ducktel saved create "payment-errors" \
+  "SELECT service_name, count(*) as errors FROM traces WHERE service_name = 'payment-service' AND status_code = 'STATUS_CODE_ERROR' AND start_time >= epoch_us(now() - INTERVAL '5 minutes') GROUP BY 1" \
+  --description "Payment service errors in last 5 minutes" \
   --schedule "every 60s" \
   --tags payment,errors
 
-# Later, on the agent's heartbeat loop:
+# Save a latency check too:
+ducktel saved create "p99-latency" \
+  "SELECT service_name, span_name, quantile_cont(duration_ms, 0.99) as p99_ms FROM traces GROUP BY 1,2 ORDER BY p99_ms DESC LIMIT 10" \
+  --description "Top 10 slowest endpoints by P99" \
+  --schedule "every 5m" \
+  --tags latency
+
+# On the agent's heartbeat loop — one command, all diagnostics:
 ducktel saved run-all
-# → Agent sees payment-error-spike returned 0 rows. All clear.
-# → Next heartbeat, it returns 47 rows. Agent investigates.
+
+# Manage saved queries
+ducktel saved list
+ducktel saved show "payment-errors"
+ducktel saved run "payment-errors"
+ducktel saved delete "payment-errors"
 ```
+
+`run-all` is the key primitive. The agent runs it on a timer, gets a JSON array of all results, and decides what needs attention. ducktel never runs queries automatically — there's no scheduler, no webhooks, no notification system. The agent is the intelligence layer.
+
+## CLI reference
+
+### `ducktel serve`
+
+Start the OTLP receiver.
+
+```bash
+ducktel serve [--port 4318] [--flush-interval 30s] [--data-dir ./data]
+```
+
+Accepts `POST /v1/traces`, `POST /v1/logs`, `POST /v1/metrics` — protobuf and JSON.
+
+### `ducktel query`
+
+Run arbitrary SQL against traces, logs, or metrics.
+
+```bash
+ducktel query "SELECT ..." [--format json|table|csv] [--data-dir ./data]
+```
+
+### `ducktel services`
+
+List all services that have reported telemetry.
+
+### `ducktel traces`
+
+Browse traces with filters.
+
+```bash
+ducktel traces [--service name] [--since 1h] [--status error] [--limit 50]
+```
+
+### `ducktel logs`
+
+Browse logs with filters.
+
+```bash
+ducktel logs [--service name] [--since 1h] [--severity error] [--search "timeout"]
+```
+
+### `ducktel metrics`
+
+Browse metrics with filters.
+
+```bash
+ducktel metrics [--service name] [--name http.request.duration] [--since 30m]
+```
+
+### `ducktel schema`
+
+Show the schema for any signal type.
+
+```bash
+ducktel schema traces|logs|metrics
+```
+
+### `ducktel saved`
+
+Manage saved queries (also available as `ducktel sq`).
+
+```bash
+ducktel saved create <name> <sql> [--description "..."] [--schedule "every 60s"] [--tags a,b]
+ducktel saved list [--format json|table]
+ducktel saved show <name>
+ducktel saved run <name>
+ducktel saved run-all
+ducktel saved delete <name>
+```
+
+### `ducktel testdata`
+
+Generate synthetic OTLP telemetry for testing.
+
+```bash
+ducktel testdata [--duration 30s] [--trace-rate 2] [--error-rate 0.05] [--endpoint http://localhost:4318]
+
+# Inject failures
+ducktel testdata --scenario "payment-service:error_rate:0.8"
+ducktel testdata --scenario "product-service:latency_spike:5.0"
+
+# Custom topology via JSON config
+ducktel testdata --config topology.json
+```
+
+Default topology: api-gateway → product-service → orders → payments, with Postgres and Redis dependencies.
+
+### Output formats
+
+All commands support `--format json` (default for agents), `--format table` (for humans), or `--format csv`.
+
+## Sending telemetry
+
+Point any OpenTelemetry SDK or collector at `http://localhost:4318`:
+
+```yaml
+# OTel Collector config
+exporters:
+  otlphttp:
+    endpoint: http://localhost:4318
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      exporters: [otlphttp]
+    logs:
+      exporters: [otlphttp]
+    metrics:
+      exporters: [otlphttp]
+```
+
+## Storage
+
+```
+data/
+  traces/
+    2026-03-07/
+      08-30.parquet
+  logs/
+    2026-03-07/
+      08-30.parquet
+  metrics/
+    2026-03-07/
+      08-30.parquet
+```
+
+Date-partitioned Parquet files. DuckDB reads them via glob at query time. Nothing is dropped — all OTLP fields are preserved. Your data is never trapped in a proprietary format.
 
 ## Schemas
 
-### Traces
+<details>
+<summary>Traces</summary>
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -349,7 +315,10 @@ ducktel saved run-all
 | events | string | Span events as JSON array |
 | links | string | Span links as JSON array |
 
-### Logs
+</details>
+
+<details>
+<summary>Logs</summary>
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -368,7 +337,10 @@ ducktel saved run-all
 | flags | uint32 | Log record flags |
 | event_name | string | Event category name |
 
-### Metrics
+</details>
+
+<details>
+<summary>Metrics</summary>
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -397,115 +369,27 @@ ducktel saved run-all
 | is_monotonic | bool | Whether a sum is monotonic |
 | aggregation_temporality | string | DELTA or CUMULATIVE |
 
-## Storage Layout
+</details>
+
+## The bigger picture
+
+AI agents are becoming the primary operators of software systems. They deploy code, respond to incidents, scale infrastructure, and manage releases. But the tools they rely on for understanding system health — dashboards, alert UIs, visualization platforms — were designed for humans.
+
+This creates a gap. The agent can `kubectl apply` but can't interpret a Grafana panel. It can read logs line by line but can't correlate a trace across services through a web UI. It can write perfect PromQL but has no way to execute it without a human-oriented platform in the middle.
+
+Observability platforms monetized three layers: **ingestion**, **storage**, and **intelligence**. OpenTelemetry commoditized ingestion. Parquet and DuckDB commoditized storage. LLMs are commoditizing intelligence. What's left is the wiring — and ducktel is that wiring.
+
+The emerging stack is simple:
 
 ```
-data/
-  traces/
-    2026-03-02/
-      14-30.parquet
-  logs/
-    2026-03-02/
-      14-30.parquet
-  metrics/
-    2026-03-02/
-      14-30.parquet
+OpenTelemetry SDKs → Commodity columnar storage → AI agent
 ```
 
-Files are date-partitioned and named by minute. DuckDB auto-discovers all Parquet files via glob at query time. Nothing is dropped — all OTLP fields are preserved.
-
-## Sending Telemetry
-
-Point any OpenTelemetry SDK or collector at `http://localhost:4318` using the OTLP/HTTP exporter. All three signal types are supported.
-
-Example OTel Collector config:
-
-```yaml
-exporters:
-  otlphttp:
-    endpoint: http://localhost:4318
-    tls:
-      insecure: true
-
-service:
-  pipelines:
-    traces:
-      exporters: [otlphttp]
-    logs:
-      exporters: [otlphttp]
-    metrics:
-      exporters: [otlphttp]
-```
-
-## Example Queries
-
-```sql
--- Slowest spans in the last hour
-SELECT service_name, span_name, duration_ms
-FROM traces
-WHERE start_time >= epoch_us(now() - INTERVAL '1 hour')
-ORDER BY duration_ms DESC
-LIMIT 10;
-
--- Error rate by service
-SELECT service_name,
-       count(*) as total,
-       count(*) FILTER (WHERE status_code = 'STATUS_CODE_ERROR') as errors
-FROM traces
-GROUP BY service_name;
-
--- Trace waterfall
-SELECT span_name, parent_span_id, duration_ms,
-       start_time - min(start_time) OVER (PARTITION BY trace_id) as offset_us
-FROM traces
-WHERE trace_id = '01020304050607080910111213141516'
-ORDER BY start_time;
-
--- Recent error logs
-SELECT timestamp, service_name, body
-FROM logs
-WHERE severity_text = 'ERROR'
-ORDER BY timestamp DESC
-LIMIT 20;
-
--- Logs correlated with a trace
-SELECT severity_text, body
-FROM logs
-WHERE trace_id = '01020304050607080910111213141516'
-ORDER BY timestamp;
-
--- P99 request duration from histograms
-SELECT metric_name, service_name,
-       sum / count as avg_ms,
-       max as max_ms
-FROM metrics
-WHERE metric_name = 'http.request.duration'
-ORDER BY timestamp DESC
-LIMIT 10;
-
--- Cross-signal: find error spans and their logs
-SELECT t.span_name, t.duration_ms, l.body
-FROM traces t
-JOIN logs l ON t.trace_id = l.trace_id AND t.span_id = l.span_id
-WHERE t.status_code = 'STATUS_CODE_ERROR'
-ORDER BY t.start_time DESC;
-```
-
-## The Bigger Picture
-
-ducktel isn't trying to be Datadog. It's not trying to be Grafana. It's not trying to be a platform at all.
-
-It's an answer to a question: *What's the minimum viable backend when the consumer of telemetry is an AI agent instead of a human?
-
-The answer turns out to be surprisingly small. An OTLP receiver, a Parquet writer, and a SQL engine. That's the whole thing. Everything observability platforms spent a decade building on top of that foundation — the dashboards, the query builders, the alerting engines, the visualization layers — was scaffolding for human cognition. Necessary scaffolding, when humans were the ones interpreting telemetry. But scaffolding nonetheless.
-
-When an LLM can write SQL, read structured output, reason about distributed systems, and iterate on queries faster than any human can click through a UI — the scaffolding becomes overhead.
-
-This isn't a prediction about the distant future. The pieces exist today. OpenTelemetry standardized collection. Parquet and DuckDB commoditized storage and query. LLMs can do the reasoning. ducktel just wires them together in the simplest possible way and gets out of the road.
+ducktel makes this stack real in a single binary. No platform. No vendor. No lock-in. Just telemetry, SQL, and an agent that knows what to do with the results.
 
 ## Status
 
-Early stage. The core ingest → store → query loop works. Contributions welcome.
+Early stage. The core ingest → store → query → saved queries loop works. Built-in test harness for generating synthetic data. Contributions welcome.
 
 ## License
 
