@@ -1,0 +1,89 @@
+name: container
+
+# Builds the ducktel image and publishes it to GHCR so it can be pulled
+# directly on a host, without a local toolchain.
+#
+# Tags pushed:
+#   ghcr.io/<owner>/ducktel:latest        default branch only
+#   ghcr.io/<owner>/ducktel:sha-<short>   every build
+#   ghcr.io/<owner>/ducktel:<branch>      on branch pushes
+#
+# Linux/amd64 only: go-duckdb vendors a prebuilt libduckdb.a for linux/amd64
+# (see Containerfile), so there is nothing to cross-compile for arm64.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      # No login on pull_request: fork PRs must never receive registry
+      # credentials, and there is nothing to push for them.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Containerfile
+          platforms: linux/amd64
+          # Build on PRs to prove the image compiles, but never push.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Smoke test the published image: the binary must start and answer
+      # /health. A pushed image that cannot run is worse than no image at all.
+      - name: Smoke test the image
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          IMG="$(echo "${{ steps.meta.outputs.tags }}" | head -1)"
+          cleanup() {
+            docker rm -f ducktel-smoke >/dev/null 2>&1 || true
+            docker volume rm ducktel-smoke-data >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          echo "testing $IMG"
+          docker run -d --name ducktel-smoke -p 4318:4318 --memory=512m \
+            -v ducktel-smoke-data:/data "$IMG" \
+            serve --host 0.0.0.0 --port 4318 --data-dir /data --flush-interval 2s
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4318/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -sf http://localhost:4318/health || { docker logs ducktel-smoke; exit 1; }
+          docker logs ducktel-smoke
