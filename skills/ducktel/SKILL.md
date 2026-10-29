@@ -38,9 +38,41 @@ Start the OTLP HTTP receiver.
 ducktel serve                          # default: port 4318, flush every 30s
 ducktel serve --port 9090              # custom port
 ducktel serve --flush-interval 10s     # flush every 10 seconds
+ducktel serve --buffer-size 5000       # records per signal that force an early flush
+ducktel serve --retention 30d          # delete date-partition directories older than 30 days
 ```
 
 Endpoints: `POST /v1/traces`, `POST /v1/logs`, `POST /v1/metrics`, `GET /` (health).
+
+#### Retention
+
+Off by default — Parquet files accumulate indefinitely unless `--retention` is
+set. When set, an hourly background sweep deletes whole `traces|logs|metrics/
+YYYY-MM-DD` directories older than the window:
+
+```bash
+ducktel serve --retention 30d     # bare day count
+ducktel serve --retention 720h    # or any Go duration
+```
+
+- Day-granular, not per-record: a directory is either kept whole or removed
+  whole. There is no partial-day pruning.
+- **Compaction runs on the same hourly/startup schedule, always** (it does not
+  need `--retention`): each past day's per-flush files merge into one
+  `day.parquet` per signal, chronological order preserved. The current and
+  previous UTC day are never touched, so a merge cannot race the writer. Crash-safe: an existing
+  `day.parquet` means the merge finished, so leftover per-flush files are
+  deleted rather than merged (merging would double rows). This is the
+  structural fix for the "every query opens every file" pathology — a
+  day becomes one file instead of ~2880.
+- A directory name that doesn't parse as `YYYY-MM-DD` is left alone rather
+  than guessed at.
+- Runs once immediately on startup (so a long-stopped process catches up on
+  backlog) and then hourly, independent of `--flush-interval`.
+- Deletions are logged individually (`retention: removed <path> (older than
+  <window>)`), so what got pruned and when is always visible in the process
+  log, not silent.
+
 
 ### `ducktel query [sql]`
 
