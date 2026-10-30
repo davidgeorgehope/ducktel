@@ -1,7 +1,9 @@
 package receiver
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -443,15 +445,145 @@ func unmarshalOTLP(req *http.Request, msg proto.Message) error {
 	case strings.Contains(ct, "application/x-protobuf"), strings.Contains(ct, "application/protobuf"):
 		return proto.Unmarshal(body, msg)
 	case strings.Contains(ct, "application/json"):
-		return protojson.Unmarshal(body, msg)
+		return unmarshalOTLPJSON(body, msg)
 	default:
 		if err := proto.Unmarshal(body, msg); err != nil {
-			if err2 := protojson.Unmarshal(body, msg); err2 != nil {
+			if err2 := unmarshalOTLPJSON(body, msg); err2 != nil {
 				return fmt.Errorf("unsupported content type %q", ct)
 			}
 		}
 		return nil
 	}
+}
+
+// hexIDFields are the OTLP/JSON fields the specification defines as hex. This
+// is an explicit exception to the protobuf JSON mapping, where every bytes
+// field is base64: protojson would decode "0102...0f10" as base64 and produce
+// a different, 24-byte id, so a trace lookup by the id the sender reported
+// would silently find nothing.
+var hexIDFields = map[string]bool{
+	"traceId":      true,
+	"spanId":       true,
+	"parentSpanId": true,
+}
+
+// unmarshalOTLPJSON decodes an OTLP/JSON body after converting the hex id
+// fields to the base64 form protojson expects.
+//
+// The conversion streams the document rather than unmarshalling it into an
+// interface tree: a body can be 32 MiB, and expanding that into maps just to
+// rewrite a handful of short values would multiply the memory a single request
+// can cost.
+func unmarshalOTLPJSON(body []byte, msg proto.Message) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	// UseNumber keeps 64-bit fields (unix nanoseconds) textually exact; as
+	// float64 they would silently lose precision above 2^53.
+	dec.UseNumber()
+
+	var buf bytes.Buffer
+	if err := rewriteJSONValue(dec, &buf); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("unexpected data after the top-level JSON value")
+	}
+	return protojson.Unmarshal(buf.Bytes(), msg)
+}
+
+// rewriteJSONValue copies one JSON value from dec to w.
+func rewriteJSONValue(dec *json.Decoder, w *bytes.Buffer) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	return rewriteJSONToken(dec, w, tok)
+}
+
+// rewriteJSONToken copies one token (and, for delimiters, everything nested
+// inside it) from dec to w, converting hex id field values to base64.
+//
+// A value that is not valid hex is copied unchanged: some senders already emit
+// base64, which protojson accepts, and rejecting that body would break a
+// case that used to work.
+func rewriteJSONToken(dec *json.Decoder, w *bytes.Buffer, tok json.Token) error {
+	switch t := tok.(type) {
+	case json.Delim:
+		switch t {
+		case '{':
+			w.WriteByte('{')
+			for i := 0; dec.More(); i++ {
+				if i > 0 {
+					w.WriteByte(',')
+				}
+				kt, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := kt.(string)
+				if !ok {
+					return fmt.Errorf("JSON object key is not a string: %v", kt)
+				}
+				writeJSONString(w, key)
+				w.WriteByte(':')
+
+				vt, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				if s, ok := vt.(string); ok && hexIDFields[key] {
+					if b, err := hex.DecodeString(s); err == nil {
+						writeJSONString(w, base64.StdEncoding.EncodeToString(b))
+						continue
+					}
+				}
+				if err := rewriteJSONToken(dec, w, vt); err != nil {
+					return err
+				}
+			}
+			if _, err := dec.Token(); err != nil { // closing '}'
+				return err
+			}
+			w.WriteByte('}')
+		case '[':
+			w.WriteByte('[')
+			for i := 0; dec.More(); i++ {
+				if i > 0 {
+					w.WriteByte(',')
+				}
+				if err := rewriteJSONValue(dec, w); err != nil {
+					return err
+				}
+			}
+			if _, err := dec.Token(); err != nil { // closing ']'
+				return err
+			}
+			w.WriteByte(']')
+		default:
+			return fmt.Errorf("unexpected JSON delimiter %q", t)
+		}
+	case string:
+		writeJSONString(w, t)
+	case json.Number:
+		w.WriteString(t.String())
+	case bool:
+		if t {
+			w.WriteString("true")
+		} else {
+			w.WriteString("false")
+		}
+	case nil:
+		w.WriteString("null")
+	default:
+		return fmt.Errorf("unexpected JSON token %T", tok)
+	}
+	return nil
+}
+
+// writeJSONString writes s as a JSON string. Marshaling a string cannot fail;
+// reusing encoding/json keeps escaping correct for arbitrary attribute text.
+func writeJSONString(w *bytes.Buffer, s string) {
+	b, _ := json.Marshal(s)
+	w.Write(b)
 }
 
 func extractServiceName(attrs []*commonv1.KeyValue) string {
