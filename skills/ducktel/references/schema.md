@@ -88,14 +88,14 @@ Attributes and other JSON fields can be queried using DuckDB's JSON functions:
 
 ```sql
 -- Extract a string value
-json_extract_string(attributes, '$.http.method')
+json_extract_string(attributes, '$."http.method"')
 
 -- Extract a numeric value
-CAST(json_extract(attributes, '$.http.status_code') AS INTEGER)
+CAST(json_extract(attributes, '$."http.status_code"') AS INTEGER)
 
 -- Check if a key exists
-json_extract(attributes, '$.error.type') IS NOT NULL
+json_extract(attributes, '$."error.type"') IS NOT NULL
 
 -- Extract from resource attributes
-json_extract_string(resource_attributes, '$.deployment.environment')
+json_extract_string(resource_attributes, '$."deployment.environment"')
 ```

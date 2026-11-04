@@ -105,7 +105,7 @@ For common query patterns, see [references/queries.md](references/queries.md).
 
 - **Timestamps** are Unix microseconds (`int64`). Use `epoch_us(ts)` in DuckDB to convert.
 - **duration_ms** is precomputed as `float64` milliseconds.
-- **Attributes** (attributes, resource_attributes, events, links, exemplars) are stored as JSON strings. Use DuckDB JSON functions to query: `json_extract_string(attributes, '$.http.method')`.
+- **Attributes** (attributes, resource_attributes, events, links, exemplars) are stored as JSON strings. Query them with DuckDB JSON functions — but **quote dotted keys**: `json_extract_string(attributes, '$."http.method"')`. DuckDB reads `$.http.method` as field `http` then field `method` and returns NULL, so the unquoted form silently matches nothing for every OTel semantic-convention key. `attributes ->> 'http.method'` also works. See [references/schema.md](references/schema.md).
 - **Status codes** are strings: `STATUS_CODE_OK`, `STATUS_CODE_ERROR`, `STATUS_CODE_UNSET`.
 - **Span kinds** are strings: `SPAN_KIND_SERVER`, `SPAN_KIND_CLIENT`, `SPAN_KIND_PRODUCER`, `SPAN_KIND_CONSUMER`, `SPAN_KIND_INTERNAL`.
 - **Metric types** are lowercase strings: `gauge`, `sum`, `histogram`, `summary`.

@@ -36,7 +36,7 @@ FROM traces GROUP BY span_name HAVING count(*) > 10 ORDER BY p99_ms DESC
 -- Attribute filtering (e.g. HTTP method)
 SELECT span_name, duration_ms
 FROM traces
-WHERE json_extract_string(attributes, '$.http.method') = 'POST'
+WHERE json_extract_string(attributes, '$."http.method"') = 'POST'
 ORDER BY duration_ms DESC LIMIT 10
 
 -- Spans with errors and their messages
