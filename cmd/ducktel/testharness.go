@@ -24,6 +24,8 @@ func testHarnessCmd() *cobra.Command {
 		duration    time.Duration
 		scenarioStr string
 		configFile  string
+		authToken   string
+		tenant      string
 	)
 
 	cmd := &cobra.Command{
@@ -59,6 +61,14 @@ Inspired by github.com/davidgeorgehope/otel-demo-gen.`,
 			// CLI overrides
 			if endpoint != "" {
 				cfg.Endpoint = endpoint
+			}
+			if cmd.Flags().Changed("auth-token") {
+				cfg.AuthToken = authToken
+			} else if v := os.Getenv("DUCKTEL_AUTH_TOKEN"); v != "" {
+				cfg.AuthToken = v
+			}
+			if cmd.Flags().Changed("tenant") {
+				cfg.Tenant = tenant
 			}
 			if cmd.Flags().Changed("trace-rate") {
 				cfg.TraceRate = traceRate
@@ -124,6 +134,8 @@ Inspired by github.com/davidgeorgehope/otel-demo-gen.`,
 	cmd.Flags().DurationVar(&duration, "duration", 0, "Run duration (e.g. 30s, 5m). 0 = until Ctrl+C")
 	cmd.Flags().StringVar(&scenarioStr, "scenario", "", "Failure scenarios: service:type:value (comma-separated)")
 	cmd.Flags().StringVar(&configFile, "config", "", "JSON config file for custom topology")
+	cmd.Flags().StringVar(&authToken, "auth-token", "", "Bearer token to send, for a receiver started with auth (env: DUCKTEL_AUTH_TOKEN)")
+	cmd.Flags().StringVar(&tenant, "tenant", "", "Emit this value as the tenant.id resource attribute, so MCP query tools can see the generated data")
 
 	return cmd
 }

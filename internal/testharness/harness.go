@@ -62,6 +62,13 @@ type Config struct {
 	TraceRate float64 // traces per second (default 2)
 	MetricsMs int     // metrics interval in ms (default 10000)
 	ErrorRate float64 // baseline error rate (default 0.05)
+	// AuthToken, when set, is sent as `Authorization: Bearer <token>` so the
+	// generator can drive a receiver started with --auth-token.
+	AuthToken string
+	// Tenant, when set, is emitted as the `tenant.id` resource attribute. The
+	// MCP query tools filter on it, so generated data is only visible to them
+	// when this is set.
+	Tenant string
 }
 
 // Harness generates and sends synthetic telemetry.
@@ -441,7 +448,7 @@ func (h *Harness) walkService(
 }
 
 func (h *Harness) resourceAttrs(svc *Service) map[string]string {
-	return map[string]string{
+	attrs := map[string]string{
 		"service.name":           svc.Name,
 		"service.version":        "1.0.0",
 		"telemetry.sdk.language": svc.Language,
@@ -451,6 +458,10 @@ func (h *Harness) resourceAttrs(svc *Service) map[string]string {
 		"k8s.namespace.name":     "default",
 		"k8s.pod.name":           fmt.Sprintf("%s-7f8b9c-x4k2p", svc.Name),
 	}
+	if h.cfg.Tenant != "" {
+		attrs["tenant.id"] = h.cfg.Tenant
+	}
+	return attrs
 }
 
 func (h *Harness) findEntryPoints() []Service {
@@ -683,7 +694,19 @@ func (h *Harness) post(path string, payload interface{}) {
 		return
 	}
 
-	resp, err := h.client.Post(h.cfg.Endpoint+path, "application/json", bytes.NewReader(data))
+	req, err := http.NewRequest(http.MethodPost, h.cfg.Endpoint+path, bytes.NewReader(data))
+	if err != nil {
+		log.Printf("[testharness] request error (%s): %v", path, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// Present the bearer token when configured, so the generator can drive a
+	// receiver started with --auth-token.
+	if h.cfg.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+h.cfg.AuthToken)
+	}
+
+	resp, err := h.client.Do(req)
 	if err != nil {
 		log.Printf("[testharness] send error (%s): %v", path, err)
 		return

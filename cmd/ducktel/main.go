@@ -46,6 +46,7 @@ func main() {
 	rootCmd.AddCommand(metricsCmd())
 	rootCmd.AddCommand(savedQueryCmd())
 	rootCmd.AddCommand(testHarnessCmd())
+	rootCmd.AddCommand(mcpCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
