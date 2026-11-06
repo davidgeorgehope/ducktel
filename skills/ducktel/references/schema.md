@@ -49,7 +49,7 @@
 | metric_name | VARCHAR | Metric instrument name (e.g. `http.request.duration`) |
 | metric_description | VARCHAR | Human-readable description |
 | metric_unit | VARCHAR | Unit (e.g. `ms`, `By`, `1`) |
-| metric_type | VARCHAR | gauge, sum, histogram, summary |
+| metric_type | VARCHAR | gauge, sum, histogram, summary. Only gauge/sum populate `value_double`; see the note below. |
 | timestamp | BIGINT | Data point timestamp (Unix microseconds) |
 | start_timestamp | BIGINT | Cumulative start time (Unix microseconds) |
 | value_double | DOUBLE | Gauge/sum value (float) |
@@ -70,6 +70,27 @@
 | flags | UINTEGER | Data point flags |
 | is_monotonic | BOOLEAN | Whether sum is monotonically increasing |
 | aggregation_temporality | VARCHAR | AGGREGATION_TEMPORALITY_DELTA or CUMULATIVE |
+
+### Which metric types are aggregatable
+
+`value_double` is the normalised numeric column, and `metric_query`'s aggregations
+(`avg`, `sum`, `min`, `max`, `count`, percentiles) read **only** it. The receiver
+populates it for `NumberDataPoint` types alone:
+
+| metric_type | populates `value_double`? | aggregatable via `metric_query` |
+|---|---|---|
+| `gauge` | yes | **yes** |
+| `sum` | yes (int points are normalised in) | **yes** |
+| `histogram` | **no** — lands in `sum`/`min`/`max`/`count`/`bucket_counts` | **no — returns 0, not an error** |
+| `summary` | no — lands in `count`/`sum`/quantile columns | no |
+
+A histogram is stored faithfully and readable with raw SQL (`ducktel query`), but
+it is invisible to `metric_query`. **If you want a value aggregatable, send it as
+a `gauge` or `sum`, never a histogram** — e.g. an un-pre-aggregated per-event
+duration belongs in a gauge, which is also the more faithful OTLP shape for a
+single sample. The failure mode is silent: `avg(value_double)` over
+histogram-only rows returns `0`, so it looks like "no data arrived" rather than
+"wrong point type".
 
 ## Storage Layout
 

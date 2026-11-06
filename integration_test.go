@@ -32,6 +32,13 @@ import (
 
 func startTestServer(t *testing.T) (string, *writer.Writer, func()) {
 	t.Helper()
+	return startTestServerWithToken(t, "")
+}
+
+// startTestServerWithToken is startTestServer with an optional bearer token, so
+// tests can exercise the authenticated path.
+func startTestServerWithToken(t *testing.T, token string) (string, *writer.Writer, func()) {
+	t.Helper()
 
 	dataDir, err := os.MkdirTemp("", "ducktel-test-*")
 	if err != nil {
@@ -42,7 +49,7 @@ func startTestServer(t *testing.T) (string, *writer.Writer, func()) {
 	w.Start()
 
 	port := 14318
-	r := receiver.New("localhost", port, w)
+	r := receiver.New("localhost", port, w, token, "", nil)
 	go r.Start()
 
 	addr := fmt.Sprintf("http://localhost:%d", port)
@@ -478,6 +485,8 @@ func TestNonFiniteFloatsAreSanitized(t *testing.T) {
 	}
 }
 
+// --- writer durability regression tests ---
+
 func testSpan() writer.TraceSpan {
 	now := time.Now()
 	return writer.TraceSpan{
@@ -604,6 +613,8 @@ func TestStopReturnsFinalFlushError(t *testing.T) {
 	}
 }
 
+// --- receiver hardening regression tests ---
+
 // TestRequestBodySizeLimit verifies an oversized body is rejected by the size
 // cap before being decoded. The receiver is unauthenticated, so without a cap
 // one client could make the process allocate without limit.
@@ -660,6 +671,8 @@ func TestHealthEndpointIsNotCatchAll(t *testing.T) {
 		t.Errorf("unknown path returned %d, want 404", resp2.StatusCode)
 	}
 }
+
+// --- view refresh regression tests ---
 
 // seedTrace writes one span with the given service and flushes it.
 func seedTrace(t *testing.T, dir, service string) {

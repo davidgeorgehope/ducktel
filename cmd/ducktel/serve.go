@@ -22,6 +22,8 @@ func serveCmd() *cobra.Command {
 		flushInterval time.Duration
 		bufferSize    int
 		retention     string
+		token         string
+		flushToken    string
 	)
 
 	cmd := &cobra.Command{
@@ -38,8 +40,39 @@ deleting data without an explicit opt-in.
 is forced ahead of the --flush-interval timer; the smaller of the two wins.
 Defaults to 1000, which keeps ingest→queryable latency low on a busy
 instance; raise it to batch more per file at the cost of a longer worst-case
-delay.`,
+delay.
+
+Authentication is disabled unless a token is configured. Set it with
+--auth-token or DUCKTEL_AUTH_TOKEN; senders must then present it as
+"Authorization: Bearer <token>", which every OTel exporter supports via
+OTEL_EXPORTER_OTLP_HEADERS. /health stays unauthenticated for probes.
+
+TLS is not terminated here — front the receiver with a proxy or ingress if the
+token would cross an untrusted network.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Env wins only when the flag was not given, so an explicit flag
+			// can always override the environment.
+			if !cmd.Flags().Changed("auth-token") {
+				if v := os.Getenv("DUCKTEL_AUTH_TOKEN"); v != "" {
+					token = v
+				}
+			}
+			// /flush is authorised by its own token, separate from the ingest
+			// token, so the query side can request a flush without holding
+			// write access.
+			if !cmd.Flags().Changed("flush-token") {
+				if v := os.Getenv("DUCKTEL_FLUSH_TOKEN"); v != "" {
+					flushToken = v
+				}
+			}
+			// Fall back to the MCP token: a query process configured with
+			// only DUCKTEL_MCP_TOKEN can then request flushes from this one.
+			if flushToken == "" {
+				if v := os.Getenv("DUCKTEL_MCP_TOKEN"); v != "" {
+					flushToken = v
+				}
+			}
+
 			retentionDur, err := writer.ParseRetention(retention)
 			if err != nil {
 				return err
@@ -57,41 +90,60 @@ delay.`,
 			}
 			w.Start()
 
+			authState := "disabled"
+			if token != "" {
+				authState = "enabled"
+			}
 			// Log the effective configuration once at startup: without it the
 			// log cannot be used to tell what a running instance was told to do.
 			retentionState := "disabled (keep forever)"
 			if retentionDur > 0 {
 				retentionState = retentionDur.String()
 			}
-			log.Printf("starting: data-dir=%s flush-interval=%s buffer-size=%d retention=%s",
-				dataDir, flushInterval, bufferSize, retentionState)
+			log.Printf("starting: data-dir=%s flush-interval=%s buffer-size=%d retention=%s auth=%s",
+				dataDir, flushInterval, bufferSize, retentionState, authState)
 
-			r := receiver.New(host, port, w)
+			r := receiver.New(host, port, w, token, flushToken, w.Flush)
 
 			sigCh := make(chan os.Signal, 1)
-			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			// SIGHUP requests an immediate flush without shutting down, so
+			// buffered telemetry can be made queryable on demand instead of
+			// waiting out the flush interval. Intercepting it also stops Go's
+			// default behaviour of terminating on SIGHUP.
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- r.Start()
 			}()
 
-			select {
-			case err := <-errCh:
-				if err := w.Stop(); err != nil {
-					log.Printf("final flush failed: %v", err)
+			for {
+				select {
+				case err := <-errCh:
+					if err := w.Stop(); err != nil {
+						log.Printf("final flush failed: %v", err)
+					}
+					return err
+				case sig := <-sigCh:
+					if sig == syscall.SIGHUP {
+						// Flush in place: the receiver keeps serving and the
+						// writer keeps its buffer, so nothing is dropped.
+						log.Printf("received %s: flushing buffered telemetry", sig)
+						if err := w.Flush(); err != nil {
+							log.Printf("flush on %s failed: %v", sig, err)
+						}
+						continue
+					}
+					log.Println("Shutting down...")
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					r.Stop(ctx)
+					if err := w.Stop(); err != nil {
+						log.Printf("final flush failed: %v", err)
+					}
+					log.Println("Stopped.")
+					return nil
 				}
-				return err
-			case <-sigCh:
-				log.Println("Shutting down...")
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				r.Stop(ctx)
-				if err := w.Stop(); err != nil {
-					log.Printf("final flush failed: %v", err)
-				}
-				log.Println("Stopped.")
-				return nil
 			}
 		},
 	}
@@ -101,6 +153,8 @@ delay.`,
 	cmd.Flags().DurationVar(&flushInterval, "flush-interval", 30*time.Second, "How often to flush buffered spans to disk")
 	cmd.Flags().IntVar(&bufferSize, "buffer-size", 1000, "Records per signal that force a flush ahead of --flush-interval")
 	cmd.Flags().StringVar(&retention, "retention", "", "Delete date partitions older than this window (e.g. 720h or 30d); empty keeps data forever")
+	cmd.Flags().StringVar(&token, "auth-token", "", "Require this bearer token on OTLP endpoints (env: DUCKTEL_AUTH_TOKEN)")
+	cmd.Flags().StringVar(&flushToken, "flush-token", "", "Require this bearer token on POST /flush (env: DUCKTEL_FLUSH_TOKEN, or DUCKTEL_MCP_TOKEN)")
 
 	return cmd
 }

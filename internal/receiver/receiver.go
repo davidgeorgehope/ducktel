@@ -11,9 +11,12 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/davidgeorgehope/ducktel/internal/httpauth"
 
 	collectlogsv1 "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	collectmetricsv1 "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -33,11 +36,11 @@ type Consumer interface {
 	AddMetrics(points []writer.MetricPoint)
 }
 
-// Server tuning. The receiver is unauthenticated by design (OTLP exporters do
-// not send credentials), so these bound the damage a hostile or misconfigured
-// client can do. Timeouts stop one connection from being held open forever
-// (slowloris); maxBodyBytes stops a single request from exhausting memory, since
-// the whole body is buffered before decoding.
+// Server tuning. Authentication is opt-in, so a hostile or misconfigured client
+// must still be bounded whether or not a token is configured. Timeouts stop one
+// connection from being held open forever (slowloris); maxBodyBytes stops a
+// single request from exhausting memory, since the whole body is buffered
+// before decoding.
 const (
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 30 * time.Second
@@ -49,18 +52,40 @@ const (
 type Receiver struct {
 	server   *http.Server
 	consumer Consumer
+	token    string
+	// flushToken authorises POST /flush, and is deliberately a DIFFERENT secret
+	// from token: /flush is a control action requested by the query side, not a
+	// data-ingest action. The query container holds only this token, so it can
+	// ask for a flush but can never write telemetry.
+	flushToken string
+	// flush makes buffered records durable on demand.
+	flush func() error
 }
 
 // New creates a receiver bound to host:port. Pass an empty host to listen on
 // all interfaces; the serve command passes "localhost" by default so a local
 // developer tool is not silently exposed to the network.
-func New(host string, port int, consumer Consumer) *Receiver {
-	r := &Receiver{consumer: consumer}
+//
+// token, when non-empty, is required as `Authorization: Bearer *** on the
+// OTLP endpoints. OTLP carries no auth in the message body — per the spec it is
+// transport-level, so exporters set it via HTTP headers
+// (OTEL_EXPORTER_OTLP_HEADERS). An empty token disables the check, which keeps
+// local development frictionless.
+//
+// flushToken, when non-empty, is required on POST /flush. It is intentionally a
+// separate secret from token: the query container is given only flushToken, so
+// it can ask this process to flush without being able to forge telemetry.
+func New(host string, port int, consumer Consumer, token, flushToken string, flush func() error) *Receiver {
+	r := &Receiver{consumer: consumer, token: token, flushToken: flushToken, flush: flush}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/traces", r.handleTraces)
-	mux.HandleFunc("POST /v1/logs", r.handleLogs)
-	mux.HandleFunc("POST /v1/metrics", r.handleMetrics)
+	// OTLP ingest is authenticated when a token is configured.
+	mux.Handle("POST /v1/traces", r.authenticate(http.HandlerFunc(r.handleTraces)))
+	mux.Handle("POST /v1/logs", r.authenticate(http.HandlerFunc(r.handleLogs)))
+	mux.Handle("POST /v1/metrics", r.authenticate(http.HandlerFunc(r.handleMetrics)))
+	// Flush is a control action, authorised by its own token.
+	mux.Handle("POST /flush", httpauth.Bearer(flushToken, http.HandlerFunc(r.handleFlush)))
+	// Health stays unauthenticated so liveness/readiness probes keep working.
 	mux.HandleFunc("GET /health", r.handleHealth)
 
 	r.server = &http.Server{
@@ -74,8 +99,44 @@ func New(host string, port int, consumer Consumer) *Receiver {
 	return r
 }
 
+// authenticate wraps a handler with the shared bearer-token check. It is a
+// no-op when no token is configured, and fails closed (401) when one is
+// configured but the request does not present it.
+func (r *Receiver) authenticate(next http.Handler) http.Handler {
+	return httpauth.Bearer(r.token, next)
+}
+
+// handleFlush makes buffered records durable on demand, so the query side can
+// ask for an immediate flush instead of waiting out the flush interval.
+//
+// Authenticated with flushToken (see New). Returns 503 when no flush function
+// is wired, so a misconfiguration is visible rather than silently accepted.
+func (r *Receiver) handleFlush(w http.ResponseWriter, req *http.Request) {
+	if r.flush == nil {
+		http.Error(w, "flush is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	started := time.Now()
+	if err := r.flush(); err != nil {
+		log.Printf("flush requested over http: FAILED: %v", err)
+		http.Error(w, fmt.Sprintf("flush failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("flush requested over http: complete in %s",
+		time.Since(started).Round(time.Millisecond))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"flushed"}`))
+}
+
 func (r *Receiver) Start() error {
 	log.Printf("OTLP receiver listening on %s", r.server.Addr)
+	if r.token == "" {
+		if host, _, err := net.SplitHostPort(r.server.Addr); err == nil && host != "localhost" && host != "127.0.0.1" {
+			log.Printf("warning: no auth token configured and bound to %s — "+
+				"any client that can reach this port can write telemetry", r.server.Addr)
+		}
+	}
 	if err := r.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -94,6 +155,7 @@ func (r *Receiver) handleHealth(w http.ResponseWriter, req *http.Request) {
 // --- Traces ---
 
 func (r *Receiver) handleTraces(w http.ResponseWriter, req *http.Request) {
+	started := time.Now()
 	exportReq := &collecttracev1.ExportTraceServiceRequest{}
 	if err := unmarshalOTLP(req, exportReq); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -103,6 +165,8 @@ func (r *Receiver) handleTraces(w http.ResponseWriter, req *http.Request) {
 	spans := convertSpans(exportReq)
 	if len(spans) > 0 {
 		r.consumer.Add(spans)
+		log.Printf("ingest: traces accepted %d span(s) in %s",
+			len(spans), time.Since(started).Round(time.Millisecond))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -161,6 +225,7 @@ func convertSpans(req *collecttracev1.ExportTraceServiceRequest) []writer.TraceS
 // --- Logs ---
 
 func (r *Receiver) handleLogs(w http.ResponseWriter, req *http.Request) {
+	started := time.Now()
 	exportReq := &collectlogsv1.ExportLogsServiceRequest{}
 	if err := unmarshalOTLP(req, exportReq); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -170,6 +235,8 @@ func (r *Receiver) handleLogs(w http.ResponseWriter, req *http.Request) {
 	records := convertLogs(exportReq)
 	if len(records) > 0 {
 		r.consumer.AddLogs(records)
+		log.Printf("ingest: logs accepted %d record(s) in %s",
+			len(records), time.Since(started).Round(time.Millisecond))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -219,6 +286,7 @@ func convertLogs(req *collectlogsv1.ExportLogsServiceRequest) []writer.LogRecord
 // --- Metrics ---
 
 func (r *Receiver) handleMetrics(w http.ResponseWriter, req *http.Request) {
+	started := time.Now()
 	exportReq := &collectmetricsv1.ExportMetricsServiceRequest{}
 	if err := unmarshalOTLP(req, exportReq); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -228,6 +296,8 @@ func (r *Receiver) handleMetrics(w http.ResponseWriter, req *http.Request) {
 	points := convertMetrics(exportReq)
 	if len(points) > 0 {
 		r.consumer.AddMetrics(points)
+		log.Printf("ingest: metrics accepted %d point(s) in %s",
+			len(points), time.Since(started).Round(time.Millisecond))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
