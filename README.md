@@ -174,7 +174,8 @@ ducktel saved delete "payment-errors"
 Start the OTLP receiver.
 
 ```bash
-ducktel serve [--port 4318] [--flush-interval 30s] [--data-dir ./data]
+ducktel serve [--port 4318] [--flush-interval 30s] [--buffer-size 1000] [--data-dir ./data]
+ducktel serve --retention 30d    # delete date-partitions older than 30 days
 ```
 
 Accepts `POST /v1/traces`, `POST /v1/logs`, `POST /v1/metrics` — protobuf and JSON.
@@ -295,6 +296,10 @@ data/
 ```
 
 Date-partitioned Parquet files. DuckDB reads them via glob at query time. Nothing is dropped — all OTLP fields are preserved. Your data is never trapped in a proprietary format.
+
+Retention is off by default (files accumulate forever) and day-granular when enabled: `ducktel serve --retention 30d` runs an hourly background sweep that deletes whole `YYYY-MM-DD` directories older than the window — no partial-day deletion. A date-shaped directory older than the cutoff is removed in full; anything else under a signal directory is left alone.
+
+Compaction runs automatically, every hour and once at startup: each past day's per-flush files merge into a single `day.parquet` per signal (chronological order preserved, so timestamp filters prune well), replacing dozens of tiny files with one. The current and previous UTC day are never touched, so a merge cannot race the writer around midnight. The merge is crash-safe: an existing `day.parquet` means a previous merge completed, and any leftover per-flush files are deleted rather than merged (merging would double rows).
 
 ## Schemas
 
