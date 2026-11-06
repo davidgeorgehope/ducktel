@@ -6,7 +6,7 @@ Lightweight local OpenTelemetry backend that stores telemetry as Parquet files a
 
 ```
 Your App (OTel SDK)
-    ↓ OTLP (gRPC/HTTP)
+    ↓ OTLP/HTTP (gRPC planned)
 ducktel collector
     ↓
 Parquet files on disk (partitioned by signal type + time)
@@ -19,7 +19,7 @@ LLM agent (text-to-SQL)
 ## Core Components
 
 ### 1. OTLP Receiver
-- Accept OTLP over gRPC (port 4317) and HTTP (port 4318)
+- Accept OTLP over HTTP (port 4318). gRPC (port 4317) is planned, not implemented.
 - Standard OTel protocol — any OTel SDK can send to it
 - Lightweight — no full collector needed, just the receiver
 
@@ -32,7 +32,7 @@ LLM agent (text-to-SQL)
 
 ### 3. Query Interface
 - Embedded DuckDB reads Parquet files directly (no ingest/copy step)
-- Expose a simple SQL query endpoint (HTTP API)
+- Query via CLI today (`ducktel query`). An HTTP SQL query API is planned, not implemented.
 - Auto-discover available Parquet files and create views over them
 - Views: `traces`, `logs`, `metrics` — matching OTel signal types
 
@@ -56,7 +56,7 @@ ducktel/
 ├── cmd/
 │   └── ducktel/          # CLI entrypoint
 ├── internal/
-│   ├── receiver/         # OTLP gRPC/HTTP receiver
+│   ├── receiver/         # OTLP/HTTP receiver (gRPC planned)
 │   ├── writer/           # Parquet buffered writer
 │   ├── query/            # DuckDB query engine
 │   └── cli/              # CLI command definitions
@@ -249,7 +249,10 @@ The query that diagnosed the problem becomes the query that prevents the next on
 
 ## Future / Nice-to-Have
 
-- gRPC receiver
+Not implemented yet — do not treat these as current features:
+
+- gRPC OTLP receiver (port 4317)
+- HTTP SQL query API (querying is CLI-only today)
 - Web UI with basic trace viewer
 - Auto-generated DuckDB views with common joins
 - Tail-based sampling before writing
