@@ -4,6 +4,9 @@ data/
 # Binaries
 /otelite
 *.exe
+# The built binary only — a bare `ducktel` pattern also matches the
+# cmd/ducktel/ directory, silently excluding any new file added there.
+/ducktel
 
 # IDE
 .idea/
@@ -11,5 +14,3 @@ data/
 
 # OS
 .DS_Store
-ducktel
-data/

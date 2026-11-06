@@ -35,5 +35,9 @@ jobs:
             exit 1
           fi
 
+      # An explicit timeout, well under Go's 10m default: a deadlock (e.g. a
+      # non-reentrant mutex locked twice) does not fail fast — it blocks until
+      # the timeout, so the default would buy ten minutes of silence. The whole
+      # suite runs in ~1.5s, so 2m is generous and still fails quickly.
       - name: Test
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -timeout 2m ./...
