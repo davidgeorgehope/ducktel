@@ -21,7 +21,7 @@
 #     serve --host 0.0.0.0 --port 4318 --data-dir /data --retention 30d
 
 # ---------- build ----------
-FROM docker.io/library/golang:1.25-bookworm AS build
+FROM docker.io/library/golang:1.26-bookworm AS build
 
 WORKDIR /src
 
