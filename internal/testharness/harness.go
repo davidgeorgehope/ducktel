@@ -163,7 +163,7 @@ func DefaultConfig() Config {
 			},
 		},
 		TraceRate: 2,
-		MetricsMs: 10000,
+		MetricsMs: 2000,
 		ErrorRate: 0.05,
 	}
 }
@@ -483,6 +483,10 @@ func (h *Harness) metricsLoop() {
 
 	counters := make(map[string]int64) // request counters per service
 	errCounters := make(map[string]int64)
+
+	// Send one batch immediately so a short --duration (e.g. 5s) still
+	// produces metrics; waiting for the first tick used to leave metrics empty.
+	h.generateMetrics(counters, errCounters)
 
 	for {
 		select {

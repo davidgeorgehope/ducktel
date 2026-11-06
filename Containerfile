@@ -14,12 +14,14 @@
 # Build:
 #   podman build -t ducktel:local -f Containerfile .
 #
-# Run (memory cap bounds the process so a leak cannot take the host down):
+# Run (memory cap bounds the process so a leak cannot take the host down;
+# --retention 30d keeps /data from growing forever on long-lived deploys):
 #   podman run --rm -p 4318:4318 --memory=512m --memory-swap=512m \
-#     -v ducktel-data:/data ducktel:local
+#     -v ducktel-data:/data ducktel:local \
+#     serve --host 0.0.0.0 --port 4318 --data-dir /data --retention 30d
 
 # ---------- build ----------
-FROM docker.io/library/golang:1.25-bookworm AS build
+FROM docker.io/library/golang:1.26-bookworm AS build
 
 WORKDIR /src
 
@@ -52,4 +54,4 @@ EXPOSE 4318
 # port publishing, and k8s via Service/NetworkPolicy. Host/port are flags today
 # — env-var parsing is the natural next step for k8s configmaps.
 ENTRYPOINT ["/usr/local/bin/ducktel"]
-CMD ["serve", "--host", "0.0.0.0", "--port", "4318", "--data-dir", "/data"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "4318", "--data-dir", "/data", "--retention", "30d"]

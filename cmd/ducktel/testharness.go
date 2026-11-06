@@ -119,7 +119,7 @@ Inspired by github.com/davidgeorgehope/otel-demo-gen.`,
 
 	cmd.Flags().StringVar(&endpoint, "endpoint", "http://localhost:4318", "OTLP HTTP endpoint")
 	cmd.Flags().Float64Var(&traceRate, "trace-rate", 2, "Traces per second")
-	cmd.Flags().IntVar(&metricsMs, "metrics-ms", 10000, "Metrics send interval in milliseconds")
+	cmd.Flags().IntVar(&metricsMs, "metrics-ms", 2000, "Metrics send interval in milliseconds")
 	cmd.Flags().Float64Var(&errorRate, "error-rate", 0.05, "Baseline error rate (0.0–1.0)")
 	cmd.Flags().DurationVar(&duration, "duration", 0, "Run duration (e.g. 30s, 5m). 0 = until Ctrl+C")
 	cmd.Flags().StringVar(&scenarioStr, "scenario", "", "Failure scenarios: service:type:value (comma-separated)")

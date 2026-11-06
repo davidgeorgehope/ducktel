@@ -42,13 +42,14 @@ ducktel serve --buffer-size 5000       # records per signal that force an early 
 ducktel serve --retention 30d          # delete date-partition directories older than 30 days
 ```
 
-Endpoints: `POST /v1/traces`, `POST /v1/logs`, `POST /v1/metrics`, `GET /` (health).
+Endpoints: `POST /v1/traces`, `POST /v1/logs`, `POST /v1/metrics`, `GET /health`.
 
 #### Retention
 
 Off by default — Parquet files accumulate indefinitely unless `--retention` is
-set. When set, an hourly background sweep deletes whole `traces|logs|metrics/
-YYYY-MM-DD` directories older than the window:
+set. For any long-lived or container deployment, prefer `--retention 30d` so disk
+growth stays bounded. When set, an hourly background sweep deletes whole
+`traces|logs|metrics/YYYY-MM-DD` directories older than the window:
 
 ```bash
 ducktel serve --retention 30d     # bare day count
