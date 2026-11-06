@@ -81,6 +81,15 @@ token would cross an untrusted network.`,
 				return fmt.Errorf("--buffer-size must be greater than zero, got %d", bufferSize)
 			}
 
+			// One writer per data directory: refuse to start rather than
+			// race another serve over the same files. Deferred, so it is
+			// released only after the final flush in w.Stop below.
+			release, err := writer.Lock(dataDir)
+			if err != nil {
+				return err
+			}
+			defer release()
+
 			w := writer.New(dataDir, flushInterval, bufferSize)
 			w.OnError(func(err error) {
 				log.Printf("writer error: %v", err)
