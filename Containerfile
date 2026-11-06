@@ -36,13 +36,23 @@ COPY . .
 ENV CGO_ENABLED=1
 RUN go build -trimpath -ldflags="-s -w" -o /out/ducktel ./cmd/ducktel
 
+# Empty data dir to copy into the runtime image (distroless has no shell to
+# mkdir there).
+RUN mkdir -p /out/data
+
 # ---------- runtime ----------
 # cc = glibc + libstdc++, needed by the CGo/DuckDB objects. No shell.
 FROM gcr.io/distroless/cc-debian12:nonroot
 
 COPY --from=build /out/ducktel /usr/local/bin/ducktel
 
-# Data lives on a volume so Parquet survives container replacement.
+# Data lives on a volume so Parquet survives container replacement. /data must
+# exist in the image owned by nonroot (65532): Docker initialises a new named
+# volume from the image directory, ownership included, whereas a mount point
+# missing from the image comes up root-owned and unwritable, so every flush
+# would fail while /health still answered 200. Bind mounts need the host
+# directory writable by uid 65532.
+COPY --from=build --chown=65532:65532 /out/data /data
 VOLUME /data
 
 EXPOSE 4318
