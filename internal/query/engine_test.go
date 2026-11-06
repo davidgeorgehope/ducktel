@@ -1,8 +1,11 @@
 package query
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/davidgeorgehope/ducktel/internal/writer"
@@ -54,9 +57,11 @@ func TestAllViewsExist(t *testing.T) {
 	}
 }
 
-// TestQuerySeesDataWrittenAfterOpen guards the stale-view fix: an engine
-// opened before any data existed must see Parquet files written afterwards,
-// because Query re-derives the views on each call.
+// TestQuerySeesDataWrittenAfterOpen pins the view-refresh guarantee: DuckDB
+// resolves the read_parquet glob when the view is created, so without per-query
+// re-derivation an engine opened before any data existed kept a
+// `SELECT ... WHERE false` placeholder view and returned zero rows forever, even
+// once Parquet files were on disk.
 func TestQuerySeesDataWrittenAfterOpen(t *testing.T) {
 	dir := t.TempDir()
 	e, err := Open(dir)
@@ -80,7 +85,8 @@ func TestQuerySeesDataWrittenAfterOpen(t *testing.T) {
 		t.Fatalf("query after data: %v", err)
 	}
 	if len(rows) != 1 {
-		t.Fatalf("query after late write returned %d rows, want 1 (stale view)", len(rows))
+		t.Fatalf("a long-lived engine returned %d rows after data was written, "+
+			"want 1 — views are stale", len(rows))
 	}
 }
 
@@ -192,7 +198,156 @@ func TestSchemaDefaultsToTraces(t *testing.T) {
 
 // TestOpenNonWritableDirSurfacesError verifies a bad data dir fails loudly at
 // Open rather than producing an engine that silently returns nothing.
-func TestOpenNonWritableDirSurfacesError(t *testing.T) {
+func TestCgroupMemoryLimitParsing(t *testing.T) {
+	write := func(t *testing.T, content string) string {
+		t.Helper()
+		f := filepath.Join(t.TempDir(), "mem")
+		if err := os.WriteFile(f, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+
+	cases := []struct {
+		name    string
+		content string
+		want    int64
+	}{
+		{"v2 bytes", "4294967296", 4 << 30},
+		{"v2 max", "max", 0},
+		{"v1 bytes", "1073741824", 1 << 30},
+		{"v1 unlimited sentinel", "9223372036854771712", 0},
+		{"garbage", "not-a-number", 0},
+		{"negative", "-5", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			old := cgroupMemoryFiles
+			cgroupMemoryFiles = []string{write(t, tc.content)}
+			t.Cleanup(func() { cgroupMemoryFiles = old })
+
+			if got := cgroupMemoryLimit(); got != tc.want {
+				t.Errorf("cgroupMemoryLimit(%q) = %d, want %d", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCgroupMemoryLimitMissingFiles(t *testing.T) {
+	old := cgroupMemoryFiles
+	cgroupMemoryFiles = []string{filepath.Join(t.TempDir(), "does-not-exist")}
+	t.Cleanup(func() { cgroupMemoryFiles = old })
+
+	if got := cgroupMemoryLimit(); got != 0 {
+		t.Errorf("missing files should yield 0, got %d", got)
+	}
+}
+
+// TestMemoryLimitAppliedWhenCgroupLimited pins the OOM guard: with a cgroup
+// limit present, the engine must cap DuckDB's memory_limit below it so wide
+// queries spill instead of killing the process.
+func TestMemoryLimitAppliedWhenCgroupLimited(t *testing.T) {
+	limitFile := filepath.Join(t.TempDir(), "mem")
+	if err := os.WriteFile(limitFile, []byte("4294967296"), 0o644); err != nil { // 4Gi
+		t.Fatal(err)
+	}
+	old := cgroupMemoryFiles
+	cgroupMemoryFiles = []string{limitFile}
+	t.Cleanup(func() { cgroupMemoryFiles = old })
+
+	e, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	rows, _, err := e.Query("SELECT value FROM duckdb_settings() WHERE name = 'memory_limit'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("memory_limit setting not returned: %v", rows)
+	}
+	got := rows[0]["value"].(string)
+	// 4Gi limit * 70%, rounded down to whole MiB (2867 MiB); DuckDB renders
+	// the stored setting in its normalised human form.
+	want := "2.7 GiB"
+	if got != want {
+		t.Errorf("memory_limit = %s, want %s", got, want)
+	}
+}
+
+// TestCorruptParquetFailsLoudly pins the fallback semantics: the empty-view
+// placeholder is only for a glob that matches nothing. A view that fails to
+// build while files DO exist must surface the error — the old code silently
+// swapped in the empty view, so every later query returned a well-formed
+// "no data" for data that was really there (observed live as a trace lookup
+// alternating rows:[] and rows:[span] while views were being re-derived).
+func TestCorruptParquetFailsLoudly(t *testing.T) {
+	dir := t.TempDir()
+	seed(t, dir, "svc")
+
+	// A corrupt file alongside the valid one: read_parquet cannot bind it.
+	badDir := filepath.Join(dir, "traces", "2026-01-02")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "bad.parquet"), []byte("not parquet at all"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := Open(dir)
+	if err == nil {
+		e.Close()
+		t.Fatal("Open with a corrupt parquet file must fail loudly, not fall back to an empty view")
+	}
+	if !strings.Contains(err.Error(), "traces view") {
+		t.Errorf("error should name the failing view, got: %v", err)
+	}
+}
+
+// TestConcurrentQueriesNeverSeeEmpty hammers reads from several goroutines
+// while an engine is in use, pinning the refresh-then-query critical section:
+// before serialisation, interleaved view re-derivations could leave a query
+// answering from a mid-replacement view (empty), which at the REST layer is
+// indistinguishable from "no data".
+func TestConcurrentQueriesNeverSeeEmpty(t *testing.T) {
+	dir := t.TempDir()
+	seed(t, dir, "svc")
+
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 64)
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 15; i++ {
+				rows, _, err := e.Query("SELECT count(*) AS c FROM traces")
+				if err != nil {
+					errCh <- fmt.Errorf("query errored during concurrency: %w", err)
+					return
+				}
+				if rows[0]["c"].(int64) == 0 {
+					errCh <- fmt.Errorf("query returned 0 rows for seeded data — a view was observed mid-replacement")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+}
+
+func TestOpenOnNonWritableDirSurfacesError(t *testing.T) {
 	dir := t.TempDir()
 	// Occupy the traces path with a regular file so view creation fails.
 	if err := os.WriteFile(filepath.Join(dir, "traces"), []byte("x"), 0o644); err != nil {
