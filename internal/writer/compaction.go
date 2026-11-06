@@ -150,6 +150,17 @@ func compactDayDir(signalDir, day, signal string) error {
 		if removed > 0 {
 			log.Printf("compaction: removed %d leftover file(s) in %s", removed, dayDir)
 		}
+		fragmented, groups, err := isFragmented(merged)
+		if err != nil {
+			return err
+		}
+		if !fragmented {
+			return nil
+		}
+		if err := writeMerged(dayDir, merged, signal, []string{merged}); err != nil {
+			return err
+		}
+		log.Printf("compaction: rewrote %s (%d row groups were too small)", merged, groups)
 		return nil
 	}
 	if len(originals) == 0 {
@@ -157,6 +168,24 @@ func compactDayDir(signalDir, day, signal string) error {
 	}
 	sort.Strings(originals) // chronological
 
+	if err := writeMerged(dayDir, merged, signal, originals); err != nil {
+		return err
+	}
+	// Originals are removed only after the merged file is in place — see the
+	// crash discussion on compactOldDays.
+	for _, f := range originals {
+		if err := os.Remove(f); err != nil {
+			return fmt.Errorf("removing original %s: %w", f, err)
+		}
+	}
+	log.Printf("compaction: merged %d file(s) into %s", len(originals), merged)
+	return nil
+}
+
+// writeMerged merges sources into a temp file in dayDir and renames it onto
+// merged. sources may include merged itself (a rewrite): it is read in full
+// before the rename replaces it.
+func writeMerged(dayDir, merged, signal string, sources []string) error {
 	tmp, err := os.CreateTemp(dayDir, ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
@@ -166,11 +195,11 @@ func compactDayDir(signalDir, day, signal string) error {
 
 	switch signal {
 	case "traces":
-		err = mergeInto[TraceSpan](tmp, originals)
+		err = mergeInto[TraceSpan](tmp, sources)
 	case "logs":
-		err = mergeInto[LogRecord](tmp, originals)
+		err = mergeInto[LogRecord](tmp, sources)
 	case "metrics":
-		err = mergeInto[MetricPoint](tmp, originals)
+		err = mergeInto[MetricPoint](tmp, sources)
 	default:
 		err = fmt.Errorf("unknown signal %q", signal)
 	}
@@ -188,67 +217,99 @@ func compactDayDir(signalDir, day, signal string) error {
 	if err := os.Rename(tmpPath, merged); err != nil {
 		return fmt.Errorf("committing %s: %w", merged, err)
 	}
-	// Originals are removed only after the merged file is in place — see the
-	// crash discussion on compactOldDays.
-	for _, f := range originals {
-		if err := os.Remove(f); err != nil {
-			return fmt.Errorf("removing original %s: %w", f, err)
-		}
-	}
-	log.Printf("compaction: merged %d file(s) into %s", len(originals), merged)
 	return nil
 }
 
-// mergeInto appends every row of each source file into the writer, forcing a
-// row group after each source so memory stays bounded by one source file at a
-// time rather than a whole day at once.
+// isFragmented reports whether a merged file's row groups are too small on
+// average (see fragmentedRowsPerGroup), along with its row group count.
+func isFragmented(path string) (bool, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, 0, err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return false, 0, err
+	}
+	pf, err := parquet.OpenFile(f, stat.Size(), parquet.SkipPageIndex(true), parquet.SkipBloomFilters(true))
+	if err != nil {
+		return false, 0, fmt.Errorf("opening parquet %s: %w", path, err)
+	}
+	groups := len(pf.RowGroups())
+	if groups <= 1 {
+		return false, groups, nil
+	}
+	return pf.NumRows()/int64(groups) < fragmentedRowsPerGroup, groups, nil
+}
+
+// compactRowGroupRows caps a merged file's row groups. Readers pay per row
+// group (footer metadata, statistics), so groups must be large; the writer
+// buffers at most this many rows before cutting one, which bounds the
+// compactor's memory (the receiver runs with a small memory limit).
+const compactRowGroupRows = 50_000
+
+// compactReadBatch is how many rows are read from a source at a time.
+const compactReadBatch = 4096
+
+// fragmentedRowsPerGroup: a day.parquet whose row groups average fewer rows
+// than this was written by the old compactor, which cut a row group after every
+// source file (~2880 groups of a few rows per day). Its footer was megabytes,
+// and every query re-read every day's footer, so the query process ran out of
+// memory on a tiny dataset. Such files are rewritten in place.
+const fragmentedRowsPerGroup = 1000
+
+// mergeInto appends every row of each source file into the writer. Row groups
+// are cut at compactRowGroupRows and sources are streamed in batches, so memory
+// stays bounded by one read batch plus one row group's buffer, whatever the
+// size of the sources.
 func mergeInto[T any](tmp *os.File, sources []string) error {
-	pw := parquet.NewGenericWriter[T](tmp)
+	pw := parquet.NewGenericWriter[T](tmp, parquet.MaxRowsPerRowGroup(compactRowGroupRows))
+	buf := make([]T, compactReadBatch)
 	for _, src := range sources {
-		srcFile, err := os.Open(src)
-		if err != nil {
+		if err := copyRows(pw, src, buf); err != nil {
 			pw.Close()
-			return fmt.Errorf("opening %s: %w", src, err)
-		}
-		stat, err := srcFile.Stat()
-		if err != nil {
-			srcFile.Close()
-			pw.Close()
-			return fmt.Errorf("stating %s: %w", src, err)
-		}
-		pf, err := parquet.OpenFile(srcFile, stat.Size())
-		if err != nil {
-			srcFile.Close()
-			pw.Close()
-			return fmt.Errorf("opening parquet %s: %w", src, err)
-		}
-		rd := parquet.NewGenericReader[T](pf)
-		rows := make([]T, rd.NumRows())
-		// parquet-go's Read reports io.EOF even when it filled the buffer
-		// with the final rows — that is the success case, not an error.
-		if _, err := rd.Read(rows); err != nil && err != io.EOF {
-			rd.Close()
-			srcFile.Close()
-			pw.Close()
-			return fmt.Errorf("reading %s: %w", src, err)
-		}
-		if err := rd.Close(); err != nil {
-			srcFile.Close()
-			pw.Close()
-			return fmt.Errorf("closing reader for %s: %w", src, err)
-		}
-		if err := srcFile.Close(); err != nil {
-			pw.Close()
-			return fmt.Errorf("closing %s: %w", src, err)
-		}
-		if _, err := pw.Write(rows); err != nil {
-			pw.Close()
-			return fmt.Errorf("appending %s: %w", src, err)
-		}
-		if err := pw.Flush(); err != nil {
-			pw.Close()
-			return fmt.Errorf("flushing after %s: %w", src, err)
+			return err
 		}
 	}
 	return pw.Close()
+}
+
+// copyRows streams one source file into pw in batches of len(buf) rows, so a
+// large source (a whole day.parquet being rewritten) is never held in memory
+// at once.
+func copyRows[T any](pw *parquet.GenericWriter[T], src string, buf []T) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", src, err)
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stating %s: %w", src, err)
+	}
+	// The page index and bloom filters are only for selective reads; a full
+	// copy never uses them, and on a fragmented file they are large.
+	pf, err := parquet.OpenFile(f, stat.Size(), parquet.SkipPageIndex(true), parquet.SkipBloomFilters(true))
+	if err != nil {
+		return fmt.Errorf("opening parquet %s: %w", src, err)
+	}
+	rd := parquet.NewGenericReader[T](pf)
+	defer rd.Close()
+	for {
+		n, err := rd.Read(buf)
+		if n > 0 {
+			if _, werr := pw.Write(buf[:n]); werr != nil {
+				return fmt.Errorf("appending %s: %w", src, werr)
+			}
+		}
+		// parquet-go reports io.EOF together with the final rows; that is the
+		// success case, not an error.
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", src, err)
+		}
+	}
 }
