@@ -6,14 +6,20 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/davidgeorgehope/ducktel/internal/query"
 	"github.com/davidgeorgehope/ducktel/internal/receiver"
 	"github.com/davidgeorgehope/ducktel/internal/writer"
 )
+
+// goMemLimitFraction is the share of the container memory limit given to the
+// Go heap as a soft limit (see the GOMEMLIMIT note in serveCmd).
+const goMemLimitFraction = 70
 
 func serveCmd() *cobra.Command {
 	var (
@@ -79,6 +85,18 @@ token would cross an untrusted network.`,
 			}
 			if bufferSize <= 0 {
 				return fmt.Errorf("--buffer-size must be greater than zero, got %d", bufferSize)
+			}
+
+			// Go does not size its heap to the container: without a limit
+			// the GC lets the heap grow to about twice the live set, which
+			// compaction rewrites pushed past a 512Mi container limit (the
+			// live set itself stays near 250MiB). An explicit GOMEMLIMIT in
+			// the environment still wins.
+			if os.Getenv("GOMEMLIMIT") == "" {
+				if limit := query.CgroupMemoryLimit(); limit > 0 {
+					debug.SetMemoryLimit(limit / 100 * goMemLimitFraction)
+					log.Printf("go memory limit: %d MiB (%d%% of cgroup limit)", limit/100*goMemLimitFraction>>20, goMemLimitFraction)
+				}
 			}
 
 			// One writer per data directory: refuse to start rather than

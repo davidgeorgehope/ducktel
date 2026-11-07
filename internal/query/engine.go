@@ -46,6 +46,10 @@ var cgroupMemoryFiles = []string{
 	"/sys/fs/cgroup/memory/memory.limit_in_bytes", // cgroup v1: bytes
 }
 
+// CgroupMemoryLimit is cgroupMemoryLimit for other packages (serve sizes the
+// Go heap limit from it).
+func CgroupMemoryLimit() int64 { return cgroupMemoryLimit() }
+
 // cgroupMemoryLimit returns the cgroup memory limit in bytes, or 0 when there
 // is none (bare-metal dev machine, or the file says "max").
 func cgroupMemoryLimit() int64 {
