@@ -230,6 +230,13 @@ async function loadMetricNames() {
   if (names.includes(current)) select.value = current;
 }
 
+// --- config (flush button visibility) ---
+
+async function loadConfig() {
+  const cfg = await api("/api/config");
+  document.getElementById("flush-btn").classList.toggle("hidden", !cfg.flush_enabled);
+}
+
 // --- tabs ---
 
 function activateTab(name) {
@@ -605,6 +612,17 @@ function fmtValue(v) {
   return Number.isInteger(n) ? String(n) : n.toFixed(3);
 }
 
+// --- flush ---
+
+async function runFlush() {
+  try {
+    await api("/api/flush", { method: "POST" });
+    toast("flushed — buffered telemetry is now on disk");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
 // --- logout ---
 //
 // The token now persists in localStorage (see the top-of-file note), so
@@ -750,6 +768,7 @@ async function connect() {
   hideGate();
   await loadServices();
   await loadMetricNames();
+  await loadConfig();
   state.connected = true;
   // Lands on whatever the URL hash describes, or falls back to a plain
   // recent-traces view so the first thing you see isn't an empty table.
@@ -788,6 +807,7 @@ function init() {
     e.preventDefault();
     runMetricQuery();
   });
+  document.getElementById("flush-btn").addEventListener("click", runFlush);
   document.getElementById("logout-btn").addEventListener("click", logout);
 
   window.addEventListener("hashchange", onHashchange);

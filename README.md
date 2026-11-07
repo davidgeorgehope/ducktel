@@ -296,9 +296,10 @@ ducktel mcp --http --port 4319 --auth-token "$READ_TOKEN" --dashboard
 ```
 
 - **Off by default.** Without `--dashboard` nothing below is mounted.
-- **Read-only.** Traces (search plus waterfall), logs and metrics, per tenant. The JSON API under `/api/*` (`traces`, `traces/{trace_id}`, `logs`, `metrics`, `tenants`, `services`, `metric-names`) is a thin GET-only wrapper over the same query core the MCP tools use.
+- **Read-only views.** Traces (search plus waterfall), logs and metrics, per tenant. The JSON API under `/api/*` (`traces`, `traces/{trace_id}`, `logs`, `metrics`, `tenants`, `services`, `metric-names`) is a thin GET wrapper over the same query core the MCP tools use.
 - **Same token, same tenant rule.** Every `/api/*` route requires the MCP read token; every query is filtered by `tenant.id`, exactly like the MCP tools.
 - **No new dependencies.** Plain HTML/CSS/JS embedded in the binary; no build step, no CDN.
+- **Flush button, only with `--flush-url`.** `POST /api/flush` makes the last `--flush-interval` of buffered telemetry queryable now. It is the same request the `flush_buffer` tool sends, with the same read token; it writes no telemetry and changes no stored data. Without `--flush-url` the button is hidden and the route returns 404.
 - **Cheap to leave open.** Picker lists (tenants, services, metric names) are cached for five minutes, so page loads do not rescan every file. Each `/api` request is logged with path, parameters, status, size and duration.
 
 ### `ducktel testdata`
