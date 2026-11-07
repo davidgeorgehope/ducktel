@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/davidgeorgehope/ducktel/internal/query"
@@ -17,6 +18,10 @@ type Core struct {
 	engine *query.Engine
 	// tenantAttr is the resource attribute holding the tenant id.
 	tenantAttr string
+
+	// cache holds recent List* discovery results; see discover.
+	cacheMu sync.Mutex
+	cache   map[string]cachedResult
 }
 
 // NewCore wires a query engine into a Core. An engine of nil is valid for
@@ -379,16 +384,57 @@ func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes 
 	return c.engine.Query(q, params...)
 }
 
-// ListTenants returns every distinct tenant id seen in stored traces. No MCP
-// tool needs this — an agent caller already knows its own tenant — but a
+// discoveryTTL is how long a List* result is reused. Every page load (and
+// every reconnect after an error) asks for the same lists; re-scanning for
+// each is pure cost, and a list that is a few minutes stale is harmless.
+const discoveryTTL = 5 * time.Minute
+
+type cachedResult struct {
+	rows []map[string]any
+	cols []string
+	at   time.Time
+}
+
+// discover runs a bounded discovery query through a short-lived cache keyed
+// by key. Results are shared between callers and must be treated read-only.
+// Errors are not cached.
+func (c *Core) discover(key, q string, args ...any) ([]map[string]any, []string, error) {
+	c.cacheMu.Lock()
+	if r, ok := c.cache[key]; ok && time.Since(r.at) < discoveryTTL {
+		c.cacheMu.Unlock()
+		return r.rows, r.cols, nil
+	}
+	c.cacheMu.Unlock()
+
+	rows, cols, err := c.engine.Query(q, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	c.cacheMu.Lock()
+	if c.cache == nil {
+		c.cache = make(map[string]cachedResult)
+	}
+	c.cache[key] = cachedResult{rows: rows, cols: cols, at: time.Now()}
+	c.cacheMu.Unlock()
+	return rows, cols, nil
+}
+
+// ListTenants returns the distinct tenant ids seen in any signal: traces,
+// logs or metrics. A tenant that only ships logs or metrics is still a tenant,
+// and a traces-only list hid it from the dashboard's picker. No MCP tool
+// needs this — an agent caller already knows its own tenant — but a
 // human-facing consumer needs a way to discover what exists.
 func (c *Core) ListTenants() ([]map[string]any, []string, error) {
 	path := strings.ReplaceAll(jsonPath(c.tenantAttr), "'", "''")
-	q := fmt.Sprintf(`SELECT DISTINCT json_extract_string(resource_attributes, '%s') AS tenant
-	      FROM traces
-	      WHERE json_extract_string(resource_attributes, '%s') IS NOT NULL
-	      ORDER BY 1`, path, path)
-	return c.engine.Query(q)
+	var parts []string
+	for _, table := range []string{"traces", "logs", "metrics"} {
+		parts = append(parts, fmt.Sprintf(`SELECT json_extract_string(resource_attributes, '%s') AS tenant
+	      FROM %s
+	      WHERE json_extract_string(resource_attributes, '%s') IS NOT NULL`, path, table, path))
+	}
+	// UNION (not UNION ALL) also de-duplicates across signals.
+	q := strings.Join(parts, "\n	      UNION\n	      ") + "\n	      ORDER BY 1"
+	return c.discover("tenants", q)
 }
 
 // ListServices returns distinct service names within one tenant.
@@ -397,7 +443,7 @@ func (c *Core) ListServices(tenant string) ([]map[string]any, []string, error) {
 		return nil, nil, err
 	}
 	q := `SELECT DISTINCT service_name FROM traces WHERE ` + c.tenantPredicate() + ` ORDER BY 1`
-	return c.engine.Query(q, tenant)
+	return c.discover("services\x00"+tenant, q, tenant)
 }
 
 // ListLogServices returns distinct service names within one tenant as seen
@@ -410,7 +456,7 @@ func (c *Core) ListLogServices(tenant string) ([]map[string]any, []string, error
 		return nil, nil, err
 	}
 	q := `SELECT DISTINCT service_name FROM logs WHERE ` + c.tenantPredicate() + ` ORDER BY 1`
-	return c.engine.Query(q, tenant)
+	return c.discover("logservices\x00"+tenant, q, tenant)
 }
 
 // ListMetricNames returns distinct metric names within one tenant. Like
@@ -422,5 +468,5 @@ func (c *Core) ListMetricNames(tenant string) ([]map[string]any, []string, error
 		return nil, nil, err
 	}
 	q := `SELECT DISTINCT metric_name FROM metrics WHERE ` + c.tenantPredicate() + ` ORDER BY 1`
-	return c.engine.Query(q, tenant)
+	return c.discover("metricnames\x00"+tenant, q, tenant)
 }

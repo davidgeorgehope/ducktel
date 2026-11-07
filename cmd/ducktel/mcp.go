@@ -17,16 +17,20 @@ import (
 	"github.com/davidgeorgehope/ducktel/internal/httpauth"
 	"github.com/davidgeorgehope/ducktel/internal/mcp"
 	"github.com/davidgeorgehope/ducktel/internal/query"
+	"github.com/davidgeorgehope/ducktel/internal/telemetry"
+	"github.com/davidgeorgehope/ducktel/internal/webapi"
+	"github.com/davidgeorgehope/ducktel/web"
 )
 
 func mcpCmd() *cobra.Command {
 	var (
-		httpMode bool
-		host     string
-		port     int
-		token    string
-		basePath string
-		flushURL string
+		httpMode  bool
+		host      string
+		port      int
+		token     string
+		basePath  string
+		flushURL  string
+		dashboard bool
 	)
 
 	cmd := &cobra.Command{
@@ -59,10 +63,16 @@ Two transports:
 this server's own token, so the query side can request a flush without ever
 holding write access.
 
+--dashboard additionally serves a human-facing dashboard (static SPA at
+/dashboard, JSON REST API at /api/*) on the same port, guarded by the same
+--auth-token — this is a convenience view over the identical query core the
+MCP tools use, not a second trust domain, so it reuses the one read token
+rather than minting another secret.
+
 Examples:
   ducktel mcp --data-dir /data
   ducktel mcp --http --host 0.0.0.0 --port 4319 --auth-token "$READ_TOKEN" \
-    --flush-url http://localhost:4318/flush`,
+    --flush-url http://localhost:4318/flush --dashboard`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Env wins only when the flag was not given, so an explicit flag
 			// can always override the environment.
@@ -104,7 +114,7 @@ Examples:
 				}
 				return nil
 			}
-			return serveMCPHTTP(newServer, host, port, token, basePath)
+			return serveMCPHTTP(newServer, engine, host, port, token, basePath, dashboard)
 		},
 	}
 
@@ -114,18 +124,23 @@ Examples:
 	cmd.Flags().StringVar(&token, "auth-token", "", "Require this bearer token in HTTP mode (env: DUCKTEL_MCP_TOKEN)")
 	cmd.Flags().StringVar(&basePath, "base-path", "/mcp", "URL path to serve the MCP endpoint on in HTTP mode")
 	cmd.Flags().StringVar(&flushURL, "flush-url", "", "Writer's POST /flush endpoint, e.g. http://localhost:4318/flush; enables the flush_buffer tool (env: DUCKTEL_FLUSH_URL)")
+	cmd.Flags().BoolVar(&dashboard, "dashboard", false, "Also serve the dashboard SPA at /dashboard and its REST API at /api, guarded by the same --auth-token")
 
 	return cmd
 }
 
 // serveMCPHTTP runs the MCP server over Streamable HTTP with a bearer-token
-// check in front of it.
+// check in front of it. When dashboard is set, it also mounts the dashboard
+// SPA and its REST API on the same mux, same port, same token — see mcpCmd's
+// --dashboard help text for why that's one trust domain, not two.
 func serveMCPHTTP(
 	newServer func() *sdkmcp.Server,
+	engine *query.Engine,
 	host string,
 	port int,
 	token string,
 	basePath string,
+	dashboard bool,
 ) error {
 	if token == "" {
 		// Refuse rather than silently expose everything: over the network this
@@ -145,6 +160,22 @@ func serveMCPHTTP(
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	if dashboard {
+		// Same Core the MCP tools query, same token — this is a second
+		// transport onto identical query logic, not a second trust domain.
+		core := telemetry.NewCore(engine)
+		webapi.NewHandlers(core, token).Register(mux)
+
+		// Static assets are unauthenticated: they're app shell with no data
+		// or secrets embedded in them. Only the /api/* calls the SPA makes
+		// carry the token, checked above.
+		assets := http.FileServerFS(webui.FS())
+		mux.Handle("GET /dashboard/", http.StripPrefix("/dashboard/", assets))
+		mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
+		})
+	}
+
 	addr := fmt.Sprintf("%s:%d", host, port)
 	srv := &http.Server{
 		Addr:              addr,
@@ -155,7 +186,7 @@ func serveMCPHTTP(
 		IdleTimeout:       120 * time.Second,
 	}
 
-	log.Printf("mcp: listening on %s%s (auth enabled)", addr, basePath)
+	log.Printf("mcp: listening on %s%s (auth enabled, dashboard=%v)", addr, basePath, dashboard)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()

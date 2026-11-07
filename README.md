@@ -286,6 +286,21 @@ Five generic, domain-agnostic tools:
 
 See [`skills/ducktel/SKILL.md`](skills/ducktel/SKILL.md) for the full reference, including flush-latency semantics and dotted-attribute-key gotchas.
 
+#### Optional dashboard (`--dashboard`)
+
+For the occasional human look at the same data, `--http --dashboard` also serves a small read-only dashboard on the same port:
+
+```bash
+ducktel mcp --http --port 4319 --auth-token "$READ_TOKEN" --dashboard
+# open http://localhost:4319/dashboard and paste the read token
+```
+
+- **Off by default.** Without `--dashboard` nothing below is mounted.
+- **Read-only.** Traces (search plus waterfall), logs and metrics, per tenant. The JSON API under `/api/*` (`traces`, `traces/{trace_id}`, `logs`, `metrics`, `tenants`, `services`, `metric-names`) is a thin GET-only wrapper over the same query core the MCP tools use.
+- **Same token, same tenant rule.** Every `/api/*` route requires the MCP read token; every query is filtered by `tenant.id`, exactly like the MCP tools.
+- **No new dependencies.** Plain HTML/CSS/JS embedded in the binary; no build step, no CDN.
+- **Cheap to leave open.** Picker lists (tenants, services, metric names) are cached for five minutes, so page loads do not rescan every file. Each `/api` request is logged with path, parameters, status, size and duration.
+
 ### `ducktel testdata`
 
 Generate synthetic OTLP telemetry for testing.
