@@ -28,6 +28,12 @@ func seedSpan(svc, tenant, traceID string) writer.TraceSpan {
 // by the given token (empty disables auth, matching httpauth.Bearer).
 func newTestMux(t *testing.T, token string) *http.ServeMux {
 	t.Helper()
+	return newTestMuxWithFlusher(t, token, telemetry.NewFlusher("", ""))
+}
+
+// newTestMuxWithFlusher is newTestMux with a caller-supplied Flusher.
+func newTestMuxWithFlusher(t *testing.T, token string, flusher *telemetry.Flusher) *http.ServeMux {
+	t.Helper()
 	dir := t.TempDir()
 
 	w := writer.New(dir, time.Hour, 1000)
@@ -67,7 +73,7 @@ func newTestMux(t *testing.T, token string) *http.ServeMux {
 	t.Cleanup(func() { engine.Close() })
 
 	mux := http.NewServeMux()
-	NewHandlers(telemetry.NewCore(engine), token).Register(mux)
+	NewHandlers(telemetry.NewCore(engine), flusher, token).Register(mux)
 	return mux
 }
 
@@ -339,5 +345,82 @@ func TestListTenantsReturnsBoth(t *testing.T) {
 	}
 	if !got["acme"] || !got["globex"] {
 		t.Errorf("tenants = %v, want acme and globex", resp.Rows)
+	}
+}
+
+// --- flush ---
+
+func TestFlushNotConfiguredIs404(t *testing.T) {
+	mux := newTestMux(t, "") // built with an empty (disabled) Flusher
+
+	rec := doReq(t, mux, "POST", "/api/flush", "")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 when flush is not configured", rec.Code)
+	}
+}
+
+func TestConfigReportsFlushDisabled(t *testing.T) {
+	mux := newTestMux(t, "")
+
+	rec := doReq(t, mux, "GET", "/api/config", "")
+	var cfg map[string]bool
+	json.Unmarshal(rec.Body.Bytes(), &cfg)
+	if cfg["flush_enabled"] {
+		t.Error("flush_enabled should be false when no Flusher URL is configured")
+	}
+}
+
+// TestFlushProxiesWithReadToken checks the configured case end to end: the
+// dashboard's POST /api/flush reaches the receiver's /flush with this server's
+// own read token, exactly as the flush_buffer MCP tool does.
+func TestFlushProxiesWithReadToken(t *testing.T) {
+	var calls int
+	var gotAuth, gotMethod string
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		gotAuth, gotMethod = r.Header.Get("Authorization"), r.Method
+		w.Write([]byte(`{"status":"flushed"}`))
+	}))
+	defer receiver.Close()
+
+	mux := newTestMuxWithFlusher(t, "secret", telemetry.NewFlusher(receiver.URL+"/flush", "secret"))
+
+	if rec := doReq(t, mux, "POST", "/api/flush", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("without a token: status = %d, want 401", rec.Code)
+	}
+	if rec := doReq(t, mux, "GET", "/api/flush", "secret"); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET: status = %d, want 405", rec.Code)
+	}
+	if calls != 0 {
+		t.Fatalf("receiver called %d times by rejected requests", calls)
+	}
+
+	rec := doReq(t, mux, "POST", "/api/flush", "secret")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if calls != 1 || gotMethod != http.MethodPost || gotAuth != "Bearer secret" {
+		t.Errorf("receiver saw calls=%d method=%q auth=%q", calls, gotMethod, gotAuth)
+	}
+
+	rec = doReq(t, mux, "GET", "/api/config", "secret")
+	var cfg map[string]bool
+	json.Unmarshal(rec.Body.Bytes(), &cfg)
+	if !cfg["flush_enabled"] {
+		t.Error("flush_enabled should be true when a Flusher URL is configured")
+	}
+}
+
+// TestFlushReceiverErrorIs500 surfaces a rejected flush instead of reporting
+// success.
+func TestFlushReceiverErrorIs500(t *testing.T) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer receiver.Close()
+
+	mux := newTestMuxWithFlusher(t, "", telemetry.NewFlusher(receiver.URL+"/flush", ""))
+	if rec := doReq(t, mux, "POST", "/api/flush", ""); rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 when the receiver rejects the flush", rec.Code)
 	}
 }

@@ -17,17 +17,18 @@ import (
 	"github.com/davidgeorgehope/ducktel/internal/telemetry"
 )
 
-// Handlers holds the shared query core behind the REST API.
+// Handlers holds the shared query core and flush wiring behind the REST API.
 type Handlers struct {
-	core  *telemetry.Core
-	token string
+	core    *telemetry.Core
+	flusher *telemetry.Flusher
+	token   string
 }
 
 // NewHandlers builds the REST handlers. token, when non-empty, is required as
 // a bearer token on every route — the same read token the MCP server uses;
 // see internal/httpauth for the check itself.
-func NewHandlers(core *telemetry.Core, token string) *Handlers {
-	return &Handlers{core: core, token: token}
+func NewHandlers(core *telemetry.Core, flusher *telemetry.Flusher, token string) *Handlers {
+	return &Handlers{core: core, flusher: flusher, token: token}
 }
 
 // Register mounts /api/* routes onto mux, each guarded by the same bearer
@@ -43,6 +44,8 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/tenants", auth(h.handleListTenants))
 	mux.Handle("GET /api/services", auth(h.handleListServices))
 	mux.Handle("GET /api/metric-names", auth(h.handleListMetricNames))
+	mux.Handle("POST /api/flush", auth(h.handleFlush))
+	mux.Handle("GET /api/config", auth(h.handleConfig))
 }
 
 // --- response helpers ---
@@ -219,4 +222,28 @@ func (h *Handlers) handleListMetricNames(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeRows(w, rows, cols)
+}
+
+// handleFlush proxies to the shared Flusher — the same request the
+// flush_buffer MCP tool issues, authorised with this server's own token, never
+// the ingest token.
+func (h *Handlers) handleFlush(w http.ResponseWriter, r *http.Request) {
+	if !h.flusher.Enabled() {
+		http.Error(w, "flush is not configured", http.StatusNotFound)
+		return
+	}
+	if err := h.flusher.Flush(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"flushed"}`))
+}
+
+// handleConfig lets the dashboard decide whether to render the flush button
+// without guessing — mirrors the MCP server only advertising flush_buffer
+// when a flush endpoint is configured.
+func (h *Handlers) handleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"flush_enabled": h.flusher.Enabled()})
 }
