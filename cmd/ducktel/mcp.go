@@ -114,7 +114,7 @@ Examples:
 				}
 				return nil
 			}
-			return serveMCPHTTP(newServer, engine, host, port, token, basePath, dashboard)
+			return serveMCPHTTP(newServer, engine, host, port, token, basePath, flushURL, dashboard)
 		},
 	}
 
@@ -140,6 +140,7 @@ func serveMCPHTTP(
 	port int,
 	token string,
 	basePath string,
+	flushURL string,
 	dashboard bool,
 ) error {
 	if token == "" {
@@ -161,10 +162,12 @@ func serveMCPHTTP(
 	})
 
 	if dashboard {
-		// Same Core the MCP tools query, same token — this is a second
-		// transport onto identical query logic, not a second trust domain.
+		// Same Core the MCP tools query, same Flusher the flush_buffer tool
+		// calls, same token — this is a second transport onto identical
+		// query logic, not a second trust domain.
 		core := telemetry.NewCore(engine)
-		webapi.NewHandlers(core, token).Register(mux)
+		flusher := telemetry.NewFlusher(flushURL, token)
+		webapi.NewHandlers(core, flusher, token).Register(mux)
 
 		// Static assets are unauthenticated: they're app shell with no data
 		// or secrets embedded in them. Only the /api/* calls the SPA makes
