@@ -817,6 +817,61 @@ func TestFiltersCannotInjectSQL(t *testing.T) {
 
 // --- discovery: ListTenants / ListServices ---
 
+// TestListTenantsIncludesLogsAndMetricsOnlyTenants: a tenant that sends no
+// traces must still be discoverable.
+func TestListTenantsIncludesLogsAndMetricsOnlyTenants(t *testing.T) {
+	dir := t.TempDir()
+	w := writer.New(dir, time.Hour, 1000)
+	w.Add([]writer.TraceSpan{seedSpan("api", "tracesco", "t1", "{}")})
+	w.AddLogs([]writer.LogRecord{{Timestamp: time.Now().UnixMicro(), ServiceName: "l",
+		Body: "x", Attributes: "{}", ResourceAttributes: `{"tenant.id":"logsco"}`}})
+	w.AddMetrics([]writer.MetricPoint{{MetricName: "m", MetricType: "gauge",
+		Timestamp: time.Now().UnixMicro(), ResourceAttributes: `{"tenant.id":"metricsco"}`},
+		{MetricName: "m", MetricType: "gauge",
+			Timestamp: time.Now().UnixMicro(), ResourceAttributes: `{"tenant.id":"tracesco"}`}})
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := query.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { engine.Close() })
+
+	rows, _, err := NewCore(engine).ListTenants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range rows {
+		got = append(got, r["tenant"].(string))
+	}
+	want := []string{"logsco", "metricsco", "tracesco"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("ListTenants = %v, want %v (sorted, each once)", got, want)
+	}
+}
+
+// TestListTenantsWithOnlyTraces: the empty logs/metrics placeholder views
+// must not break the union.
+func TestListTenantsWithOnlyTraces(t *testing.T) {
+	dir := t.TempDir()
+	w := writer.New(dir, time.Hour, 1000)
+	w.Add([]writer.TraceSpan{seedSpan("api", "solo", "t1", "{}")})
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := query.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	rows, _, err := NewCore(engine).ListTenants()
+	if err != nil || len(rows) != 1 || rows[0]["tenant"] != "solo" {
+		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+}
+
 func TestListTenants(t *testing.T) {
 	c := newTestCore(t)
 

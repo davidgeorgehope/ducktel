@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ducktel</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="gate" class="gate">
+  <div class="gate-box">
+    <h1>🦆 ducktel</h1>
+    <p>Enter the read token to connect.</p>
+    <input id="gate-token" type="password" placeholder="Bearer token" autocomplete="off">
+    <button id="gate-connect">Connect</button>
+    <p id="gate-error" class="error"></p>
+  </div>
+</div>
+
+<div id="app" class="app hidden">
+  <header>
+    <h1>🦆 ducktel</h1>
+    <div id="tenant-picker-wrap" class="hidden">
+      <label>Tenant <select id="tenant-picker"></select></label>
+    </div>
+    <span id="tenant-label" class="tenant-label hidden"></span>
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="traces">Traces</button>
+      <button class="tab-btn" data-tab="logs">Logs</button>
+      <button class="tab-btn" data-tab="metrics">Metrics</button>
+    </nav>
+    <button id="logout-btn" class="secondary" type="button">Log out</button>
+    <span id="toast" class="toast"></span>
+  </header>
+
+  <section id="tab-traces" class="tab tab-split">
+    <form id="traces-form" class="filters">
+      <label>Service <select id="f-service"><option value="">any</option></select></label>
+      <label>Since (min) <input id="f-since" type="number" value="60" min="1"></label>
+      <label>Limit <input id="f-limit" type="number" value="100" min="1" max="1000"></label>
+      <div id="f-attr-filters" class="attr-filters"></div>
+      <button type="button" id="f-add-filter">+ attribute filter</button>
+      <button type="submit">Search</button>
+    </form>
+
+    <div class="split">
+      <div class="split-top">
+        <table id="traces-table" class="data-table">
+          <thead><tr><th>Start</th><th>Service</th><th>Span</th><th>Duration</th><th>Status</th><th>Trace</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div id="waterfall" class="waterfall hidden"></div>
+    </div>
+  </section>
+
+  <section id="tab-logs" class="tab hidden">
+    <form id="logs-form" class="filters">
+      <label>Service <select id="l-service"><option value="">any</option></select></label>
+      <label>Severity
+        <select id="l-severity">
+          <option value="">any</option><option>debug</option><option>info</option>
+          <option>warn</option><option>error</option><option>fatal</option>
+        </select>
+      </label>
+      <label>Search <input id="l-search" type="text" placeholder="text in the body"></label>
+      <label>Since (min) <input id="l-since" type="number" value="60" min="1"></label>
+      <label>Limit <input id="l-limit" type="number" value="100" min="1" max="1000"></label>
+      <button type="submit">Search</button>
+    </form>
+
+    <table id="logs-table" class="data-table">
+      <thead><tr><th>Time</th><th>Service</th><th>Severity</th><th>Body</th><th>Trace</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="tab-metrics" class="tab hidden">
+    <form id="metrics-form" class="filters">
+      <label>Metric name <select id="m-name"><option value="">-- select --</option></select></label>
+      <label>Aggregation
+        <select id="m-agg">
+          <option>avg</option><option>sum</option><option>min</option><option>max</option>
+          <option>count</option><option>p50</option><option>p95</option><option>p99</option>
+        </select>
+      </label>
+      <label>Since (min) <input id="m-since" type="number" value="60" min="1"></label>
+      <label>Group by <input id="m-groupby" type="text" placeholder="e.g. service_name"></label>
+      <button type="submit">Run</button>
+    </form>
+
+    <div id="metric-result"></div>
+  </section>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

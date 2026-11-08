@@ -1,0 +1,293 @@
+:root {
+  color-scheme: dark;
+  --bg: #14151a;
+  --panel: #1c1e26;
+  --border: #2c2f3a;
+  --text: #e6e6ea;
+  --muted: #8b8d98;
+  --accent: #f2c14e;
+  --ok: #3fb950;
+  --err: #f85149;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.hidden { display: none !important; }
+
+h1 { font-size: 18px; margin: 0; }
+
+/* --- token gate --- */
+
+.gate {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+.gate-box {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px 28px;
+  width: 320px;
+}
+.gate-box p { color: var(--muted); margin: 8px 0 16px; }
+.gate-box input {
+  width: 100%;
+  padding: 8px;
+  margin-bottom: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+.gate-box button { width: 100%; }
+.error { color: var(--err); min-height: 1em; }
+
+/* --- app shell --- */
+
+.app { padding: 16px 24px; max-width: 1100px; margin: 0 auto; }
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.tenant-label { color: var(--muted); }
+.tabs { display: flex; gap: 4px; margin-left: auto; }
+.tab-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.tab-btn.active { color: var(--text); border-color: var(--accent); }
+.toast { color: var(--ok); font-size: 12px; }
+.toast.err { color: var(--err); }
+
+button {
+  background: var(--accent);
+  color: #1a1a1a;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-weight: normal;
+}
+
+select, input[type=text], input[type=number], input[type=password] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 5px 8px;
+  border-radius: 4px;
+}
+
+/* --- filter forms --- */
+
+.filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.attr-filters { display: flex; flex-direction: column; gap: 6px; }
+.attr-filter-row { display: flex; gap: 6px; }
+.attr-filter-row input { width: 120px; }
+
+/* --- tables --- */
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.data-table th, .data-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.data-table th { color: var(--muted); font-weight: 600; }
+.data-table tbody tr { cursor: pointer; }
+.data-table tbody tr:hover { background: rgba(255,255,255,0.03); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+.status-ok { color: var(--ok); }
+.status-error { color: var(--err); }
+.status-unset { color: var(--muted); }
+
+/* severity colours for the logs table: red for error/fatal (status-error),
+   amber for warn, dimmed for debug/trace */
+.sev-warn { color: var(--accent); }
+.sev-dim { color: var(--muted); }
+
+.log-body {
+  max-width: 560px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+tr.clickable td:last-child { text-decoration: underline; }
+
+/* explicit marker for records that never belonged to a trace — an empty
+   cell reads as broken rather than as "not part of a trace" */
+.no-trace { color: var(--muted); font-style: italic; }
+
+/* log records shown under a waterfall span, and the trailing block for
+   records not attached to any span */
+.wf-logs {
+  border-left: 2px solid var(--border);
+  margin: 2px 0 6px 0;
+}
+.wf-log {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 1px 0 1px 8px;
+  font-size: 12px;
+}
+.wf-log-sev { width: 48px; flex: none; font-weight: 600; }
+.wf-log-time { margin-left: auto; flex: none; color: var(--muted); }
+.wf-log-heading {
+  margin: 14px 0 4px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* --- traces split pane ---
+   A trace click must land on-screen even when the result table is long, so
+   the tab fits the viewport and its two panes scroll independently: the
+   table above (sticky header), the waterfall pinned to the lower region.
+   app.js sizes the tab from its own offset to the viewport bottom, so there
+   are no magic header/filter heights to keep in sync. */
+
+.tab-split { display: flex; flex-direction: column; }
+
+.split {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The scroll container carries the card look; the table inside drops both so
+   the sticky header anchors to this pane — `overflow: hidden` on the table
+   would make the table itself the sticky context and freeze the header. */
+.split-top {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.split-top .data-table {
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent;
+}
+.split-top .data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+}
+
+/* --- waterfall --- */
+
+.waterfall {
+  margin-top: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+/* Inside the traces split it is the fixed lower pane, not a card in the
+   page flow. */
+.tab-split .split .waterfall {
+  flex: 0 0 45%;
+  min-height: 150px;
+  overflow-y: auto;
+  margin-top: 10px;
+}
+.wf-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+.wf-label {
+  width: 320px;
+  flex: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wf-track {
+  position: relative;
+  flex: 1;
+  height: 14px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 2px;
+}
+.wf-bar {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  min-width: 2px;
+}
+.wf-bar.status-error { background: var(--err); }
+.wf-duration { width: 70px; flex: none; text-align: right; color: var(--muted); }
+
+/* --- metrics --- */
+
+.stat-big { font-size: 42px; font-weight: 700; padding: 20px 0; }
+.bar-chart { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.bar-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.bar-label { width: 200px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { flex: 1; background: rgba(255,255,255,0.04); border-radius: 2px; height: 16px; position: relative; }
+.bar-fill { height: 100%; background: var(--accent); border-radius: 2px; }
+.bar-value { width: 90px; flex: none; text-align: right; color: var(--muted); }
+
+.empty { color: var(--muted); padding: 20px; text-align: center; }
