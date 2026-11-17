@@ -272,15 +272,21 @@ func nextPath(dir string, now time.Time) (string, error) {
 	}
 }
 
-// maintenanceInterval is fixed regardless of flush-interval: retention and
-// compaction are both day-granular, so checking hourly is more than enough.
-const maintenanceInterval = time.Hour
+// maintenanceInterval is fixed regardless of flush-interval: retention and day
+// compaction are cheap no-ops when there is nothing to do, so a ten-minute
+// check keeps hourly compaction close behind the closing hour instead of
+// leaving today's and yesterday's data fragmented for up to an hour.
+const maintenanceInterval = 10 * time.Minute
 
-// maintenance runs the day-granular housekeeping: retention pruning (a no-op
-// while retention is disabled) and compaction of past days' per-flush files.
-// Both are crash-safe and cheap no-ops when there is nothing to do.
+// maintenance runs the housekeeping: retention pruning (a no-op while
+// retention is disabled), compaction of closed hours of today and yesterday,
+// and compaction of past days' per-flush files. All are crash-safe and cheap
+// no-ops when there is nothing to do.
 func (w *Writer) maintenance() {
 	if err := w.pruneOldData(); err != nil {
+		w.report(err)
+	}
+	if err := w.compactHours(time.Now()); err != nil {
 		w.report(err)
 	}
 	if err := w.compactOldDays(); err != nil {
@@ -297,7 +303,7 @@ func (w *Writer) Start() {
 		defer maintTicker.Stop()
 
 		// Run once at startup too, so a long-stopped process catches up on
-		// backlog instead of waiting a full hour.
+		// backlog instead of waiting a full maintenance interval.
 		w.maintenance()
 
 		for {
