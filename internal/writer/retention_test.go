@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -68,7 +69,7 @@ func TestPruneOldDataRemovesOnlyOldDirectories(t *testing.T) {
 
 	w := New(dir, time.Hour, 1000)
 	w.SetRetention(30 * 24 * time.Hour)
-	if err := w.pruneOldData(); err != nil {
+	if err := w.pruneOldData(context.Background()); err != nil {
 		t.Fatalf("pruneOldData: %v", err)
 	}
 
@@ -85,7 +86,7 @@ func TestPruneOldDataDisabledByDefault(t *testing.T) {
 	old := mkDateDir(t, dir, "traces", time.Now().UTC().Add(-400*24*time.Hour).Format("2006-01-02"))
 
 	w := New(dir, time.Hour, 1000) // retention never set — must default to disabled
-	if err := w.pruneOldData(); err != nil {
+	if err := w.pruneOldData(context.Background()); err != nil {
 		t.Fatalf("pruneOldData: %v", err)
 	}
 
@@ -103,7 +104,7 @@ func TestPruneOldDataSkipsNonDateDirectories(t *testing.T) {
 
 	w := New(dir, time.Hour, 1000)
 	w.SetRetention(time.Hour) // aggressive — would delete "old" if it were checked
-	if err := w.pruneOldData(); err != nil {
+	if err := w.pruneOldData(context.Background()); err != nil {
 		t.Fatalf("pruneOldData: %v", err)
 	}
 
@@ -117,7 +118,7 @@ func TestPruneOldDataHandlesMissingSignalDirs(t *testing.T) {
 
 	w := New(dir, time.Hour, 1000)
 	w.SetRetention(24 * time.Hour)
-	if err := w.pruneOldData(); err != nil {
+	if err := w.pruneOldData(context.Background()); err != nil {
 		t.Errorf("missing signal directories should not be an error: %v", err)
 	}
 }
@@ -131,7 +132,7 @@ func TestPruneOldDataSweepsAllThreeSignals(t *testing.T) {
 
 	w := New(dir, time.Hour, 1000)
 	w.SetRetention(30 * 24 * time.Hour)
-	if err := w.pruneOldData(); err != nil {
+	if err := w.pruneOldData(context.Background()); err != nil {
 		t.Fatalf("pruneOldData: %v", err)
 	}
 

@@ -1,11 +1,14 @@
 package writer
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
@@ -31,15 +34,30 @@ type Writer struct {
 
 	stopCh chan struct{}
 	done   chan struct{}
+
+	// ctx is cancelled by Stop so an in-flight maintenance pass can return
+	// at its next check instead of running to completion. Compaction is
+	// crash-safe to abort: the temp file is removed and the sources stay.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// maintenance runs in its own goroutine so a long pass never stalls the
+	// flush ticker. maintRunning drops ticks that arrive during a pass rather
+	// than queueing passes that would repeat the same work.
+	maintRunning atomic.Bool
+	maintWG      sync.WaitGroup
 }
 
 func New(dataDir string, flushInterval time.Duration, bufferSize int) *Writer {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Writer{
 		dataDir:       dataDir,
 		flushInterval: flushInterval,
 		bufferSize:    bufferSize,
 		stopCh:        make(chan struct{}),
 		done:          make(chan struct{}),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
@@ -308,16 +326,54 @@ const maintenanceInterval = 10 * time.Minute
 // retention is disabled), compaction of closed hours of today and yesterday,
 // and compaction of past days' per-flush files. All are crash-safe and cheap
 // no-ops when there is nothing to do.
-func (w *Writer) maintenance() {
-	if err := w.pruneOldData(); err != nil {
-		w.report(err)
+//
+// A cancellation is expected during shutdown, not a failure: it is logged once
+// and not passed to onError.
+func (w *Writer) maintenance(ctx context.Context) {
+	if w.reportMaintenance(w.pruneOldData(ctx)) {
+		return
 	}
-	if err := w.compactHours(time.Now()); err != nil {
-		w.report(err)
+	if ctx.Err() != nil {
+		return
 	}
-	if err := w.compactOldDays(); err != nil {
-		w.report(err)
+	if w.reportMaintenance(w.compactHours(ctx, time.Now())) {
+		return
 	}
+	if ctx.Err() != nil {
+		return
+	}
+	w.reportMaintenance(w.compactOldDays(ctx))
+}
+
+// reportMaintenance reports err unless it is a shutdown cancellation, which is
+// the expected result of Stop. It reports whether the pass should stop.
+func (w *Writer) reportMaintenance(err error) (stop bool) {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errStopping) {
+		log.Printf("compaction: stopped early for shutdown")
+		return true
+	}
+	w.report(err)
+	return false
+}
+
+// startMaintenance launches a maintenance pass in its own goroutine. A tick
+// that arrives while the previous pass is still running is dropped: a pass is
+// idempotent, so queueing it would only repeat the same work later.
+func (w *Writer) startMaintenance() {
+	if !w.maintRunning.CompareAndSwap(false, true) {
+		return
+	}
+	w.maintWG.Add(1)
+	go func() {
+		// Clear the running flag only after the pass has fully exited, so the
+		// next tick cannot overlap the tail of this goroutine.
+		defer w.maintRunning.Store(false)
+		defer w.maintWG.Done()
+		w.maintenance(w.ctx)
+	}()
 }
 
 func (w *Writer) Start() {
@@ -330,14 +386,14 @@ func (w *Writer) Start() {
 
 		// Run once at startup too, so a long-stopped process catches up on
 		// backlog instead of waiting a full maintenance interval.
-		w.maintenance()
+		w.startMaintenance()
 
 		for {
 			select {
 			case <-ticker.C:
 				w.report(w.Flush())
 			case <-maintTicker.C:
-				w.maintenance()
+				w.startMaintenance()
 			case <-w.stopCh:
 				w.report(w.Flush())
 				return
@@ -350,7 +406,13 @@ func (w *Writer) Start() {
 // flusher. It returns the error from that final flush, if any.
 func (w *Writer) Stop() error {
 	close(w.stopCh)
+	// Cancel first so an in-flight maintenance pass returns at its next check
+	// instead of making Stop wait for the whole backlog.
+	w.cancel()
 	<-w.done
+	// Wait for maintenance before the final flush so no compaction is still
+	// touching the directory when the last records are written.
+	w.maintWG.Wait()
 	// Flush once more: records requeued by a failed final flush are still
 	// buffered, and the background goroutine has already exited.
 	return w.Flush()

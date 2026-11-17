@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -51,18 +52,24 @@ func ParseRetention(s string) (time.Duration, error) {
 // design, matching the storage layout: a directory holds exactly one day's
 // files, so deleting it whole needs no per-file bookkeeping or compaction —
 // "just deletes directories," per the project's own retention notes.
-func (w *Writer) pruneOldData() error {
+func (w *Writer) pruneOldData(ctx context.Context) error {
 	w.mu.Lock()
 	retention := w.retention
 	w.mu.Unlock()
 	if retention <= 0 {
 		return nil
 	}
+	if ctx.Err() != nil {
+		return errStopping
+	}
 
 	cutoff := time.Now().UTC().Add(-retention)
 
 	var firstErr error
 	for _, signal := range signalDirs {
+		if ctx.Err() != nil {
+			return errStopping
+		}
 		signalDir := filepath.Join(w.dataDir, signal)
 		entries, err := os.ReadDir(signalDir)
 		if err != nil {
@@ -76,6 +83,9 @@ func (w *Writer) pruneOldData() error {
 		}
 
 		for _, e := range entries {
+			if ctx.Err() != nil {
+				return errStopping
+			}
 			if !e.IsDir() {
 				continue // defensive: only date directories are ever expected here
 			}

@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,7 +54,7 @@ func checkMergeKeepsValues(t *testing.T, merge string) {
 	if merge == "day" {
 		merger = mergeDaySignal
 	}
-	if err := merger(out, "metrics", sources); err != nil {
+	if err := merger(context.Background(), out, "metrics", sources); err != nil {
 		t.Fatal(err)
 	}
 	out.Close()

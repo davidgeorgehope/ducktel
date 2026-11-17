@@ -1,6 +1,8 @@
 package writer
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +15,29 @@ import (
 
 	"github.com/parquet-go/parquet-go"
 )
+
+// errStopping marks a pass that returned early because the writer is shutting
+// down. It is not a failure: the temp file is removed and the sources are left
+// for the next run, exactly as after a crash.
+var errStopping = errors.New("writer stopping")
+
+// maintenanceStepHook, when non-nil, runs between compaction merges. Tests use
+// it to hold a pass open long enough to exercise shutdown and flush
+// concurrency; production leaves it nil.
+var maintenanceStepHook func()
+
+// stepMaintenance calls the test hook, then checks for a shutdown. The check
+// comes after the hook so a pass released after Stop still aborts before its
+// next merge.
+func stepMaintenance(ctx context.Context) error {
+	if maintenanceStepHook != nil {
+		maintenanceStepHook()
+	}
+	if ctx.Err() != nil {
+		return errStopping
+	}
+	return nil
+}
 
 // mergedName is the single per-day file compaction produces. It deliberately
 // does not match the writer's HH-MM[-n] naming pattern, and the compactor
@@ -97,7 +122,7 @@ func isTwoDigits(s string) bool {
 // written, fsync'd and renamed onto HH.parquet before sources are removed; a
 // crash before the rename leaves a .tmp-* file that sweepOrphanedTemps
 // eventually removes.
-func (w *Writer) compactHours(now time.Time) error {
+func (w *Writer) compactHours(ctx context.Context, now time.Time) error {
 	now = now.UTC()
 	days := []string{
 		now.Format("2006-01-02"),
@@ -108,7 +133,13 @@ func (w *Writer) compactHours(now time.Time) error {
 	for _, signal := range signalDirs {
 		signalDir := filepath.Join(w.dataDir, signal)
 		for _, day := range days {
-			if err := compactHourDir(signalDir, day, signal, now); err != nil {
+			if ctx.Err() != nil {
+				return errStopping
+			}
+			if err := compactHourDir(ctx, signalDir, day, signal, now); err != nil {
+				if errors.Is(err, errStopping) {
+					return errStopping
+				}
 				if firstErr == nil {
 					firstErr = fmt.Errorf("compacting hours of %s/%s: %w", signal, day, err)
 				}
@@ -121,7 +152,10 @@ func (w *Writer) compactHours(now time.Time) error {
 // compactHourDir merges the eligible hours of one day directory for one
 // signal. The caller only reaches this for today and yesterday, and
 // compactHourDir itself enforces the per-hour margin before touching a file.
-func compactHourDir(signalDir, day, signal string, now time.Time) error {
+func compactHourDir(ctx context.Context, signalDir, day, signal string, now time.Time) error {
+	if ctx.Err() != nil {
+		return errStopping
+	}
 	dayDir := filepath.Join(signalDir, day)
 	dayStart, err := time.ParseInLocation("2006-01-02", day, time.UTC)
 	if err != nil {
@@ -177,6 +211,9 @@ func compactHourDir(signalDir, day, signal string, now time.Time) error {
 
 	var firstErr error
 	for _, hour := range hours {
+		if ctx.Err() != nil {
+			return errStopping
+		}
 		// Eligible: the hour's start plus the margin is at or before now.
 		hourStart := dayStart.Add(time.Duration(hour) * time.Hour)
 		if hourStart.Add(hourlyMargin).After(now) {
@@ -205,15 +242,20 @@ func compactHourDir(signalDir, day, signal string, now time.Time) error {
 			continue
 		}
 
-		if err := writeMergedWith(dayDir, merged, func(tmp *os.File) error {
-			return mergeHourSignal(tmp, signal, sources)
+		if err := writeMergedWith(ctx, dayDir, merged, func(tmp *os.File) error {
+			return mergeHourSignal(ctx, tmp, signal, sources)
 		}); err != nil {
+			if errors.Is(err, errStopping) {
+				return errStopping
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("merging hour %02d: %w", hour, err)
 			}
 			continue
 		}
-		// Sources are removed only after the merged file is in place.
+		// Sources are removed only after the merged file is in place. This loop
+		// is not interrupted on shutdown: HH.parquet next to some of its sources
+		// would count those rows twice until the next pass.
 		for _, f := range sources {
 			if err := os.Remove(f); err != nil {
 				if firstErr == nil {
@@ -222,6 +264,9 @@ func compactHourDir(signalDir, day, signal string, now time.Time) error {
 			}
 		}
 		log.Printf("compaction: merged %d file(s) into %s", len(sources), merged)
+		if err := stepMaintenance(ctx); err != nil {
+			return err
+		}
 	}
 	return firstErr
 }
@@ -251,13 +296,16 @@ func compactHourDir(signalDir, day, signal string, now time.Time) error {
 // is fsync'd and renamed into place before the originals are removed; a
 // crash before the rename leaves a stray .tmp-* file, swept once old enough
 // by sweepOrphanedTemps.
-func (w *Writer) compactOldDays() error {
+func (w *Writer) compactOldDays(ctx context.Context) error {
 	// Eligible: strictly older than yesterday. AddDate(-1) gives yesterday's
 	// date, so `< cutoff` means today-2 and earlier.
 	cutoff := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 
 	var firstErr error
 	for _, signal := range signalDirs {
+		if ctx.Err() != nil {
+			return errStopping
+		}
 		signalDir := filepath.Join(w.dataDir, signal)
 		days, err := os.ReadDir(signalDir)
 		if err != nil {
@@ -270,6 +318,9 @@ func (w *Writer) compactOldDays() error {
 			continue
 		}
 		for _, d := range days {
+			if ctx.Err() != nil {
+				return errStopping
+			}
 			if !d.IsDir() {
 				continue
 			}
@@ -279,7 +330,10 @@ func (w *Writer) compactOldDays() error {
 			if d.Name() >= cutoff {
 				continue // today or yesterday (or a clock-skewed future day)
 			}
-			if err := compactDayDir(signalDir, d.Name(), signal); err != nil {
+			if err := compactDayDir(ctx, signalDir, d.Name(), signal); err != nil {
+				if errors.Is(err, errStopping) {
+					return errStopping
+				}
 				if firstErr == nil {
 					firstErr = fmt.Errorf("compacting %s/%s: %w", signal, d.Name(), err)
 				}
@@ -327,7 +381,10 @@ func sweepOrphanedTemps(dir string) error {
 // compactDayDir merges one day directory's per-flush files for one signal.
 // The caller only reaches this for days strictly older than yesterday, so no
 // live write can still be landing here.
-func compactDayDir(signalDir, day, signal string) error {
+func compactDayDir(ctx context.Context, signalDir, day, signal string) error {
+	if ctx.Err() != nil {
+		return errStopping
+	}
 	dayDir := filepath.Join(signalDir, day)
 	merged := filepath.Join(dayDir, mergedName)
 
@@ -366,18 +423,18 @@ func compactDayDir(signalDir, day, signal string) error {
 		if !fragmented {
 			return nil
 		}
-		if err := writeMerged(dayDir, merged, signal, []string{merged}); err != nil {
+		if err := writeMerged(ctx, dayDir, merged, signal, []string{merged}); err != nil {
 			return err
 		}
 		log.Printf("compaction: rewrote %s (%d row groups were too small)", merged, groups)
-		return nil
+		return stepMaintenance(ctx)
 	}
 	if len(originals) == 0 {
 		return nil
 	}
 	sort.Strings(originals) // chronological
 
-	if err := writeMerged(dayDir, merged, signal, originals); err != nil {
+	if err := writeMerged(ctx, dayDir, merged, signal, originals); err != nil {
 		return err
 	}
 	// Originals are removed only after the merged file is in place — see the
@@ -388,7 +445,7 @@ func compactDayDir(signalDir, day, signal string) error {
 		}
 	}
 	log.Printf("compaction: merged %d file(s) into %s", len(originals), merged)
-	return nil
+	return stepMaintenance(ctx)
 }
 
 // mergeFunc writes a merged parquet body to tmp.
@@ -397,15 +454,17 @@ type mergeFunc func(tmp *os.File) error
 // writeMerged merges sources into a temp file in dayDir and renames it onto
 // merged. sources may include merged itself (a rewrite): it is read in full
 // before the rename replaces it.
-func writeMerged(dayDir, merged, signal string, sources []string) error {
-	return writeMergedWith(dayDir, merged, func(tmp *os.File) error {
-		return mergeDaySignal(tmp, signal, sources)
+func writeMerged(ctx context.Context, dayDir, merged, signal string, sources []string) error {
+	return writeMergedWith(ctx, dayDir, merged, func(tmp *os.File) error {
+		return mergeDaySignal(ctx, tmp, signal, sources)
 	})
 }
 
 // writeMergedWith owns the crash-safe temp-file protocol: write the body,
-// fsync, close, then rename. Callers only supply the mergeFunc.
-func writeMergedWith(dayDir, merged string, merge mergeFunc) error {
+// fsync, close, then rename. Callers only supply the mergeFunc, which may stop
+// returning errStopping. The context is checked before fsync and rename too, so
+// a shutdown stops before the expensive commit steps when it can.
+func writeMergedWith(ctx context.Context, dayDir, merged string, merge mergeFunc) error {
 	tmp, err := os.CreateTemp(dayDir, ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
@@ -417,12 +476,19 @@ func writeMergedWith(dayDir, merged string, merge mergeFunc) error {
 		tmp.Close()
 		return err
 	}
+	if ctx.Err() != nil {
+		tmp.Close()
+		return errStopping
+	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return fmt.Errorf("syncing %s: %w", tmpPath, err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing %s: %w", tmpPath, err)
+	}
+	if ctx.Err() != nil {
+		return errStopping
 	}
 	if err := os.Rename(tmpPath, merged); err != nil {
 		return fmt.Errorf("committing %s: %w", merged, err)
@@ -433,14 +499,14 @@ func writeMergedWith(dayDir, merged string, merge mergeFunc) error {
 // mergeDaySignal writes a day merge body for signal. Hour files are cut at
 // their boundary so the per-hour sort survives into day.parquet; per-flush
 // sources never cause extra cuts.
-func mergeDaySignal(tmp *os.File, signal string, sources []string) error {
+func mergeDaySignal(ctx context.Context, tmp *os.File, signal string, sources []string) error {
 	switch signal {
 	case "traces":
-		return mergeIntoHourAware[TraceSpan](tmp, sources)
+		return mergeIntoHourAware[TraceSpan](ctx, tmp, sources)
 	case "logs":
-		return mergeIntoHourAware[LogRecord](tmp, sources)
+		return mergeIntoHourAware[LogRecord](ctx, tmp, sources)
 	case "metrics":
-		return mergeIntoHourAware[MetricPoint](tmp, sources)
+		return mergeIntoHourAware[MetricPoint](ctx, tmp, sources)
 	default:
 		return fmt.Errorf("unknown signal %q", signal)
 	}
@@ -448,14 +514,14 @@ func mergeDaySignal(tmp *os.File, signal string, sources []string) error {
 
 // mergeHourSignal writes one closed hour's merged body for signal, sorting
 // rows when they fit the in-memory cap.
-func mergeHourSignal(tmp *os.File, signal string, sources []string) error {
+func mergeHourSignal(ctx context.Context, tmp *os.File, signal string, sources []string) error {
 	switch signal {
 	case "traces":
-		return mergeHour[TraceSpan](tmp, sources, traceSpanLess)
+		return mergeHour[TraceSpan](ctx, tmp, sources, traceSpanLess)
 	case "logs":
-		return mergeHour[LogRecord](tmp, sources, logRecordLess)
+		return mergeHour[LogRecord](ctx, tmp, sources, logRecordLess)
 	case "metrics":
-		return mergeHour[MetricPoint](tmp, sources, metricPointLess)
+		return mergeHour[MetricPoint](ctx, tmp, sources, metricPointLess)
 	default:
 		return fmt.Errorf("unknown signal %q", signal)
 	}
@@ -535,11 +601,11 @@ func mergeWriterOptions() []parquet.WriterOption {
 // are cut at compactRowGroupRows and sources are streamed in batches, so memory
 // stays bounded by one read batch plus one row group's buffer, whatever the
 // size of the sources.
-func mergeInto[T any](tmp *os.File, sources []string) error {
+func mergeInto[T any](ctx context.Context, tmp *os.File, sources []string) error {
 	pw := parquet.NewGenericWriter[T](tmp, mergeWriterOptions()...)
 	buf := make([]T, compactReadBatch)
 	for _, src := range sources {
-		if err := copyRows(pw, src, buf); err != nil {
+		if err := copyRows(ctx, pw, src, buf); err != nil {
 			pw.Close()
 			return err
 		}
@@ -558,19 +624,25 @@ var hourSortMaxRows = 20_000
 // what makes the later day merge cheap to scan. Above the cap the sources
 // stream in name order exactly like mergeInto, so memory stays bounded by one
 // read batch plus one row group's buffer whatever the hour's size.
-func mergeHour[T any](tmp *os.File, sources []string, less func(a, b T) bool) error {
+func mergeHour[T any](ctx context.Context, tmp *os.File, sources []string, less func(a, b T) bool) error {
 	var total int64
 	for _, src := range sources {
+		if ctx.Err() != nil {
+			return errStopping
+		}
 		n, err := sourceRowCount(src)
 		if err != nil {
 			return err
 		}
 		total += n
 	}
-	if total > int64(hourSortMaxRows) {
-		return mergeInto[T](tmp, sources)
+	if ctx.Err() != nil {
+		return errStopping
 	}
-	return mergeSorted[T](tmp, sources, less)
+	if total > int64(hourSortMaxRows) {
+		return mergeInto[T](ctx, tmp, sources)
+	}
+	return mergeSorted[T](ctx, tmp, sources, less)
 }
 
 // sourceRowCount reads only a parquet footer. The compactor sums these before
@@ -596,18 +668,24 @@ func sourceRowCount(path string) (int64, error) {
 // mergeSorted reads all sources, sorts the rows with less, and writes them to
 // tmp. Callers check the total row count first, so this only runs when the
 // rows fit the memory budget.
-func mergeSorted[T any](tmp *os.File, sources []string, less func(a, b T) bool) error {
+func mergeSorted[T any](ctx context.Context, tmp *os.File, sources []string, less func(a, b T) bool) error {
 	var rows []T
 	buf := make([]T, compactReadBatch)
 	for _, src := range sources {
-		if err := forEachSourceRow(src, buf, func(batch []T) error {
+		if err := forEachSourceRow(ctx, src, buf, func(batch []T) error {
 			rows = append(rows, batch...)
 			return nil
 		}); err != nil {
 			return err
 		}
 	}
+	if ctx.Err() != nil {
+		return errStopping
+	}
 	sort.SliceStable(rows, func(i, j int) bool { return less(rows[i], rows[j]) })
+	if ctx.Err() != nil {
+		return errStopping
+	}
 
 	pw := parquet.NewGenericWriter[T](tmp, mergeWriterOptions()...)
 	if _, err := pw.Write(rows); err != nil {
@@ -628,16 +706,20 @@ func mergeSorted[T any](tmp *os.File, sources []string, less func(a, b T) bool) 
 // deliberately cause no cuts: the old compactor cut a group per source and
 // produced ~2880 tiny groups per day, whose footers exhausted the query
 // process. Group size is capped at compactRowGroupRows either way.
-func mergeIntoHourAware[T any](tmp *os.File, sources []string) error {
+func mergeIntoHourAware[T any](ctx context.Context, tmp *os.File, sources []string) error {
 	pw := parquet.NewGenericWriter[T](tmp, mergeWriterOptions()...)
 	buf := make([]T, compactReadBatch)
 	rowsInGroup := 0
 	for _, src := range sources {
-		if err := forEachSourceRow(src, buf, func(rows []T) error {
+		if err := forEachSourceRow(ctx, src, buf, func(rows []T) error {
 			return writeGroupRows(pw, rows, &rowsInGroup)
 		}); err != nil {
 			pw.Close()
 			return err
+		}
+		if ctx.Err() != nil {
+			pw.Close()
+			return errStopping
 		}
 		if isHourFileName(filepath.Base(src)) && rowsInGroup >= fragmentedRowsPerGroup {
 			if err := pw.Flush(); err != nil {
@@ -676,7 +758,10 @@ func writeGroupRows[T any](pw *parquet.GenericWriter[T], rows []T, rowsInGroup *
 // forEachSourceRow streams src in batches of len(buf) rows and calls fn for
 // each non-empty batch. io.EOF is reported together with the final rows and is
 // the success case, not an error.
-func forEachSourceRow[T any](src string, buf []T, fn func([]T) error) error {
+func forEachSourceRow[T any](ctx context.Context, src string, buf []T, fn func([]T) error) error {
+	if ctx.Err() != nil {
+		return errStopping
+	}
 	f, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", src, err)
@@ -695,8 +780,16 @@ func forEachSourceRow[T any](src string, buf []T, fn func([]T) error) error {
 	rd := parquet.NewGenericReader[T](pf)
 	defer rd.Close()
 	for {
+		// A large hour or day can need many batches; checking each one keeps
+		// shutdown responsive without slowing the copy measurably.
+		if ctx.Err() != nil {
+			return errStopping
+		}
 		n, err := rd.Read(buf)
 		if n > 0 {
+			if ctx.Err() != nil {
+				return errStopping
+			}
 			if ferr := fn(buf[:n]); ferr != nil {
 				return ferr
 			}
@@ -713,8 +806,8 @@ func forEachSourceRow[T any](src string, buf []T, fn func([]T) error) error {
 // copyRows streams one source file into pw in batches of len(buf) rows, so a
 // large source (a whole day.parquet being rewritten) is never held in memory
 // at once.
-func copyRows[T any](pw *parquet.GenericWriter[T], src string, buf []T) error {
-	return forEachSourceRow(src, buf, func(rows []T) error {
+func copyRows[T any](ctx context.Context, pw *parquet.GenericWriter[T], src string, buf []T) error {
+	return forEachSourceRow(ctx, src, buf, func(rows []T) error {
 		if _, err := pw.Write(rows); err != nil {
 			return fmt.Errorf("appending %s: %w", src, err)
 		}
