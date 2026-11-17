@@ -93,7 +93,7 @@ func aggregationExpr(name string) (string, error) {
 	case "buckets":
 		return "", invalidInput("aggregation buckets needs an explicit-bucket histogram; this metric is not one")
 	}
-	return "", invalidInput("aggregation %q is not supported; use one of: avg, sum, min, max, count, p50, p95, p99", name)
+	return "", invalidInput("aggregation %q is not supported; use one of: avg, sum, min, max, count, p50, p95, p99, exemplars (buckets for histograms)", name)
 }
 
 // LookupTrace retrieves every span belonging to one trace, ordered by start
@@ -123,7 +123,42 @@ func (c *Core) LookupTrace(traceID, tenant string, limit int) ([]map[string]any,
 // SearchSpans finds spans matching attribute filters within a time range,
 // scoped to tenant.
 func (c *Core) SearchSpans(tenant, serviceName string, filters []AttrFilter, sinceMinutes, limit int) ([]map[string]any, []string, error) {
+	return c.SearchSpansIn(tenant, serviceName, filters, sinceMinutes, limit, Range{})
+}
+
+// Range bounds a numeric value, both ends inclusive. A nil end is open.
+type Range struct {
+	Min, Max *float64
+}
+
+func (r Range) conds(col string) ([]string, []any) {
+	var conds []string
+	var params []any
+	if r.Min != nil {
+		conds = append(conds, col+" >= ?")
+		params = append(params, *r.Min)
+	}
+	if r.Max != nil {
+		conds = append(conds, col+" <= ?")
+		params = append(params, *r.Max)
+	}
+	return conds, params
+}
+
+func (r Range) validate(what string) error {
+	if r.Min != nil && r.Max != nil && *r.Min > *r.Max {
+		return invalidInput("%s: min %g is above max %g", what, *r.Min, *r.Max)
+	}
+	return nil
+}
+
+// SearchSpansIn is SearchSpans restricted to spans whose duration_ms falls in
+// d. This is how a histogram bucket leads to the requests that landed in it.
+func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, sinceMinutes, limit int, d Range) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {
+		return nil, nil, err
+	}
+	if err := d.validate("duration"); err != nil {
 		return nil, nil, err
 	}
 
@@ -159,6 +194,9 @@ func (c *Core) SearchSpans(tenant, serviceName string, filters []AttrFilter, sin
 			"(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)")
 		params = append(params, jsonPath(f.Key), f.Value, jsonPath(f.Key), f.Value)
 	}
+	dc, dp := d.conds("duration_ms")
+	conds = append(conds, dc...)
+	params = append(params, dp...)
 
 	params = append(params, limit)
 	q := `SELECT trace_id, span_id, service_name, span_name, span_kind,
@@ -326,6 +364,23 @@ func metricGroupExpr(key string) (expr, alias string, ok bool) {
 // bucket: le, value) — the last two for explicit-bucket histograms only. Cumulative series are turned into increments first; see
 // histogram.go.
 func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes int, groupBy string, filters []AttrFilter) ([]map[string]any, []string, error) {
+	return c.QueryMetricWith(tenant, metricName, aggregation, sinceMinutes, groupBy, filters, MetricOpts{})
+}
+
+// MetricOpts are the parameters only aggregation=exemplars uses.
+type MetricOpts struct {
+	// Value keeps exemplars whose value is in range, e.g. one histogram
+	// bucket's bounds.
+	Value Range
+	// Limit caps the exemplar rows; default 20, cap 200.
+	Limit int
+}
+
+// QueryMetricWith is QueryMetric plus the exemplar options. aggregation
+// "exemplars" returns the exemplars the senders attached to the metric's
+// points: concrete requests (trace_id, span_id) with their measured value,
+// slowest first. It works on every metric type that carries exemplars.
+func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinutes int, groupBy string, filters []AttrFilter, opts MetricOpts) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {
 		return nil, nil, err
 	}
@@ -372,12 +427,22 @@ func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes 
 		params = append(params, jsonPath(f.Key), f.Value, jsonPath(f.Key), f.Value)
 	}
 
+	if strings.EqualFold(aggregation, "exemplars") {
+		return c.queryExemplars(groupExprs, groupAliases, strings.Join(conds, " AND "), params, opts)
+	}
+
 	// A histogram keeps its data in count/sum/bucket_counts, not value_double;
 	// the most recent point decides which path aggregates this metric.
 	typeRows, _, err := c.engine.Query(`SELECT metric_type FROM metrics WHERE `+
 		strings.Join(conds, " AND ")+` ORDER BY timestamp DESC LIMIT 1`, params...)
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(typeRows) == 0 && strings.EqualFold(aggregation, "buckets") {
+		// Nothing matched, so there is no type to decide by: no buckets,
+		// rather than "this metric is not a histogram". Other aggregations
+		// keep their usual empty-window answer (count 0, avg null).
+		return []map[string]any{}, append(append([]string{}, groupAliases...), "le", "value"), nil
 	}
 	if len(typeRows) == 1 {
 		if mt, _ := typeRows[0]["metric_type"].(string); mt == typeHistogram || mt == typeExpHistogram {

@@ -31,6 +31,7 @@ func mcpCmd() *cobra.Command {
 		basePath  string
 		flushURL  string
 		dashboard bool
+		dashURL   string
 	)
 
 	cmd := &cobra.Command{
@@ -87,6 +88,12 @@ Examples:
 				}
 			}
 
+			if !cmd.Flags().Changed("dashboard-url") {
+				if v := os.Getenv("DUCKTEL_DASHBOARD_URL"); v != "" {
+					dashURL = v
+				}
+			}
+
 			engine, err := query.Open(dataDir)
 			if err != nil {
 				return fmt.Errorf("opening query engine: %w", err)
@@ -99,7 +106,9 @@ Examples:
 					Version: "0.1.0",
 				}, nil)
 				// The flush request is authorised with this server's own token.
-				mcp.NewServer(engine, flushURL, token).Register(srv)
+				s := mcp.NewServer(engine, flushURL, token)
+				s.SetDashboardURL(dashURL)
+				s.Register(srv)
 				return srv
 			}
 
@@ -124,6 +133,7 @@ Examples:
 	cmd.Flags().StringVar(&token, "auth-token", "", "Require this bearer token in HTTP mode (env: DUCKTEL_MCP_TOKEN)")
 	cmd.Flags().StringVar(&basePath, "base-path", "/mcp", "URL path to serve the MCP endpoint on in HTTP mode")
 	cmd.Flags().StringVar(&flushURL, "flush-url", "", "Writer's POST /flush endpoint, e.g. http://localhost:4318/flush; enables the flush_buffer tool (env: DUCKTEL_FLUSH_URL)")
+	cmd.Flags().StringVar(&dashURL, "dashboard-url", "", "Public address of the dashboard, e.g. https://otel.example.com/dashboard/; every tool result then carries a dashboard_url that opens the same query (env: DUCKTEL_DASHBOARD_URL)")
 	cmd.Flags().BoolVar(&dashboard, "dashboard", false, "Also serve the dashboard SPA at /dashboard and its REST API at /api, guarded by the same --auth-token")
 
 	return cmd

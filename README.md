@@ -275,10 +275,23 @@ Five generic, domain-agnostic tools:
 | Tool | Purpose |
 |------|---------|
 | `trace_lookup(trace_id, tenant)` | every span of one trace, ordered by start time |
-| `span_search(filters, service_name, since_minutes, tenant, limit)` | spans matching attribute key/value filters |
+| `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms)` | spans matching attribute key/value filters, optionally by duration |
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
-| `metric_query(metric_name, aggregation, since_minutes, group_by, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99 — `group_by` accepts columns or `attr.<key>` data-point attributes; `filters` match attributes or resource attributes. Histograms are aggregated over observations (count, sum, avg, min, max, percentiles from buckets, `buckets` for the distribution; cumulative series become increments). On a gauge, `count` counts exported points, not events |
+| `metric_query(metric_name, aggregation, since_minutes, group_by, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99 — `group_by` accepts columns or `attr.<key>` data-point attributes; `filters` match attributes or resource attributes. Histograms are aggregated over observations (count, sum, avg, min, max, percentiles from buckets, `buckets` for the distribution; cumulative series become increments). `exemplars` returns the concrete requests senders attached to the points (`trace_id`, `span_id`, value), slowest first, narrowed by `min_value`/`max_value`. On a gauge, `count` counts exported points, not events |
 | `flush_buffer()` | make just-received telemetry queryable now (only advertised when `--flush-url` is set) |
+
+**From a number to a request.** A histogram bucket leads to the requests in it:
+`metric_query(aggregation="exemplars", min_value=lo, max_value=le)` gives trace ids
+the SDK attached to those observations (the standard OTel SDKs do this for sampled
+requests), `span_search(min_ms=lo, max_ms=le)` gives every span of that duration,
+and `trace_lookup` / `log_search(trace_id=…)` open one of them. In the dashboard
+this is a click on a distribution bar, then on a request.
+
+**Dashboard links in tool results.** With `--dashboard-url` (env
+`DUCKTEL_DASHBOARD_URL`, e.g. `https://otel.example.com/dashboard/`), every tool
+result ends with a `dashboard_url:` line that opens the same query in the
+dashboard, so an agent can show a person where it found something. The dashboard's
+deep links use the tools' own parameter names, so the link is the query.
 
 **`tenant` is required on every query tool** — it's in the JSON schema, so a client cannot omit it — and every query hard-filters on the `tenant.id` resource attribute. A caller can narrow its scope but never widen it.
 
