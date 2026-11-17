@@ -313,20 +313,22 @@ func metricGroupExpr(key string) (expr, alias string, ok bool) {
 // exactly like span_search.
 //
 // value_double is the normalised numeric column: it is populated for both
-// double and int points (see the receiver's fillNumberDataPoint). A histogram
-// point stores its data in sum/min/max/count/bucket_counts instead and is
-// therefore invisible here — it aggregates to 0, not an error.
+// double and int points (see the receiver's fillNumberDataPoint). count on a
+// gauge counts exported points, not events: a gauge re-exported every
+// interval is counted once per export.
+//
+// Histogram and exponential histogram metrics (decided by the most recent
+// point) are aggregated from count/sum/bucket_counts instead: count and sum
+// of observations, avg = sum/count, min/max as reported by the points, and
+// p50/p95/p99 interpolated from merged buckets (explicit-bucket histograms
+// only). Cumulative series are turned into increments first; see
+// histogram.go.
 func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes int, groupBy string, filters []AttrFilter) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {
 		return nil, nil, err
 	}
 	if metricName == "" {
 		return nil, nil, invalidInput("metric_name is required")
-	}
-
-	agg, err := aggregationExpr(aggregation)
-	if err != nil {
-		return nil, nil, err
 	}
 
 	since := sinceMinutes
@@ -336,6 +338,7 @@ func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes 
 	cutoff := time.Now().Add(-time.Duration(since) * time.Minute).UnixMicro()
 
 	selectCols := []string{}
+	var groupExprs, groupAliases []string
 	groupKeys := metricGroupKeys(groupBy)
 	for _, key := range groupKeys {
 		expr, alias, ok := metricGroupExpr(key)
@@ -344,14 +347,14 @@ func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes 
 				"group_by %q is not a groupable column; allowed columns: %s — or attr.<key> / attributes.<key> for a data-point attribute (key charset %s)",
 				key, knownColumnsList(), attrKeyCharset)
 		}
+		groupExprs = append(groupExprs, expr)
+		groupAliases = append(groupAliases, alias)
 		if expr == alias {
 			selectCols = append(selectCols, expr)
 		} else {
 			selectCols = append(selectCols, fmt.Sprintf(`%s AS "%s"`, expr, alias))
 		}
 	}
-	selectCols = append(selectCols, fmt.Sprintf("%s AS value", agg))
-
 	conds := []string{"metric_name = ?", "timestamp >= ?", c.tenantPredicate()}
 	params := []any{metricName, cutoff, tenant}
 
@@ -366,6 +369,26 @@ func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes 
 			"(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)")
 		params = append(params, jsonPath(f.Key), f.Value, jsonPath(f.Key), f.Value)
 	}
+
+	// A histogram keeps its data in count/sum/bucket_counts, not value_double;
+	// the most recent point decides which path aggregates this metric.
+	typeRows, _, err := c.engine.Query(`SELECT metric_type FROM metrics WHERE `+
+		strings.Join(conds, " AND ")+` ORDER BY timestamp DESC LIMIT 1`, params...)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(typeRows) == 1 {
+		if mt, _ := typeRows[0]["metric_type"].(string); mt == typeHistogram || mt == typeExpHistogram {
+			hconds := strings.Join(append(conds, "metric_type = ?"), " AND ")
+			return c.queryHistogram(mt, aggregation, groupExprs, groupAliases, hconds, append(params, mt), cutoff)
+		}
+	}
+
+	agg, err := aggregationExpr(aggregation)
+	if err != nil {
+		return nil, nil, err
+	}
+	selectCols = append(selectCols, fmt.Sprintf("%s AS value", agg))
 
 	q := "SELECT " + strings.Join(selectCols, ", ") + ` FROM metrics
 	      WHERE ` + strings.Join(conds, " AND ")

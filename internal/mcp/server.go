@@ -68,11 +68,14 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 			"Use this for numeric questions — request rates, resource utilisation, " +
 			"min/avg/max of a recorded value — rather than fetching raw points. " +
 			"Supports avg, sum, min, max, count and percentiles. " +
-			"IMPORTANT for senders: this aggregates the value_double column, which is " +
-			"only populated for gauge and sum points. A histogram point stores its data " +
-			"in sum/min/max/count/bucket_counts instead and is therefore INVISIBLE here " +
-			"— it returns 0 rather than an error. Send a per-event duration or size as a " +
-			"gauge or sum, not a histogram, or it will not be aggregatable.",
+			"Histograms (e.g. http.server.duration from the standard OTel " +
+			"instrumentations) are aggregated over observations: count and sum of " +
+			"observations, avg = sum/count, min/max as reported, and p50/p95/p99 " +
+			"interpolated from the buckets (explicit-bucket histograms only); " +
+			"cumulative series are turned into increments within the window. " +
+			"For gauge and sum points, count counts exported POINTS, not events: a " +
+			"gauge re-exported every interval is counted once per export, so use a " +
+			"counter or a histogram to count events.",
 	}, s.metricQuery)
 
 	// Only offered when a flush endpoint is configured: without one the tool

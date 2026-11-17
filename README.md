@@ -277,7 +277,7 @@ Five generic, domain-agnostic tools:
 | `trace_lookup(trace_id, tenant)` | every span of one trace, ordered by start time |
 | `span_search(filters, service_name, since_minutes, tenant, limit)` | spans matching attribute key/value filters |
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
-| `metric_query(metric_name, aggregation, since_minutes, group_by, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99 — `group_by` accepts columns or `attr.<key>` data-point attributes; `filters` match attributes or resource attributes |
+| `metric_query(metric_name, aggregation, since_minutes, group_by, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99 — `group_by` accepts columns or `attr.<key>` data-point attributes; `filters` match attributes or resource attributes. Histograms are aggregated over observations (count, sum, avg, min, max, percentiles from buckets; cumulative series become increments). On a gauge, `count` counts exported points, not events |
 | `flush_buffer()` | make just-received telemetry queryable now (only advertised when `--flush-url` is set) |
 
 **`tenant` is required on every query tool** — it's in the JSON schema, so a client cannot omit it — and every query hard-filters on the `tenant.id` resource attribute. A caller can narrow its scope but never widen it.
