@@ -525,12 +525,18 @@ const compactReadBatch = 4096
 // memory on a tiny dataset. Such files are rewritten in place.
 const fragmentedRowsPerGroup = 1000
 
+// mergeWriterOptions are writerOptions plus the row-group cap every merge
+// uses, so all compaction output gets zstd and bounded dictionaries too.
+func mergeWriterOptions() []parquet.WriterOption {
+	return append(writerOptions(), parquet.MaxRowsPerRowGroup(int64(compactRowGroupRows)))
+}
+
 // mergeInto appends every row of each source file into the writer. Row groups
 // are cut at compactRowGroupRows and sources are streamed in batches, so memory
 // stays bounded by one read batch plus one row group's buffer, whatever the
 // size of the sources.
 func mergeInto[T any](tmp *os.File, sources []string) error {
-	pw := parquet.NewGenericWriter[T](tmp, parquet.MaxRowsPerRowGroup(int64(compactRowGroupRows)))
+	pw := parquet.NewGenericWriter[T](tmp, mergeWriterOptions()...)
 	buf := make([]T, compactReadBatch)
 	for _, src := range sources {
 		if err := copyRows(pw, src, buf); err != nil {
@@ -603,7 +609,7 @@ func mergeSorted[T any](tmp *os.File, sources []string, less func(a, b T) bool) 
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return less(rows[i], rows[j]) })
 
-	pw := parquet.NewGenericWriter[T](tmp, parquet.MaxRowsPerRowGroup(int64(compactRowGroupRows)))
+	pw := parquet.NewGenericWriter[T](tmp, mergeWriterOptions()...)
 	if _, err := pw.Write(rows); err != nil {
 		pw.Close()
 		return fmt.Errorf("writing sorted rows: %w", err)
@@ -623,7 +629,7 @@ func mergeSorted[T any](tmp *os.File, sources []string, less func(a, b T) bool) 
 // produced ~2880 tiny groups per day, whose footers exhausted the query
 // process. Group size is capped at compactRowGroupRows either way.
 func mergeIntoHourAware[T any](tmp *os.File, sources []string) error {
-	pw := parquet.NewGenericWriter[T](tmp, parquet.MaxRowsPerRowGroup(int64(compactRowGroupRows)))
+	pw := parquet.NewGenericWriter[T](tmp, mergeWriterOptions()...)
 	buf := make([]T, compactReadBatch)
 	rowsInGroup := 0
 	for _, src := range sources {
