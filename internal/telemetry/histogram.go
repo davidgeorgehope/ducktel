@@ -88,7 +88,7 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 		}
 		q = map[string]float64{"p50": 0.5, "p95": 0.95, "p99": 0.99, "buckets": -1}[agg]
 	default:
-		return nil, nil, invalidInput("aggregation %q is not supported; use one of: avg, sum, min, max, count, p50, p95, p99, buckets", aggregation)
+		return nil, nil, invalidInput("aggregation %q is not supported; use one of: avg, sum, min, max, count, p50, p95, p99, buckets, exemplars", aggregation)
 	}
 
 	params = append(params, temporalityCumulative, cutoff)

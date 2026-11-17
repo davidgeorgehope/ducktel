@@ -93,6 +93,29 @@ func queryInt(r *http.Request, name string, def int) int {
 	return n
 }
 
+// queryRange reads an optional numeric range from two query parameters. A
+// value that is present but not a number is a 400, not silently ignored: a
+// dropped bound would return a different set than the caller asked for.
+func queryRange(w http.ResponseWriter, r *http.Request, minName, maxName string) (telemetry.Range, bool) {
+	var rg telemetry.Range
+	for _, p := range []struct {
+		name string
+		dst  **float64
+	}{{minName, &rg.Min}, {maxName, &rg.Max}} {
+		v := r.URL.Query().Get(p.name)
+		if v == "" {
+			continue
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("%s %q is not a number", p.name, v), http.StatusBadRequest)
+			return rg, false
+		}
+		*p.dst = &f
+	}
+	return rg, true
+}
+
 // --- handlers ---
 
 func (h *Handlers) handleSearchSpans(w http.ResponseWriter, r *http.Request) {
@@ -109,9 +132,14 @@ func (h *Handlers) handleSearchSpans(w http.ResponseWriter, r *http.Request) {
 		filters = append(filters, telemetry.AttrFilter{Key: key, Value: value})
 	}
 
-	rows, cols, err := h.core.SearchSpans(
+	dur, ok := queryRange(w, r, "min_ms", "max_ms")
+	if !ok {
+		return
+	}
+
+	rows, cols, err := h.core.SearchSpansIn(
 		q.Get("tenant"), q.Get("service_name"), filters,
-		queryInt(r, "since_minutes", 0), queryInt(r, "limit", 0),
+		queryInt(r, "since_minutes", 0), queryInt(r, "limit", 0), dur,
 	)
 	if err != nil {
 		writeErr(w, err)
@@ -161,10 +189,11 @@ func (h *Handlers) handleLookupTrace(w http.ResponseWriter, r *http.Request) {
 // parameters.
 const metricParamsHelp = "metric_name and aggregation are required. Parameters: " +
 	"metric_name (required; see /api/metric-names), " +
-	"aggregation (required: avg, sum, min, max, count, p50, p95, p99; buckets for histograms), " +
+	"aggregation (required: avg, sum, min, max, count, p50, p95, p99, exemplars; buckets for histograms), " +
 	"tenant, since_minutes (default 60), " +
 	"group_by (comma-separated columns or attr.<key>), " +
-	"filter=key:value (repeatable)"
+	"filter=key:value (repeatable), " +
+	"min_value, max_value, limit (exemplars only)"
 
 func (h *Handlers) handleQueryMetric(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -187,9 +216,15 @@ func (h *Handlers) handleQueryMetric(w http.ResponseWriter, r *http.Request) {
 		filters = append(filters, telemetry.AttrFilter{Key: key, Value: value})
 	}
 
-	rows, cols, err := h.core.QueryMetric(
+	val, ok := queryRange(w, r, "min_value", "max_value")
+	if !ok {
+		return
+	}
+
+	rows, cols, err := h.core.QueryMetricWith(
 		q.Get("tenant"), q.Get("metric_name"), q.Get("aggregation"),
 		queryInt(r, "since_minutes", 0), q.Get("group_by"), filters,
+		telemetry.MetricOpts{Value: val, Limit: queryInt(r, "limit", 0)},
 	)
 	if err != nil {
 		writeErr(w, err)

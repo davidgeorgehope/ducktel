@@ -442,3 +442,18 @@ func TestMetricsMissingParamsListsThem(t *testing.T) {
 		}
 	}
 }
+
+func TestRangeParams(t *testing.T) {
+	mux := newTestMux(t, "")
+	for target, want := range map[string]int{
+		"/api/traces?tenant=acme&min_ms=abc":                                                      http.StatusBadRequest,
+		"/api/traces?tenant=acme&min_ms=5&max_ms=1":                                               http.StatusBadRequest,
+		"/api/traces?tenant=acme&min_ms=0&max_ms=1e6":                                             http.StatusOK,
+		"/api/metrics?tenant=acme&metric_name=cpu.util&aggregation=exemplars&max_value=x":         http.StatusBadRequest,
+		"/api/metrics?tenant=acme&metric_name=cpu.util&aggregation=exemplars&min_value=1&limit=5": http.StatusOK,
+	} {
+		if rec := doReq(t, mux, "GET", target, ""); rec.Code != want {
+			t.Errorf("%s: status = %d, want %d (%s)", target, rec.Code, want, rec.Body.String())
+		}
+	}
+}

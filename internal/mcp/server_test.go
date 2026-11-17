@@ -38,6 +38,12 @@ func seedSpan(svc, tenant, traceID string) writer.TraceSpan {
 // tests exercise the real protocol rather than calling methods directly.
 func newTestServer(t *testing.T) *sdkmcp.ClientSession {
 	t.Helper()
+	return newTestServerWith(t, nil)
+}
+
+// newTestServerWith lets a test configure the Server before it is registered.
+func newTestServerWith(t *testing.T, configure func(*Server)) *sdkmcp.ClientSession {
+	t.Helper()
 	dir := t.TempDir()
 
 	w := writer.New(dir, time.Hour, 1000)
@@ -64,7 +70,11 @@ func newTestServer(t *testing.T) *sdkmcp.ClientSession {
 	t.Cleanup(func() { engine.Close() })
 
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
-	NewServer(engine, "", "").Register(srv)
+	ds := NewServer(engine, "", "")
+	if configure != nil {
+		configure(ds)
+	}
+	ds.Register(srv)
 
 	clientT, serverT := sdkmcp.NewInMemoryTransports()
 
