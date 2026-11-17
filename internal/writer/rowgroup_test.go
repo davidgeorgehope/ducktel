@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -87,7 +88,7 @@ func TestCompactMergesIntoFewRowGroups(t *testing.T) {
 	}
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	merged := filepath.Join(dayDir, mergedName)
@@ -108,7 +109,7 @@ func TestCompactCapsRowGroupSize(t *testing.T) {
 	writeSourceFile(t, filepath.Join(dayDir, "b.parquet"), spansFrom(half, total-half))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	merged := filepath.Join(dayDir, mergedName)
@@ -130,7 +131,7 @@ func TestCompactRewritesFragmentedDayFile(t *testing.T) {
 	}
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := rowGroupCount(t, merged); got != 1 {
@@ -146,7 +147,7 @@ func TestCompactRewritesFragmentedDayFile(t *testing.T) {
 
 	// Idempotent: a second pass leaves the repaired file alone.
 	before, _ := os.Stat(merged)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.Stat(merged)
@@ -165,7 +166,7 @@ func TestCompactLeavesHealthyMultiGroupFileAlone(t *testing.T) {
 
 	before, _ := os.Stat(merged)
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.Stat(merged)

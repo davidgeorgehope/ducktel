@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -99,7 +100,7 @@ func TestCompactOldDaysMergesDay(t *testing.T) {
 	writeSourceFile(t, filepath.Join(dayDir, "10-01.parquet"), spanN(1, "b"))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatalf("compactOldDays: %v", err)
 	}
 
@@ -127,7 +128,7 @@ func TestCompactLeftoversDeletedNotMerged(t *testing.T) {
 	writeSourceFile(t, filepath.Join(dayDir, "10-00.parquet"), spanN(2, "leftover"))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatalf("compactOldDays: %v", err)
 	}
 
@@ -163,7 +164,7 @@ func TestCompactSkipsYesterday(t *testing.T) {
 	writeSourceFile(t, filepath.Join(dayDir, "23-59-1.parquet"), spanN(1, "later"))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatalf("compactOldDays: %v", err)
 	}
 
@@ -189,7 +190,7 @@ func TestCompactDoesNotDeleteFlushLandingAfterMidnight(t *testing.T) {
 	writeSourceFile(t, straddler, spanN(2, "straddler"))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatalf("compactOldDays: %v", err)
 	}
 
@@ -225,7 +226,7 @@ func TestCompactSweepsOrphanedTemps(t *testing.T) {
 	}
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatalf("compactOldDays: %v", err)
 	}
 
@@ -251,7 +252,7 @@ func TestCompactSkipsTodayAndNonDateDirs(t *testing.T) {
 	writeSourceFile(t, filepath.Join(garbageDir, "10-00.parquet"), spanN(1, "garbage"))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatalf("compactOldDays: %v", err)
 	}
 
@@ -278,7 +279,7 @@ func TestCompactAllSignals(t *testing.T) {
 	}
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatalf("compactOldDays: %v", err)
 	}
 
@@ -299,10 +300,10 @@ func TestCompactIsIdempotent(t *testing.T) {
 	writeSourceFile(t, filepath.Join(dayDir, "10-00.parquet"), spanN(2, "a"))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -385,7 +386,7 @@ func TestCompactHoursMergesMetricsSorted(t *testing.T) {
 	})
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactHours(hourTestNow); err != nil {
+	if err := w.compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatalf("compactHours: %v", err)
 	}
 
@@ -418,7 +419,7 @@ func TestCompactHoursMergesTracesSorted(t *testing.T) {
 	})
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactHours(hourTestNow); err != nil {
+	if err := w.compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatalf("compactHours: %v", err)
 	}
 
@@ -451,7 +452,7 @@ func TestCompactHoursMergesLogsSorted(t *testing.T) {
 	})
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactHours(hourTestNow); err != nil {
+	if err := w.compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatalf("compactHours: %v", err)
 	}
 
@@ -480,7 +481,7 @@ func TestCompactHoursSkipsOpenHours(t *testing.T) {
 	writeSourceFile(t, filepath.Join(dayDir, "11-00.parquet"), spanN(1, "previous"))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactHours(hourTestNow); err != nil {
+	if err := w.compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatalf("compactHours: %v", err)
 	}
 
@@ -501,7 +502,7 @@ func TestCompactHoursYesterdayAndOlder(t *testing.T) {
 	writeSourceFile(t, filepath.Join(older, "10-00.parquet"), spanN(2, "old"))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactHours(hourTestNow); err != nil {
+	if err := w.compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatalf("compactHours: %v", err)
 	}
 
@@ -528,7 +529,7 @@ func TestCompactHoursLeftoversDeleted(t *testing.T) {
 	writeSourceFile(t, filepath.Join(dayDir, "05-05-1.parquet"), spanN(4, "leftover-2"))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactHours(hourTestNow); err != nil {
+	if err := w.compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatalf("compactHours: %v", err)
 	}
 
@@ -556,7 +557,7 @@ func TestCompactHoursStreamsAboveSortCap(t *testing.T) {
 	writeSourceFile(t, filepath.Join(dayDir, "09-02.parquet"), spansFrom(10, 2))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactHours(hourTestNow); err != nil {
+	if err := w.compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatalf("compactHours: %v", err)
 	}
 
@@ -582,14 +583,14 @@ func TestCompactHoursIsIdempotent(t *testing.T) {
 	})
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactHours(hourTestNow); err != nil {
+	if err := w.compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.Stat(filepath.Join(dayDir, "09.parquet"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.compactHours(hourTestNow); err != nil {
+	if err := w.compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.Stat(filepath.Join(dayDir, "09.parquet"))
@@ -617,7 +618,7 @@ func TestCompactDayCutsAtHourBoundary(t *testing.T) {
 	writeSourceFile(t, filepath.Join(dayDir, "11.parquet"), spansFrom(1500, 1500))
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -638,7 +639,7 @@ func TestCompactDayTinyHoursStayOneGroup(t *testing.T) {
 	}
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -664,7 +665,7 @@ func TestCompactDayPerFlushOnlyCapsAtSize(t *testing.T) {
 	}
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -693,7 +694,7 @@ func TestCompactHoursSortedKeepsEveryRowAcrossBatches(t *testing.T) {
 		}
 		writeSourceFile(t, filepath.Join(dayDir, fmt.Sprintf("09-%02d.parquet", f)), rows)
 	}
-	if err := New(dataDir, time.Hour, 1000).compactHours(hourTestNow); err != nil {
+	if err := New(dataDir, time.Hour, 1000).compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatalf("compactHours: %v", err)
 	}
 	rows := readAll[MetricPoint](t, filepath.Join(dayDir, "09.parquet"))

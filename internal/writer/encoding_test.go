@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -119,10 +120,10 @@ func TestCompactionUsesZstdCompression(t *testing.T) {
 		{MetricName: "a", Timestamp: 1},
 	})
 
-	if err := New(dayDataDir, time.Hour, 1000).compactOldDays(); err != nil {
+	if err := New(dayDataDir, time.Hour, 1000).compactOldDays(context.Background()); err != nil {
 		t.Fatalf("compactOldDays: %v", err)
 	}
-	if err := New(hourDataDir, time.Hour, 1000).compactHours(hourTestNow); err != nil {
+	if err := New(hourDataDir, time.Hour, 1000).compactHours(context.Background(), hourTestNow); err != nil {
 		t.Fatalf("compactHours: %v", err)
 	}
 
@@ -338,7 +339,7 @@ func TestCompactMergesOldAndNewStyleFiles(t *testing.T) {
 	assertAllZstd(t, newPath)
 
 	w := New(dataDir, time.Hour, 1000)
-	if err := w.compactOldDays(); err != nil {
+	if err := w.compactOldDays(context.Background()); err != nil {
 		t.Fatalf("compactOldDays: %v", err)
 	}
 
