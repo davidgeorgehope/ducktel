@@ -40,6 +40,8 @@
       <label>Service <select id="f-service"><option value="">any</option></select></label>
       <label>Since (min) <input id="f-since" type="number" value="60" min="1"></label>
       <label>Limit <input id="f-limit" type="number" value="100" min="1" max="1000"></label>
+      <label>Duration (ms) <input id="f-min-ms" class="narrow" type="number" min="0" step="any" placeholder="min">
+        – <input id="f-max-ms" class="narrow" type="number" min="0" step="any" placeholder="max"></label>
       <div id="f-attr-filters" class="attr-filters"></div>
       <button type="button" id="f-add-filter">+ attribute filter</button>
       <button type="submit">Search</button>
@@ -86,10 +88,12 @@
         <select id="m-agg">
           <option>avg</option><option>sum</option><option>min</option><option>max</option>
           <option>count</option><option>p50</option><option>p95</option><option>p99</option>
+          <option>exemplars</option>
         </select>
       </label>
       <label>Since (min) <input id="m-since" type="number" value="60" min="1"></label>
       <label>Group by <input id="m-groupby" type="text" placeholder="e.g. service_name"></label>
+      <span id="m-filters" class="metric-filters"></span>
       <button type="submit">Run</button>
     </form>
 

@@ -302,3 +302,10 @@ tr.clickable td:last-child { text-decoration: underline; }
 .bar-marks { width: 90px; flex: none; }
 .qmark { display: inline-block; font-size: 11px; padding: 0 4px; margin-right: 3px;
   border: 1px solid var(--accent); color: var(--accent); border-radius: 3px; }
+
+input.narrow { width: 6em; }
+.metric-filters { display: inline-flex; gap: 6px; flex-wrap: wrap; align-self: center; }
+.metric-filters .chip { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1px 4px 1px 8px; font-size: 12px; }
+.metric-filters .chip button { background: none; border: none; color: inherit; cursor: pointer; padding: 0 2px; }
+tr.clickable { cursor: pointer; }
+#bucket-req { margin-top: 12px; }
