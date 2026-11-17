@@ -80,7 +80,8 @@
 
   <section id="tab-metrics" class="tab hidden">
     <form id="metrics-form" class="filters">
-      <label>Metric name <select id="m-name"><option value="">-- select --</option></select></label>
+      <label>Metric name <select id="m-name"><option value="">-- select --</option></select>
+        <span id="m-info" class="metric-info"></span></label>
       <label>Aggregation
         <select id="m-agg">
           <option>avg</option><option>sum</option><option>min</option><option>max</option>
@@ -93,6 +94,7 @@
     </form>
 
     <div id="metric-result"></div>
+    <div id="metric-dist"></div>
   </section>
 </div>
 

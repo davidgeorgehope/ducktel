@@ -291,3 +291,14 @@ tr.clickable td:last-child { text-decoration: underline; }
 .bar-value { width: 90px; flex: none; text-align: right; color: var(--muted); }
 
 .empty { color: var(--muted); padding: 20px; text-align: center; }
+
+.metric-info { margin-left: 8px; font-size: 12px; }
+.metric-info .muted { color: var(--muted); font-weight: normal; }
+.bar-row.clickable { cursor: pointer; }
+.bar-row.clickable:hover .bar-label { color: var(--accent); }
+.dist-head { margin: 8px 0; color: var(--muted); }
+.dist-head b { color: var(--text); }
+.bar-fill.dist { background: #6aa6f8; }
+.bar-marks { width: 90px; flex: none; }
+.qmark { display: inline-block; font-size: 11px; padding: 0 4px; margin-right: 3px;
+  border: 1px solid var(--accent); color: var(--accent); border-radius: 3px; }
