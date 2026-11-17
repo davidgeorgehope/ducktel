@@ -27,7 +27,7 @@ func jsonPath(key string) string {
 // instead.
 var knownColumns = []string{
 	"service_name", "span_name", "span_kind", "status_code", "scope_name",
-	"metric_name", "metric_type", "severity_text", "trace_id", "span_id",
+	"metric_name", "metric_type", "metric_unit", "severity_text", "trace_id", "span_id",
 }
 
 // quoteIdent validates a column name for interpolation into GROUP BY / ORDER BY.

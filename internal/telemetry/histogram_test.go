@@ -189,3 +189,62 @@ func TestBucketQuantile(t *testing.T) {
 		t.Errorf("+Inf bucket = %v, want the highest finite bound 10", v)
 	}
 }
+
+// TestHistogramBuckets: aggregation=buckets returns the distribution itself,
+// per group, with le null for the bucket above the last bound.
+func TestHistogramBuckets(t *testing.T) {
+	c := newHistogramCore(t)
+	rows, cols, err := c.QueryMetric("acme", "http.server.duration", "buckets", 60, "attr.http.route", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cols) != 3 || cols[0] != "attr.http.route" || cols[1] != "le" || cols[2] != "value" {
+		t.Fatalf("columns = %v", cols)
+	}
+	got := map[string][]float64{}
+	var lastLe []any
+	for _, r := range rows {
+		route := r["attr.http.route"].(string)
+		got[route] = append(got[route], toFloat(r["value"]))
+		if route == "/a" {
+			lastLe = append(lastLe, r["le"])
+		}
+	}
+	want := map[string][]float64{"/a": {15, 16, 5}, "/b": {3, 1, 0}}
+	for route, w := range want {
+		g := got[route]
+		if len(g) != len(w) || g[0] != w[0] || g[1] != w[1] || g[2] != w[2] {
+			t.Errorf("%s buckets = %v, want %v", route, g, w)
+		}
+	}
+	if len(lastLe) != 3 || toFloat(lastLe[0]) != 10 || toFloat(lastLe[1]) != 100 || lastLe[2] != nil {
+		t.Errorf("/a le = %v, want [10 100 <nil>]", lastLe)
+	}
+
+	// Filtered to one group, as the dashboard does when a bar is clicked.
+	rows, _, err = c.QueryMetric("acme", "http.server.duration", "buckets", 60, "",
+		[]AttrFilter{{Key: "http.route", Value: "/b"}})
+	if err != nil || len(rows) != 3 || toFloat(rows[0]["value"]) != 3 {
+		t.Errorf("filtered buckets = %v, %v", rows, err)
+	}
+}
+
+func TestBucketsOnNonHistogramIsInvalidInput(t *testing.T) {
+	c := newHistogramCore(t)
+	if _, _, err := c.QueryMetric("acme", "exp.duration", "buckets", 60, "", nil); !IsInvalidInput(err) {
+		t.Errorf("exponential histogram: err = %v, want invalid input", err)
+	}
+}
+
+// TestMetricTypeAndUnitViaGroupBy: the dashboard learns a metric's type and
+// unit through the same metric_query an agent uses.
+func TestMetricTypeAndUnitViaGroupBy(t *testing.T) {
+	c := newHistogramCore(t)
+	rows, _, err := c.QueryMetric("acme", "http.server.duration", "count", 60, "metric_type,metric_unit", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0]["metric_type"] != "histogram" || rows[0]["metric_unit"] != "ms" || toFloat(rows[0]["value"]) != 40 {
+		t.Errorf("rows = %v, want one histogram/ms row with count 40", rows)
+	}
+}

@@ -82,13 +82,13 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 	var q float64
 	switch agg {
 	case "count", "sum", "avg", "mean", "min", "max":
-	case "p50", "p95", "p99":
+	case "p50", "p95", "p99", "buckets":
 		if metricType != typeHistogram {
 			return nil, nil, invalidInput("aggregation %q needs explicit bucket boundaries; %s points support count, sum, avg, min, max", aggregation, metricType)
 		}
-		q = map[string]float64{"p50": 0.5, "p95": 0.95, "p99": 0.99}[agg]
+		q = map[string]float64{"p50": 0.5, "p95": 0.95, "p99": 0.99, "buckets": -1}[agg]
 	default:
-		return nil, nil, invalidInput("aggregation %q is not supported; use one of: avg, sum, min, max, count, p50, p95, p99", aggregation)
+		return nil, nil, invalidInput("aggregation %q is not supported; use one of: avg, sum, min, max, count, p50, p95, p99, buckets", aggregation)
 	}
 
 	params = append(params, temporalityCumulative, cutoff)
@@ -140,7 +140,8 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 		return rename(rows), cols, nil
 	}
 
-	// Percentiles: merge the increments bucket by bucket, per group and bounds.
+	// Percentiles and buckets: merge the increments bucket by bucket, per
+	// group and bounds.
 	bq := cte + `, bk AS (
 	SELECT ` + gsel + `bounds, unnest(db) AS v, unnest(generate_series(1, len(db))) AS i
 	FROM d WHERE db IS NOT NULL
@@ -187,6 +188,10 @@ SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i
 	}
 	sort.Strings(order)
 
+	if q < 0 {
+		return bucketRows(order, func(k string) ([]any, []bucket) { return groups[k].vals, groups[k].buckets }, aliases)
+	}
+
 	out := make([]map[string]any, 0, len(order))
 	for _, key := range order {
 		g := groups[key]
@@ -205,6 +210,42 @@ SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i
 }
 
 type bucket struct{ lo, hi, n float64 }
+
+// bucketRows is aggregation=buckets: one row per group and upper bound, with
+// columns <group keys>, le, value. le is the bucket's inclusive upper bound
+// (null for the last bucket, above the highest bound) and value the number
+// of observations in it within the window. Buckets with the same upper bound
+// (series with different bound sets) are summed.
+func bucketRows(order []string, get func(string) ([]any, []bucket), aliases []string) ([]map[string]any, []string, error) {
+	cols := append(append([]string{}, aliases...), "le", "value")
+	out := []map[string]any{}
+	for _, key := range order {
+		vals, bs := get(key)
+		sum := map[float64]float64{}
+		for _, b := range bs {
+			sum[b.hi] += b.n
+		}
+		his := make([]float64, 0, len(sum))
+		for hi := range sum {
+			his = append(his, hi)
+		}
+		sort.Float64s(his)
+		for _, hi := range his {
+			m := make(map[string]any, len(cols))
+			for i, a := range aliases {
+				m[a] = vals[i]
+			}
+			if math.IsInf(hi, 1) {
+				m["le"] = nil
+			} else {
+				m["le"] = hi
+			}
+			m["value"] = sum[hi]
+			out = append(out, m)
+		}
+	}
+	return out, cols, nil
+}
 
 // bucketQuantile interpolates the q-quantile linearly inside the bucket where
 // the cumulative count crosses q*total, as Prometheus' histogram_quantile

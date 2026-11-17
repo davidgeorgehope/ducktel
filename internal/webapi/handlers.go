@@ -161,7 +161,7 @@ func (h *Handlers) handleLookupTrace(w http.ResponseWriter, r *http.Request) {
 // parameters.
 const metricParamsHelp = "metric_name and aggregation are required. Parameters: " +
 	"metric_name (required; see /api/metric-names), " +
-	"aggregation (required: avg, sum, min, max, count, p50, p95, p99), " +
+	"aggregation (required: avg, sum, min, max, count, p50, p95, p99; buckets for histograms), " +
 	"tenant, since_minutes (default 60), " +
 	"group_by (comma-separated columns or attr.<key>), " +
 	"filter=key:value (repeatable)"

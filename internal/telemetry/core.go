@@ -90,6 +90,8 @@ func aggregationExpr(name string) (string, error) {
 		return "approx_quantile(value_double, 0.95)", nil
 	case "p99":
 		return "approx_quantile(value_double, 0.99)", nil
+	case "buckets":
+		return "", invalidInput("aggregation buckets needs an explicit-bucket histogram; this metric is not one")
 	}
 	return "", invalidInput("aggregation %q is not supported; use one of: avg, sum, min, max, count, p50, p95, p99", name)
 }
@@ -320,8 +322,8 @@ func metricGroupExpr(key string) (expr, alias string, ok bool) {
 // Histogram and exponential histogram metrics (decided by the most recent
 // point) are aggregated from count/sum/bucket_counts instead: count and sum
 // of observations, avg = sum/count, min/max as reported by the points, and
-// p50/p95/p99 interpolated from merged buckets (explicit-bucket histograms
-// only). Cumulative series are turned into increments first; see
+// p50/p95/p99 interpolated from merged buckets, and buckets (one row per
+// bucket: le, value) — the last two for explicit-bucket histograms only. Cumulative series are turned into increments first; see
 // histogram.go.
 func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes int, groupBy string, filters []AttrFilter) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {

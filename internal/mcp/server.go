@@ -71,7 +71,10 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 			"Histograms (e.g. http.server.duration from the standard OTel " +
 			"instrumentations) are aggregated over observations: count and sum of " +
 			"observations, avg = sum/count, min/max as reported, and p50/p95/p99 " +
-			"interpolated from the buckets (explicit-bucket histograms only); " +
+			"interpolated from the buckets, and aggregation=buckets for the " +
+			"distribution itself: one row per bucket with le (inclusive upper bound, " +
+			"null above the last bound) and value (observations) — the last two for " +
+			"explicit-bucket histograms only; " +
 			"cumulative series are turned into increments within the window. " +
 			"For gauge and sum points, count counts exported POINTS, not events: a " +
 			"gauge re-exported every interval is counted once per export, so use a " +
@@ -189,7 +192,7 @@ func (s *Server) logSearch(ctx context.Context, req *sdkmcp.CallToolRequest, arg
 type metricQueryArgs struct {
 	Tenant       string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
 	MetricName   string       `json:"metric_name" jsonschema:"the metric name to aggregate, e.g. process.cpu.utilization"`
-	Aggregation  string       `json:"aggregation" jsonschema:"one of: avg, sum, min, max, count, p50, p95, p99"`
+	Aggregation  string       `json:"aggregation" jsonschema:"one of: avg, sum, min, max, count, p50, p95, p99, buckets (histograms only)"`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to aggregate, in minutes. Default 60."`
 	GroupBy      string       `json:"group_by,omitempty" jsonschema:"optional comma-separated grouping keys: a column name (service_name, metric_type, ...) or a data-point attribute as attr.<key> / attributes.<key>, e.g. attr.kind groups by the metric point's attributes JSON key 'kind'. Result rows carry the key as their column name."`
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match, ANDed together; matched against data-point attributes OR resource attributes, same as span_search filters. Dotted keys are handled correctly."`
