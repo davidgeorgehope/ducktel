@@ -157,8 +157,23 @@ func (h *Handlers) handleLookupTrace(w http.ResponseWriter, r *http.Request) {
 	writeRows(w, rows, cols)
 }
 
+// metricParamsHelp is the 400 body for /api/metrics without its required
+// parameters.
+const metricParamsHelp = "metric_name and aggregation are required. Parameters: " +
+	"metric_name (required; see /api/metric-names), " +
+	"aggregation (required: avg, sum, min, max, count, p50, p95, p99; buckets for histograms), " +
+	"tenant, since_minutes (default 60), " +
+	"group_by (comma-separated columns or attr.<key>), " +
+	"filter=key:value (repeatable)"
+
 func (h *Handlers) handleQueryMetric(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if q.Get("metric_name") == "" || q.Get("aggregation") == "" {
+		// Name every parameter at once: an agent calling the REST API
+		// directly should not have to discover them one 400 at a time.
+		http.Error(w, metricParamsHelp, http.StatusBadRequest)
+		return
+	}
 
 	// Filters arrive as repeated ?filter=key:value pairs, same as the span
 	// search endpoint.
