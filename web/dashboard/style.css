@@ -309,3 +309,48 @@ input.narrow { width: 6em; }
 .metric-filters .chip button { background: none; border: none; color: inherit; cursor: pointer; padding: 0 2px; }
 tr.clickable { cursor: pointer; }
 #bucket-req { margin-top: 12px; }
+
+/* --- trace summary above the waterfall --- */
+
+.trace-summary {
+  margin: 4px 0 12px 0;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.ts-line { font-size: 13px; color: var(--muted); }
+.ts-heading {
+  margin: 10px 0 4px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.trace-summary .data-table { width: 100%; }
+.ts-groups tbody tr:hover { background: rgba(255,255,255,0.03); }
+.ts-groups tbody tr.active-group { background: rgba(242,193,78,0.12); }
+.ts-span-cell { width: 55%; }
+.ts-span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ts-bar-track {
+  height: 3px;
+  margin-top: 4px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 2px;
+}
+.ts-bar { height: 100%; background: var(--accent); border-radius: 2px; }
+.ts-error { color: var(--err); font-size: 12px; padding: 1px 0; }
+.wf-row.group-highlight {
+  background: rgba(242,193,78,0.14);
+  border-radius: 3px;
+}
+
+/* log problem text in a slow-request row: one clipped line, full text in
+   the title */
+.ts-log {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
