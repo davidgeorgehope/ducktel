@@ -327,6 +327,7 @@ tr.clickable { cursor: pointer; }
 .trace-summary .data-table { width: 100%; }
 .ts-groups tbody tr:hover { background: rgba(255,255,255,0.03); }
 .ts-groups tbody tr.active-group { background: rgba(242,193,78,0.12); }
+.ts-groups .ts-self { font-weight: 600; }
 .ts-span-cell { width: 55%; }
 .ts-span {
   overflow: hidden;

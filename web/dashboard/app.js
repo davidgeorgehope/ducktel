@@ -482,6 +482,8 @@ function traceSummaryMarkup(s) {
     parts.push(`${escapeHtml(root.service_name)} — ${escapeHtml(root.span_name)}`);
   }
   parts.push((Number(s.duration_ms) || 0).toFixed(1) + " ms");
+  const untraced = Number(s.untraced_ms) || 0;
+  if (untraced > 0) parts.push("untraced " + fmtMs(untraced));
   const spanCount = Number(s.span_count) || 0;
   parts.push(spanCount + " span" + (spanCount === 1 ? "" : "s") + (s.truncated ? " (truncated)" : ""));
   const errorCount = Number(s.error_count) || 0;
@@ -499,14 +501,14 @@ function traceSummaryMarkup(s) {
 
   if (groups.length) {
     const duration = Number(s.duration_ms) || 0;
-    const more = (Number(s.groups_total) || 0) - groups.length;
+    const more = Number(s.groups_more) || 0;
     html += `<div class="ts-heading">where the time went${more > 0 ? ` · ${more} more group${more === 1 ? "" : "s"}` : ""}</div>
       <table class="data-table ts-groups">
-        <thead><tr><th>Span</th><th>Count</th><th>Total</th><th>Max</th><th>Errors</th></tr></thead>
+        <thead><tr><th>Span</th><th>Count</th><th>Self</th><th>Total</th><th>Max</th><th>Errors</th></tr></thead>
         <tbody>`;
     html += groups.map((g) => {
-      const total = Number(g.total_ms) || 0;
-      let pct = duration > 0 ? (total / duration) * 100 : 0;
+      const self = Number(g.self_ms) || 0;
+      let pct = duration > 0 ? (self / duration) * 100 : 0;
       if (!Number.isFinite(pct)) pct = 0;
       pct = Math.min(Math.max(pct, 0), 100);
       return `<tr class="ts-group" data-svc="${escapeHtml(g.service_name)}" data-name="${escapeHtml(g.span_name)}">
@@ -515,6 +517,7 @@ function traceSummaryMarkup(s) {
           <div class="ts-bar-track"><div class="ts-bar" style="width:${pct.toFixed(1)}%"></div></div>
         </td>
         <td>${escapeHtml(String(Number(g.count) || 0))}×</td>
+        <td class="ts-self">${escapeHtml(fmtMs(g.self_ms))}</td>
         <td>${escapeHtml(fmtMs(g.total_ms))}</td>
         <td>${escapeHtml(fmtMs(g.max_ms))}</td>
         <td>${escapeHtml(String(Number(g.errors) || 0))}</td>
@@ -1041,10 +1044,10 @@ function slowTable(rows, since) {
   const table = document.createElement("table");
   table.className = "data-table";
   table.innerHTML = `<thead><tr><th>Time</th><th>Value</th><th>Request</th><th>Spans</th>
-    <th>Top group</th><th>Errors</th><th>Log</th><th>Trace</th></tr></thead><tbody></tbody>`;
+    <th>Untraced</th><th>Top group</th><th>Errors</th><th>Log</th><th>Trace</th></tr></thead><tbody></tbody>`;
   const tbody = table.querySelector("tbody");
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty">no slow requests matched</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">no slow requests matched</td></tr>`;
     return table;
   }
   rows.forEach((r) => {
@@ -1055,7 +1058,8 @@ function slowTable(rows, since) {
     const problems = (trace.logs && Array.isArray(trace.logs.problems)) ? trace.logs.problems : [];
     const p = problems[0];
     const request = root && root.span_name ? root.span_name : "-";
-    const top = g ? `${Number(g.count) || 0}× ${g.span_name} · ${fmtMs(g.total_ms)}` : "-";
+    const untraced = Number(trace.untraced_ms) || 0;
+    const top = g ? `${Number(g.count) || 0}× ${g.span_name} · self ${fmtMs(g.self_ms)}` : "-";
     const logText = p ? `${p.severity_text || ""} ${p.body || ""}`.trim() : "";
     const tr = document.createElement("tr");
     tr.className = "clickable";
@@ -1064,6 +1068,7 @@ function slowTable(rows, since) {
       <td>${escapeHtml(fmtValue(r.value, r.unit))}</td>
       <td>${escapeHtml(request)}</td>
       <td>${escapeHtml(String(Number(trace.span_count) || 0))}</td>
+      <td>${escapeHtml(untraced > 0 ? fmtMs(untraced) : "-")}</td>
       <td>${escapeHtml(top)}</td>
       <td>${escapeHtml(String(Number(trace.error_count) || 0))}</td>
       <td class="ts-log" title="${escapeHtml(logText)}">${p ? `<span class="${severityClass(p.severity_text)}">${escapeHtml(p.severity_text || "")}</span> ${escapeHtml(p.body || "")}` : "-"}</td>
