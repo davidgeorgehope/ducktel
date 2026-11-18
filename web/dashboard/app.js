@@ -23,6 +23,11 @@ const state = {
   writtenHash: "",
 };
 
+// Request tokens per panel: a slower earlier run cannot overwrite a newer one.
+const seq = {};
+function ticket(panel) { seq[panel] = (seq[panel] || 0) + 1; return seq[panel]; }
+function current(panel, t) { return seq[panel] === t; }
+
 // --- deep links ---
 //
 // Every search/query run rewrites the URL hash to exactly the params it used,
@@ -120,6 +125,16 @@ function toast(msg, isErr) {
   toastTimer = setTimeout(() => { el.textContent = ""; }, 4000);
 }
 
+function requireTenant() {
+  if (!state.tenant) toast("no tenant selected - send some telemetry first", true);
+  return !!state.tenant;
+}
+function splitFilter(s) {
+  const i = s.indexOf(":");
+  return { key: i === -1 ? s : s.slice(0, i), value: i === -1 ? "" : s.slice(i + 1) };
+}
+function joinFilter(key, value) { return key + ":" + value; }
+
 // --- tenant resolution ---
 //
 // The picker only appears if there's genuinely more than one tenant.
@@ -168,9 +183,13 @@ async function resolveTenant() {
   select.onchange = async () => {
     state.tenant = select.value;
     localStorage.setItem(TENANT_KEY, state.tenant);
-    await loadServices();
-    await loadMetricNames();
-    await runTraceSearch();
+    await Promise.all([loadServices(), loadMetricNames()]);
+    // Re-run whichever tab is visible, so its results and hash agree with
+    // the newly selected tenant.
+    const tab = activeTab();
+    if (tab === "logs") await runLogSearch();
+    else if (tab === "metrics") await runMetricQuery();
+    else await runTraceSearch();
   };
 }
 
@@ -250,6 +269,11 @@ function activateTab(name) {
   if (name === "traces") fitTracesSplit();
 }
 
+function activeTab() {
+  const btn = document.querySelector(".tab-btn.active");
+  return btn ? btn.dataset.tab : "traces";
+}
+
 // fitTracesSplit sizes the traces tab to the remaining viewport so its two
 // panes (table, waterfall) each scroll on their own instead of the page
 // scrolling past the waterfall. The tab's own offset gives the header and
@@ -294,7 +318,7 @@ function collectAttrFilters() {
   rows.forEach((row) => {
     const k = row.querySelector(".attr-key").value.trim();
     const v = row.querySelector(".attr-value").value.trim();
-    if (k) out.push(k + ":" + v);
+    if (k) out.push(joinFilter(k, v));
   });
   return out;
 }
@@ -310,36 +334,65 @@ function fmtTime(us) {
   return new Date(us / 1000).toLocaleString();
 }
 
-async function runTraceSearch() {
-  if (!state.tenant) {
-    toast("no tenant selected — send some telemetry first", true);
-    return;
+// Form <-> deep-link mapping: one table per form drives both directions.
+const TRACES_FIELDS = [
+  { param: "service_name", elementId: "f-service", default: "" },
+  { param: "since_minutes", elementId: "f-since", default: "60" },
+  { param: "limit", elementId: "f-limit", default: "100" },
+  { param: "min_ms", elementId: "f-min-ms", default: "" },
+  { param: "max_ms", elementId: "f-max-ms", default: "" },
+];
+const LOGS_FIELDS = [
+  { param: "service_name", elementId: "l-service", default: "" },
+  { param: "severity", elementId: "l-severity", default: "" },
+  { param: "search", elementId: "l-search", default: "" },
+  { param: "since_minutes", elementId: "l-since", default: "60" },
+  { param: "limit", elementId: "l-limit", default: "100" },
+];
+const METRICS_FIELDS = [
+  { param: "metric_name", elementId: "m-name", default: "" },
+  { param: "aggregation", elementId: "m-agg", default: "avg" },
+  { param: "since_minutes", elementId: "m-since", default: "60" },
+  { param: "group_by", elementId: "m-groupby", default: "" },
+];
+
+function formParams(params, fields) {
+  for (const { param, elementId, default: def } of fields) {
+    const value = document.getElementById(elementId).value.trim();
+    if (value || def) params.set(param, value || def);
   }
+}
+
+function fillFields(fields, params) {
+  for (const { param, elementId, default: def } of fields) document.getElementById(elementId).value = params.get(param) || def;
+}
+
+async function runTraceSearch(keepTraceId) {
+  if (!requireTenant()) return;
   const params = new URLSearchParams();
   params.set("tenant", state.tenant);
-  const service = document.getElementById("f-service").value;
-  if (service) params.set("service_name", service);
-  params.set("since_minutes", document.getElementById("f-since").value || "60");
-  params.set("limit", document.getElementById("f-limit").value || "100");
-  const minMs = document.getElementById("f-min-ms").value;
-  const maxMs = document.getElementById("f-max-ms").value;
-  if (minMs) params.set("min_ms", minMs);
-  if (maxMs) params.set("max_ms", maxMs);
+  formParams(params, TRACES_FIELDS);
   collectAttrFilters().forEach((f) => params.append("filter", f));
 
-  setHash("traces", params);
+  // Keep trace_id in the hash for a deep-linked trace, so the waterfall
+  // stays a permalink.
+  const hashParams = new URLSearchParams(params);
+  if (keepTraceId) hashParams.set("trace_id", keepTraceId);
+  setHash("traces", hashParams);
 
+  const t = ticket("traces");
   let resp;
   try {
     resp = await api("/api/traces?" + params.toString());
   } catch (e) {
-    toast(e.message, true);
+    if (current("traces", t)) toast(e.message, true);
     return;
   }
+  if (!current("traces", t)) return;
 
   const tbody = document.querySelector("#traces-table tbody");
   tbody.innerHTML = "";
-  document.getElementById("waterfall").classList.add("hidden");
+  if (!keepTraceId) { ticket("waterfall"); document.getElementById("waterfall").classList.add("hidden"); }
 
   if (resp.rows.length === 0) {
     tbody.innerHTML = `<tr><td colspan="6" class="empty">no spans matched</td></tr>`;
@@ -354,13 +407,14 @@ async function runTraceSearch() {
       <td>${escapeHtml(r.span_name || "")}</td>
       <td>${(r.duration_ms || 0).toFixed(1)} ms</td>
       <td class="${statusClass(r.status_code)}">${escapeHtml((r.status_code || "").replace("STATUS_CODE_", ""))}</td>
-      <td class="mono">${escapeHtml((r.trace_id || "").slice(0, 12))}…</td>`;
+      <td>${traceCell(r.trace_id)}</td>`;
     tr.addEventListener("click", () => loadWaterfall(r.trace_id));
     tbody.appendChild(tr);
   });
 }
 
 async function loadWaterfall(traceId) {
+  const t = ticket("waterfall");
   const tenant = encodeURIComponent(state.tenant);
 
   // Spans and the trace's log records are independent; fetch both up front.
@@ -375,11 +429,13 @@ async function loadWaterfall(traceId) {
   try {
     resp = await spansP;
   } catch (e) {
-    toast(e.message, true);
+    if (current("waterfall", t)) toast(e.message, true);
     logsP.catch(() => {});
     return;
   }
+  if (!current("waterfall", t)) return;
   const logs = await logsP;
+  if (!current("waterfall", t)) return;
 
   // Record trace_id in the hash so this exact waterfall is itself a
   // permalink, not just the search that found it.
@@ -472,10 +528,10 @@ function severityClass(sev) {
   return "";
 }
 
-// traceCell renders the logs table's trace column: a truncated id (the row
-// navigates to the waterfall) or an explicit muted marker. Records logged
-// outside any span legitimately carry no trace id, and an empty cell reads
-// as "something is broken" rather than "this record was never part of a
+// traceCell renders a trace column: a truncated id (the row navigates to
+// the waterfall) or an explicit muted marker. Records logged outside any
+// span legitimately carry no trace id, and an empty cell reads as
+// "something is broken" rather than "this record was never part of a
 // trace".
 function traceCell(traceId) {
   if (!traceId) return `<span class="no-trace">no trace</span>`;
@@ -492,12 +548,16 @@ function logLineMarkup(r) {
   </div>`;
 }
 
-// viewTrace jumps from a log row to its trace's waterfall: switches to the
-// traces tab and loads it under a clean traces hash (the log filters would
-// be meaningless there).
-function viewTrace(traceId) {
+// viewTrace jumps to a trace's waterfall: switches to the traces tab and
+// loads it under a clean traces hash. The optional since keeps an exemplar's
+// time window; trace_id in the hash makes the waterfall a permalink.
+function viewTrace(traceId, since) {
+  // Keep the current view as a history entry, so Back returns to it (setHash
+  // below replaces, it does not push).
+  history.pushState(null, "", location.href);
   const params = new URLSearchParams();
   params.set("tenant", state.tenant);
+  if (since) params.set("since_minutes", since);
   params.set("trace_id", traceId);
   setHash("traces", params);
   activateTab("traces");
@@ -505,30 +565,22 @@ function viewTrace(traceId) {
 }
 
 async function runLogSearch() {
-  if (!state.tenant) {
-    toast("no tenant selected — send some telemetry first", true);
-    return;
-  }
+  if (!requireTenant()) return;
   const params = new URLSearchParams();
   params.set("tenant", state.tenant);
-  const service = document.getElementById("l-service").value;
-  if (service) params.set("service_name", service);
-  const severity = document.getElementById("l-severity").value;
-  if (severity) params.set("severity", severity);
-  const search = document.getElementById("l-search").value.trim();
-  if (search) params.set("search", search);
-  params.set("since_minutes", document.getElementById("l-since").value || "60");
-  params.set("limit", document.getElementById("l-limit").value || "100");
+  formParams(params, LOGS_FIELDS);
 
   setHash("logs", params);
 
+  const t = ticket("logs");
   let resp;
   try {
     resp = await api("/api/logs?" + params.toString());
   } catch (e) {
-    toast(e.message, true);
+    if (current("logs", t)) toast(e.message, true);
     return;
   }
+  if (!current("logs", t)) return;
 
   const tbody = document.querySelector("#logs-table tbody");
   tbody.innerHTML = "";
@@ -557,42 +609,45 @@ async function runLogSearch() {
 
 // --- metrics view ---
 
+function metricParams(base, aggregation, filters, extra) {
+  const p = new URLSearchParams();
+  for (const k of ["tenant", "metric_name", "since_minutes"]) if (base.has(k)) p.set(k, base.get(k));
+  p.set("aggregation", aggregation);
+  (filters || []).forEach((f) => p.append("filter", f));
+  for (const [k, v] of Object.entries(extra || {})) if (v !== null && v !== undefined && v !== "") p.set(k, v);
+  return p;
+}
+
 async function runMetricQuery() {
-  if (!state.tenant) {
-    toast("no tenant selected — send some telemetry first", true);
-    return;
-  }
+  if (!requireTenant()) return;
   const metricName = document.getElementById("m-name").value;
   if (!metricName) {
     toast("choose a metric name first", true);
     return;
   }
-  const params = new URLSearchParams();
-  params.set("tenant", state.tenant);
-  params.set("metric_name", metricName);
-  params.set("aggregation", document.getElementById("m-agg").value);
-  params.set("since_minutes", document.getElementById("m-since").value || "60");
+  const base = new URLSearchParams({ tenant: state.tenant, metric_name: metricName, since_minutes: document.getElementById("m-since").value || "60" });
+  const agg = document.getElementById("m-agg").value;
   const groupBy = document.getElementById("m-groupby").value.trim();
-  if (groupBy) params.set("group_by", groupBy);
-  state.metricFilters.forEach((f) => params.append("filter", f));
-  if (params.get("aggregation") === "exemplars") {
-    for (const [k, v] of Object.entries(state.metricRange)) params.set(k, v);
-  }
+  const extra = groupBy ? { group_by: groupBy } : {};
+  if (agg === "exemplars") Object.assign(extra, state.metricRange);
+  const params = metricParams(base, agg, state.metricFilters, extra);
 
   setHash("metrics", params);
 
   const out = document.getElementById("metric-result");
   const dist = document.getElementById("metric-dist");
   dist.innerHTML = "";
-  await loadMetricInfo();
-  const unit = metricUnit();
+  const t = ticket("metrics");
+  const infoP = loadMetricInfo(t);
   let resp;
   try {
-    resp = await api("/api/metrics?" + params.toString());
+    [resp] = await Promise.all([api("/api/metrics?" + params.toString()), infoP]);
   } catch (e) {
-    toast(e.message, true);
+    if (current("metrics", t)) toast(e.message, true);
     return;
   }
+  if (!current("metrics", t)) return;
+  const unit = metricUnit();
 
   if (resp.rows.length === 0) {
     out.innerHTML = `<div class="empty">no data points matched</div>`;
@@ -603,7 +658,6 @@ async function runMetricQuery() {
   // one value overall) — not a time series — so a bar comparison (or a
   // single stat when there's nothing to compare) is the right shape, not a
   // line chart.
-  const agg = params.get("aggregation");
   if (agg === "exemplars") {
     out.innerHTML = "";
     out.appendChild(exemplarTable(resp, unit, params.get("since_minutes")));
@@ -619,11 +673,13 @@ async function runMetricQuery() {
   }
 
   const max = Math.max(...resp.rows.map((r) => Number(r.value) || 0), 1);
+  const labels = [];
   const bars = resp.rows.map((r, i) => {
     const v = Number(r.value) || 0;
     const pct = (v / max) * 100;
     // Every group key in the label, not just the first.
     const label = groupCols.map((c) => (r[c] === null || r[c] === undefined ? "—" : String(r[c]))).join(" · ");
+    labels[i] = label;
     const filters = isHistogram ? groupFilters(groupCols, r) : null;
     const clickable = filters ? ` clickable" data-idx="${i}` : "";
     return `
@@ -637,9 +693,8 @@ async function runMetricQuery() {
   if (isHistogram) {
     out.querySelectorAll(".bar-row.clickable").forEach((el) => {
       el.addEventListener("click", () => {
-        const r = resp.rows[Number(el.dataset.idx)];
-        const label = groupCols.map((c) => String(r[c])).join(" · ");
-        renderDistribution(label, state.metricFilters.concat(groupFilters(groupCols, r)), params);
+        const i = Number(el.dataset.idx);
+        renderDistribution(labels[i], state.metricFilters.concat(groupFilters(groupCols, resp.rows[i])), params);
       });
     });
   }
@@ -649,26 +704,28 @@ async function runMetricQuery() {
 //
 // Asked through the same metric_query an agent uses: count grouped by
 // metric_type and metric_unit. No separate endpoint, so the dashboard sees
-// exactly what the MCP tools see.
-async function loadMetricInfo() {
+// exactly what the MCP tools see. Cached per tenant/metric/window because
+// otherwise every Run repeats this query.
+const metricInfoCache = new Map();
+
+async function loadMetricInfo(t) {
   const el = document.getElementById("m-info");
   const name = document.getElementById("m-name").value;
+  const since = document.getElementById("m-since").value || "60";
   state.metricInfo = null;
   el.textContent = "";
   if (!state.tenant || !name) return;
-  const p = new URLSearchParams();
-  p.set("tenant", state.tenant);
-  p.set("metric_name", name);
-  p.set("aggregation", "count");
-  p.set("since_minutes", document.getElementById("m-since").value || "60");
-  p.set("group_by", "metric_type,metric_unit");
-  let resp;
-  try {
-    resp = await api("/api/metrics?" + p.toString());
-  } catch (e) {
-    return;
+  const key = [state.tenant, name, since].join("|");
+  let row = metricInfoCache.get(key);
+  if (!metricInfoCache.has(key)) {
+    const p = metricParams(new URLSearchParams({ tenant: state.tenant, metric_name: name, since_minutes: since }), "count", [], { group_by: "metric_type,metric_unit" });
+    let resp;
+    try { resp = await api("/api/metrics?" + p.toString()); } catch (e) { return; }
+    if (t !== undefined && !current("metrics", t)) return;
+    row = (resp && resp.rows[0]) || null;
+    metricInfoCache.set(key, row);
   }
-  const row = (resp && resp.rows[0]) || null;
+  if (t !== undefined && !current("metrics", t)) return;
   if (!row) return;
   state.metricInfo = { type: row.metric_type, unit: row.metric_unit || "" };
   const hint = {
@@ -699,7 +756,7 @@ function groupFilters(groupCols, row) {
     else if (c.startsWith("attributes.")) key = c.slice(11);
     else if (c === "service_name") key = "service.name";
     if (!key) return null;
-    out.push(key + ":" + v);
+    out.push(joinFilter(key, v));
   }
   return out;
 }
@@ -709,21 +766,17 @@ function groupFilters(groupCols, row) {
 // aggregation=buckets on the same metric_query, plus p50/p95/p99 from the
 // server, so nothing is re-derived here.
 async function renderDistribution(label, filters, baseParams) {
+  const t = ticket("dist");
   const dist = document.getElementById("metric-dist");
-  const ask = (agg) => {
-    const p = new URLSearchParams();
-    for (const k of ["tenant", "metric_name", "since_minutes"]) p.set(k, baseParams.get(k));
-    p.set("aggregation", agg);
-    filters.forEach((f) => p.append("filter", f));
-    return api("/api/metrics?" + p.toString());
-  };
+  const ask = (agg) => api("/api/metrics?" + metricParams(baseParams, agg, filters).toString());
   let buckets, p50, p95, p99;
   try {
     [buckets, p50, p95, p99] = await Promise.all(["buckets", "p50", "p95", "p99"].map(ask));
   } catch (e) {
-    toast(e.message, true);
+    if (current("dist", t)) toast(e.message, true);
     return;
   }
+  if (!current("dist", t)) return;
   const rows = buckets.rows;
   const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
   if (total === 0) {
@@ -763,7 +816,7 @@ async function renderDistribution(label, filters, baseParams) {
   dist.querySelectorAll(".bar-row.clickable").forEach((el) => {
     el.addEventListener("click", () => {
       const i = Number(el.dataset.i);
-      showBucketRequests(prevLe(i), rows[i].le, filters, baseParams);
+      showBucketRequests(prevLe(i), rows[i].le, filters, baseParams, unit);
     });
   });
 }
@@ -774,23 +827,21 @@ async function renderDistribution(label, filters, baseParams) {
 // bounds: the concrete requests the SDK attached to those observations. Each
 // leads to its trace (waterfall + logs). "All spans in this range" is
 // span_search with min_ms/max_ms, for when the exemplars are too few.
-async function showBucketRequests(lo, le, filters, baseParams) {
+async function showBucketRequests(lo, le, filters, baseParams, unit) {
+  const t = ticket("bucket");
   const box = document.getElementById("bucket-req");
-  const unit = metricUnit();
-  const p = new URLSearchParams();
-  for (const k of ["tenant", "metric_name", "since_minutes"]) p.set(k, baseParams.get(k));
-  p.set("aggregation", "exemplars");
-  if (lo !== null) p.set("min_value", lo);
-  if (le !== null) p.set("max_value", le);
-  p.set("limit", "20");
-  filters.forEach((f) => p.append("filter", f));
+  const extra = { limit: "20" };
+  if (lo !== null) extra.min_value = lo;
+  if (le !== null) extra.max_value = le;
+  const p = metricParams(baseParams, "exemplars", filters, extra);
   let resp;
   try {
     resp = await api("/api/metrics?" + p.toString());
   } catch (e) {
-    toast(e.message, true);
+    if (current("bucket", t)) toast(e.message, true);
     return;
   }
+  if (!current("bucket", t)) return;
   const range = `${lo === null ? "" : fmtValue(lo, unit)} – ${le === null ? "∞" : fmtValue(le, unit)}`;
   box.innerHTML = `<div class="dist-head"><b>requests ${range}</b> ·
     ${resp.rows.length} exemplar${resp.rows.length === 1 ? "" : "s"}</div>`;
@@ -804,8 +855,8 @@ async function showBucketRequests(lo, le, filters, baseParams) {
     sp.set("limit", "100");
     if (lo !== null) sp.set("min_ms", lo * toMs);
     if (le !== null) sp.set("max_ms", le * toMs);
-    const svc = filters.find((f) => f.startsWith("service.name:"));
-    if (svc) sp.set("service_name", svc.slice("service.name:".length));
+    const svc = filters.map(splitFilter).find((f) => f.key === "service.name");
+    if (svc) sp.set("service_name", svc.value);
     box.querySelector(".dist-head").insertAdjacentHTML("beforeend",
       ` · <a href="#traces?${escapeHtml(sp.toString())}">all spans in this range →</a>`);
   }
@@ -832,21 +883,11 @@ function exemplarTable(resp, unit, since) {
     tr.className = "clickable";
     tr.innerHTML = `<td>${fmtTime(r.timestamp)}</td>` +
       groupCols.map((c) => `<td>${escapeHtml(r[c] === null || r[c] === undefined ? "—" : r[c])}</td>`).join("") +
-      `<td>${fmtValue(r.value, unit)}</td><td class="mono">${escapeHtml((r.trace_id || "").slice(0, 12))}…</td>`;
-    tr.addEventListener("click", () => openTrace(r.trace_id, since));
+      `<td>${fmtValue(r.value, unit)}</td><td>${traceCell(r.trace_id)}</td>`;
+    tr.addEventListener("click", () => viewTrace(r.trace_id, since));
     tbody.appendChild(tr);
   });
   return table;
-}
-
-// openTrace navigates to a trace's waterfall through its deep link, so the
-// address bar is a permalink to it and back returns here.
-function openTrace(traceId, since) {
-  const p = new URLSearchParams();
-  p.set("tenant", state.tenant);
-  if (since) p.set("since_minutes", since);
-  p.set("trace_id", traceId);
-  location.hash = "#traces?" + p.toString();
 }
 
 // --- metric filters (from a deep link) ---
@@ -857,16 +898,16 @@ function setMetricFilters(list) {
   state.metricFilters = list.slice();
   const el = document.getElementById("m-filters");
   const r = state.metricRange;
-  const range = r.min_value || r.max_value
-    ? `<span class="chip">value ${escapeHtml(r.min_value || "")}–${escapeHtml(r.max_value || "∞")} <button type="button" data-range="1" title="remove">×</button></span>`
+  const range = r.min_value || r.max_value || r.limit
+    ? `<span class="chip">value ${escapeHtml(r.min_value || "")}–${escapeHtml(r.max_value || "∞")}${r.limit ? ", limit " + escapeHtml(r.limit) : ""} <button type="button" data-range="1" title="remove">×</button></span>`
     : "";
   el.innerHTML = range + state.metricFilters.map((f, i) =>
     `<span class="chip">${escapeHtml(f)} <button type="button" data-i="${i}" title="remove">×</button></span>`).join("");
   const rb = el.querySelector("button[data-range]");
-  if (rb) rb.addEventListener("click", () => { state.metricRange = {}; setMetricFilters(state.metricFilters); });
+  if (rb) rb.addEventListener("click", () => { state.metricRange = {}; setMetricFilters(state.metricFilters); runMetricQuery(); });
   el.querySelectorAll("button[data-i]").forEach((b) => b.addEventListener("click", () => {
-    const next = state.metricFilters.filter((_, j) => j !== Number(b.dataset.i));
-    setMetricFilters(next);
+    setMetricFilters(state.metricFilters.filter((_, j) => j !== Number(b.dataset.i)));
+    runMetricQuery();
   }));
 }
 
@@ -924,47 +965,22 @@ function escapeHtml(s) {
 // --- deep-link application ---
 
 function fillTracesForm(params) {
-  const service = params.get("service_name");
-  if (service) document.getElementById("f-service").value = service;
-  const since = params.get("since_minutes");
-  if (since) document.getElementById("f-since").value = since;
-  const limit = params.get("limit");
-  if (limit) document.getElementById("f-limit").value = limit;
-  document.getElementById("f-min-ms").value = params.get("min_ms") || "";
-  document.getElementById("f-max-ms").value = params.get("max_ms") || "";
+  fillFields(TRACES_FIELDS, params);
 
   const container = document.getElementById("f-attr-filters");
   container.innerHTML = "";
   params.getAll("filter").forEach((f) => {
-    const idx = f.indexOf(":");
-    const k = idx === -1 ? f : f.slice(0, idx);
-    const v = idx === -1 ? "" : f.slice(idx + 1);
-    addAttrFilterRow(k, v);
+    const { key, value } = splitFilter(f);
+    addAttrFilterRow(key, value);
   });
 }
 
 function fillLogsForm(params) {
-  const service = params.get("service_name");
-  if (service) document.getElementById("l-service").value = service;
-  const severity = params.get("severity");
-  if (severity) document.getElementById("l-severity").value = severity;
-  const search = params.get("search");
-  if (search) document.getElementById("l-search").value = search;
-  const since = params.get("since_minutes");
-  if (since) document.getElementById("l-since").value = since;
-  const limit = params.get("limit");
-  if (limit) document.getElementById("l-limit").value = limit;
+  fillFields(LOGS_FIELDS, params);
 }
 
 function fillMetricsForm(params) {
-  const name = params.get("metric_name");
-  if (name) document.getElementById("m-name").value = name;
-  const agg = params.get("aggregation");
-  if (agg) document.getElementById("m-agg").value = agg;
-  const since = params.get("since_minutes");
-  if (since) document.getElementById("m-since").value = since;
-  const groupBy = params.get("group_by");
-  document.getElementById("m-groupby").value = groupBy || "";
+  fillFields(METRICS_FIELDS, params);
   state.metricRange = {};
   for (const k of ["min_value", "max_value", "limit"]) {
     if (params.get(k)) state.metricRange[k] = params.get(k);
@@ -985,8 +1001,7 @@ async function applyInitialView() {
     state.tenant = hashTenant;
     localStorage.setItem(TENANT_KEY, state.tenant);
     syncTenantPicker();
-    await loadServices();
-    await loadMetricNames();
+    await Promise.all([loadServices(), loadMetricNames()]);
   }
 
   if (view === "logs") {
@@ -1010,11 +1025,10 @@ async function applyInitialView() {
   activateTab("traces");
   fillTracesForm(params);
   if (state.tenant) {
-    await runTraceSearch();
     const traceId = params.get("trace_id");
-    if (traceId) {
-      await loadWaterfall(traceId);
-    }
+    // Load the deep-linked waterfall before the slow trace list search.
+    if (traceId) await loadWaterfall(traceId);
+    await runTraceSearch(traceId);
   }
 }
 
@@ -1045,9 +1059,7 @@ async function connect() {
     return;
   }
   hideGate();
-  await loadServices();
-  await loadMetricNames();
-  await loadConfig();
+  await Promise.all([loadServices(), loadMetricNames(), loadConfig()]);
   state.connected = true;
   // Lands on whatever the URL hash describes, or falls back to a plain
   // recent-traces view so the first thing you see isn't an empty table.
@@ -1090,7 +1102,13 @@ function init() {
     // Filters from a deep link belonged to the previous metric.
     state.metricRange = {};
     setMetricFilters([]);
-    loadMetricInfo();
+    loadMetricInfo(ticket("metrics"));
+  });
+  document.getElementById("m-agg").addEventListener("change", () => {
+    if (document.getElementById("m-agg").value !== "exemplars") {
+      state.metricRange = {};
+      setMetricFilters(state.metricFilters);
+    }
   });
   document.getElementById("flush-btn").addEventListener("click", runFlush);
   document.getElementById("logout-btn").addEventListener("click", logout);
