@@ -30,6 +30,67 @@ func TestTraceSummaryEndpoint(t *testing.T) {
 	if s.TraceID != "trace-acme-1" || s.SpanCount != 1 || s.Root == nil {
 		t.Errorf("summary = %+v", s)
 	}
+	if !strings.Contains(rec.Body.String(), `"self_ms"`) || !strings.Contains(rec.Body.String(), `"untraced_ms"`) {
+		t.Errorf("summary JSON lacks self_ms/untraced_ms: %s", rec.Body.String())
+	}
+}
+
+func TestTraceSummaryEndpointSelfAndUntraced(t *testing.T) {
+	dir := t.TempDir()
+	w := writer.New(dir, time.Hour, 1000)
+	base := time.Now().Add(-time.Minute)
+	span := func(id, parent, name string, start time.Time, ms float64) writer.TraceSpan {
+		return writer.TraceSpan{
+			TraceID: "trace-self", SpanID: id, ParentSpanID: parent,
+			ServiceName: "api", SpanName: name, SpanKind: "SPAN_KIND_SERVER",
+			StartTime: start.UnixMicro(), EndTime: start.Add(time.Duration(ms * float64(time.Millisecond))).UnixMicro(),
+			DurationMs: ms, StatusCode: "STATUS_CODE_OK", Attributes: "{}",
+			ResourceAttributes: `{"service.name":"api","tenant.id":"acme"}`,
+			Events:             "[]", Links: "[]",
+		}
+	}
+	w.Add([]writer.TraceSpan{
+		span("root", "", "GET /self", base, 100),
+		span("child", "root", "SELECT", base.Add(10*time.Millisecond), 20),
+	})
+	if err := w.Flush(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	engine, err := query.Open(dir)
+	if err != nil {
+		t.Fatalf("opening engine: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	mux := http.NewServeMux()
+	h := NewHandlers(telemetry.NewCore(engine), telemetry.NewFlusher("", ""), "")
+	h.Register(mux)
+
+	rec := doReq(t, mux, "GET", "/api/traces/trace-self/summary?tenant=acme", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var s telemetry.TraceSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil {
+		t.Fatalf("bad JSON: %v: %s", err, rec.Body.String())
+	}
+	if s.Root.SelfMs != 80 || s.UntracedMs != 80 {
+		t.Errorf("root self = %v untraced = %v, want 80 and 80", s.Root.SelfMs, s.UntracedMs)
+	}
+	if len(s.Groups) != 1 || s.Groups[0].SelfMs != 20 || s.Groups[0].TotalMs != 20 {
+		t.Errorf("groups = %+v, want the child with self and total 20", s.Groups)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	groups, _ := raw["groups"].([]any)
+	group, _ := groups[0].(map[string]any)
+	if _, ok := raw["untraced_ms"]; !ok {
+		t.Errorf("summary JSON lacks untraced_ms: %s", rec.Body.String())
+	}
+	if _, ok := group["self_ms"]; !ok {
+		t.Errorf("group JSON lacks self_ms: %s", rec.Body.String())
+	}
 }
 
 func TestTraceSummaryEndpointTenantScoped(t *testing.T) {
@@ -74,6 +135,9 @@ func TestSlowEndpointRootSpans(t *testing.T) {
 		if r.TraceID == "trace-globex-1" {
 			t.Errorf("globex trace leaked: %+v", r)
 		}
+	}
+	if !strings.Contains(rec.Body.String(), `"untraced_ms"`) {
+		t.Errorf("/api/slow brief summary lacks untraced_ms: %s", rec.Body.String())
 	}
 
 	rec = doReq(t, mux, "GET", "/api/slow?tenant=acme&service_name=api", "")

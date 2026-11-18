@@ -29,6 +29,7 @@ type SpanBrief struct {
 	SpanName      string  `json:"span_name"`
 	StartTime     int64   `json:"start_time"` // microseconds, as stored
 	DurationMs    float64 `json:"duration_ms"`
+	SelfMs        float64 `json:"self_ms"` // duration minus the union of child spans
 	StatusCode    string  `json:"status_code"`
 	StatusMessage string  `json:"status_message,omitempty"`
 }
@@ -38,6 +39,7 @@ type SpanGroup struct {
 	SpanName    string  `json:"span_name"`
 	Count       int     `json:"count"`
 	TotalMs     float64 `json:"total_ms"`
+	SelfMs      float64 `json:"self_ms"`
 	MaxMs       float64 `json:"max_ms"`
 	Errors      int     `json:"errors"`
 }
@@ -73,6 +75,8 @@ type TraceSummary struct {
 	Services    []ServiceCount `json:"services"`
 	Groups      []SpanGroup    `json:"groups"`
 	GroupsTotal int            `json:"groups_total"`
+	GroupsMore  int            `json:"groups_more,omitempty"`
+	UntracedMs  float64        `json:"untraced_ms"` // root self time: the part no child span covers
 	Slowest     []SpanBrief    `json:"slowest"`
 	Errors      []SpanBrief    `json:"errors"`
 	Logs        LogSummary     `json:"logs"`
@@ -84,7 +88,7 @@ type SummaryLimits struct {
 }
 
 var FullSummary = SummaryLimits{Groups: 15, Slowest: 10, Errors: 10, Problems: 10}
-var BriefSummary = SummaryLimits{Groups: 3, Slowest: 0, Errors: 1, Problems: 1}
+var BriefSummary = SummaryLimits{Groups: 3, Slowest: 3, Errors: 1, Problems: 1}
 
 // TraceSummaries summarises several traces with one spans query and one logs
 // query. since bounds which files are read (zero means every file); it is not
@@ -181,6 +185,7 @@ ORDER BY trace_id, start_time, span_id`
 			StatusMessage: strVal(r["status_message"]),
 		}
 		a.spans = append(a.spans, b)
+		a.endUs = append(a.endUs, intVal(r["end_time"]))
 
 		start, end := b.StartTime, intVal(r["end_time"])
 		if !a.hasTime || start < a.minStart {
@@ -258,6 +263,8 @@ type traceAgg struct {
 	summary TraceSummary
 
 	spans     []SpanBrief
+	endUs     []int64 // end_time per span, parallel to spans
+	selfUs    []int64 // computed self time per span, parallel to spans
 	spanTotal int64
 	minStart  int64
 	maxEnd    int64
@@ -289,6 +296,8 @@ func (a *traceAgg) finish(lim SummaryLimits) {
 		return
 	}
 
+	a.selfTimes()
+
 	rootIdx := -1
 	for i, s := range a.spans {
 		if s.ParentSpanID != "" {
@@ -298,7 +307,8 @@ func (a *traceAgg) finish(lim SummaryLimits) {
 			rootIdx = i
 		}
 	}
-	if rootIdx < 0 {
+	rootMissing := rootIdx < 0
+	if rootMissing {
 		rootIdx = 0
 		for i := range a.spans {
 			if earlierSpan(a.spans[i], a.spans[rootIdx]) {
@@ -309,6 +319,12 @@ func (a *traceAgg) finish(lim SummaryLimits) {
 	}
 	root := a.spans[rootIdx]
 	a.summary.Root = &root
+	if !rootMissing {
+		// The part of the request no child span covers: time spent in
+		// uninstrumented code. Without a real root there is nothing to
+		// attribute it to, so it stays 0.
+		a.summary.UntracedMs = root.SelfMs
+	}
 
 	// SpanCount is the trace's real size even when only the first
 	// maxSpansPerTrace spans were aggregated (Truncated says so).
@@ -337,7 +353,11 @@ func (a *traceAgg) finish(lim SummaryLimits) {
 
 	// Groups leave the root out: it is already reported as root, and in a
 	// brief summary it would take one of the few group slots.
-	byKey := map[string]*SpanGroup{}
+	type groupAgg struct {
+		SpanGroup
+		selfUs int64
+	}
+	byKey := map[string]*groupAgg{}
 	for i, sp := range a.spans {
 		if i == rootIdx {
 			continue
@@ -345,11 +365,12 @@ func (a *traceAgg) finish(lim SummaryLimits) {
 		key := sp.ServiceName + "\x00" + sp.SpanName
 		g := byKey[key]
 		if g == nil {
-			g = &SpanGroup{ServiceName: sp.ServiceName, SpanName: sp.SpanName}
+			g = &groupAgg{SpanGroup: SpanGroup{ServiceName: sp.ServiceName, SpanName: sp.SpanName}}
 			byKey[key] = g
 		}
 		g.Count++
 		g.TotalMs += sp.DurationMs
+		g.selfUs += a.selfUs[i]
 		g.MaxMs = max(g.MaxMs, sp.DurationMs)
 		if sp.StatusCode == statusCodeError {
 			g.Errors++
@@ -358,9 +379,13 @@ func (a *traceAgg) finish(lim SummaryLimits) {
 	groups := make([]SpanGroup, 0, len(byKey))
 	for _, g := range byKey {
 		g.TotalMs, g.MaxMs = roundMs(g.TotalMs), roundMs(g.MaxMs)
-		groups = append(groups, *g)
+		g.SelfMs = roundMs(float64(g.selfUs) / 1000)
+		groups = append(groups, g.SpanGroup)
 	}
 	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].SelfMs != groups[j].SelfMs {
+			return groups[i].SelfMs > groups[j].SelfMs
+		}
 		if groups[i].TotalMs != groups[j].TotalMs {
 			return groups[i].TotalMs > groups[j].TotalMs
 		}
@@ -374,6 +399,7 @@ func (a *traceAgg) finish(lim SummaryLimits) {
 	})
 	a.summary.GroupsTotal = len(groups)
 	a.summary.Groups = take(groups, lim.Groups)
+	a.summary.GroupsMore = a.summary.GroupsTotal - len(a.summary.Groups)
 
 	slowest := make([]SpanBrief, 0, len(a.spans))
 	for i, s := range a.spans {
@@ -406,6 +432,65 @@ func (a *traceAgg) finish(lim SummaryLimits) {
 		return errs[i].SpanID < errs[j].SpanID
 	})
 	a.summary.Errors = take(errs, lim.Errors)
+}
+
+// selfTimes fills SelfMs (and the exact selfUs behind it) for every span. It
+// builds the direct-children lists once, sorts each by start time, and merges
+// them into the parent's interval, so a trace of n spans costs O(n log n)
+// rather than comparing every span with every other one.
+func (a *traceAgg) selfTimes() {
+	children := make(map[string][]int, len(a.spans))
+	for i := range a.spans {
+		if p := a.spans[i].ParentSpanID; p != "" {
+			children[p] = append(children[p], i)
+		}
+	}
+	for _, list := range children {
+		sort.Slice(list, func(i, j int) bool {
+			x, y := list[i], list[j]
+			if a.spans[x].StartTime != a.spans[y].StartTime {
+				return a.spans[x].StartTime < a.spans[y].StartTime
+			}
+			return a.endUs[x] < a.endUs[y]
+		})
+	}
+
+	selfUs := make([]int64, len(a.spans))
+	for i := range a.spans {
+		sp := &a.spans[i]
+		covered := int64(0)
+		curStart, curEnd := int64(0), int64(0)
+		have := false
+		for _, ci := range children[sp.SpanID] {
+			// Clip the child to the parent's interval before merging;
+			// a child that extends past the parent cannot cover more
+			// than the parent's own time.
+			start, end := max(a.spans[ci].StartTime, sp.StartTime), min(a.endUs[ci], a.endUs[i])
+			if end <= start {
+				continue
+			}
+			if !have {
+				curStart, curEnd, have = start, end, true
+				continue
+			}
+			if start <= curEnd {
+				curEnd = max(curEnd, end) // overlapping children count once
+				continue
+			}
+			covered += curEnd - curStart
+			curStart, curEnd = start, end
+		}
+		if have {
+			covered += curEnd - curStart
+		}
+		self := a.endUs[i] - sp.StartTime - covered
+		if self < 0 {
+			self = 0
+		}
+		selfUs[i] = self
+		sp.SelfMs = roundMs(float64(self) / 1000)
+	}
+	a.selfUs = selfUs
 }
 
 // earlierSpan is the deterministic order used to pick the earliest of several

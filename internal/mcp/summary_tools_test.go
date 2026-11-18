@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/davidgeorgehope/ducktel/internal/telemetry"
+	"github.com/davidgeorgehope/ducktel/internal/writer"
 )
 
 func TestTraceLookupDefaultReturnsSummaryObject(t *testing.T) {
@@ -21,6 +23,48 @@ func TestTraceLookupDefaultReturnsSummaryObject(t *testing.T) {
 	}
 	if summary.TraceID != "trace-acme-1" || summary.SpanCount != 1 || summary.Root == nil {
 		t.Errorf("summary = %+v", summary)
+	}
+}
+
+func TestTraceLookupSummaryJSONHasSelfAndUntraced(t *testing.T) {
+	base := time.Now().Add(-time.Minute)
+	nested := func(spanID, parent, name string, start time.Time, ms float64) writer.TraceSpan {
+		return writer.TraceSpan{
+			TraceID: "trace-acme-nested", SpanID: spanID, ParentSpanID: parent,
+			ServiceName: "api", SpanName: name, SpanKind: "SPAN_KIND_SERVER",
+			StartTime: start.UnixMicro(), EndTime: start.Add(time.Duration(ms * float64(time.Millisecond))).UnixMicro(),
+			DurationMs: ms, StatusCode: "STATUS_CODE_OK", Attributes: "{}",
+			ResourceAttributes: `{"service.name":"api","tenant.id":"acme"}`,
+			Events:             "[]", Links: "[]",
+		}
+	}
+	s := newTestServerWithSpans(t, nil, []writer.TraceSpan{
+		nested("root", "", "GET /nested", base, 100),
+		nested("child", "root", "SELECT", base.Add(10*time.Millisecond), 20),
+	})
+
+	body, isErr := call(t, s, "trace_lookup", map[string]any{"tenant": "acme", "trace_id": "trace-acme-nested"})
+	if isErr {
+		t.Fatalf("unexpected error: %s", body)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("bad JSON: %v\n%s", err, body)
+	}
+	if _, ok := raw["untraced_ms"]; !ok {
+		t.Errorf("summary JSON lacks untraced_ms: %s", body)
+	}
+	root, _ := raw["root"].(map[string]any)
+	if _, ok := root["self_ms"]; !ok {
+		t.Errorf("root JSON lacks self_ms: %s", body)
+	}
+	groups, _ := raw["groups"].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %v, want the child group", raw["groups"])
+	}
+	group, _ := groups[0].(map[string]any)
+	if _, ok := group["self_ms"]; !ok {
+		t.Errorf("group JSON lacks self_ms: %s", body)
 	}
 }
 
@@ -76,6 +120,9 @@ func TestSlowRequestsToolFromMetric(t *testing.T) {
 	}
 	if rows[0].Trace.SpanCount != 1 || rows[0].Trace.Root == nil {
 		t.Errorf("first row has no brief trace summary: %+v", rows[0].Trace)
+	}
+	if !strings.Contains(body, `"untraced_ms"`) || !strings.Contains(body, `"self_ms"`) {
+		t.Errorf("slow_requests brief summary lacks untraced_ms/self_ms: %s", body)
 	}
 
 	body, isErr = call(t, s, "slow_requests", map[string]any{

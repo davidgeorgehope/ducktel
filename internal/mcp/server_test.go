@@ -45,13 +45,21 @@ func newTestServer(t *testing.T) *sdkmcp.ClientSession {
 // newTestServerWith lets a test configure the Server before it is registered.
 func newTestServerWith(t *testing.T, configure func(*Server)) *sdkmcp.ClientSession {
 	t.Helper()
+	return newTestServerWithSpans(t, configure, nil)
+}
+
+// newTestServerWithSpans is newTestServerWith plus extra spans, for tests that
+// need a call tree or a field shape the default seed does not have.
+func newTestServerWithSpans(t *testing.T, configure func(*Server), extra []writer.TraceSpan) *sdkmcp.ClientSession {
+	t.Helper()
 	dir := t.TempDir()
 
 	w := writer.New(dir, time.Hour, 1000)
-	w.Add([]writer.TraceSpan{
+	spans := []writer.TraceSpan{
 		seedSpan("api", "acme", "trace-acme-1"),
 		seedSpan("worker", "acme", "trace-acme-2"),
-	})
+	}
+	w.Add(append(spans, extra...))
 	w.AddLogs([]writer.LogRecord{
 		{Timestamp: time.Now().UnixMicro(), ServiceName: "api", SeverityText: "ERROR",
 			Body: "connection refused", Attributes: "{}",

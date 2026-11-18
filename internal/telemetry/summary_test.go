@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -170,11 +171,36 @@ func TestTraceSummaryBriefLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g := capped[0]; len(g.Groups) != 2 || g.GroupsTotal != 3 {
-		t.Errorf("capped groups len = %d total = %d, want 2 of 3", len(g.Groups), g.GroupsTotal)
+	if g := capped[0]; len(g.Groups) != 2 || g.GroupsTotal != 3 || g.GroupsMore != 1 {
+		t.Errorf("capped groups len = %d total = %d more = %d, want 2 of 3 with 1 more", len(g.Groups), g.GroupsTotal, g.GroupsMore)
 	}
-	if len(s.Slowest) != 0 {
-		t.Errorf("brief slowest = %d, want 0", len(s.Slowest))
+	if s.GroupsMore != 0 {
+		t.Errorf("uncapped groups_more = %d, want 0", s.GroupsMore)
+	}
+	cappedJSON, err := json.Marshal(capped[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cappedJSON), `"groups_more":1`) {
+		t.Errorf("capped summary JSON lacks groups_more: %s", cappedJSON)
+	}
+	fullJSON, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(fullJSON), `"groups_more"`) {
+		t.Errorf("uncapped summary JSON should omit groups_more: %s", fullJSON)
+	}
+	if len(s.Slowest) != 3 {
+		t.Fatalf("brief slowest = %d, want the 3 slowest spans", len(s.Slowest))
+	}
+	if s.Slowest[0].SpanID != "err" || s.Slowest[0].DurationMs != 200 {
+		t.Errorf("brief slowest[0] = %+v, want the 200 ms error span", s.Slowest[0])
+	}
+	for i := 1; i < len(s.Slowest); i++ {
+		if s.Slowest[i-1].DurationMs < s.Slowest[i].DurationMs {
+			t.Errorf("brief slowest is not sorted by duration: %v then %v", s.Slowest[i-1].DurationMs, s.Slowest[i].DurationMs)
+		}
 	}
 	if len(s.Errors) != 1 {
 		t.Errorf("brief errors = %d, want 1", len(s.Errors))
@@ -196,6 +222,156 @@ func TestTraceSummaryRootMissing(t *testing.T) {
 	if s.Root == nil || !s.RootMissing || s.Root.SpanID != "orphan" {
 		t.Fatalf("root = %+v missing=%v, want earliest span with root_missing", s.Root, s.RootMissing)
 	}
+	if s.UntracedMs != 0 {
+		t.Errorf("untraced_ms = %v with no root, want 0", s.UntracedMs)
+	}
+}
+
+// newSpansCore seeds exactly the given spans and metrics in a fresh store.
+func newSpansCore(t *testing.T, spans []writer.TraceSpan, metrics []writer.MetricPoint) *Core {
+	t.Helper()
+	dir := t.TempDir()
+	w := writer.New(dir, time.Hour, 1000)
+	if len(spans) > 0 {
+		w.Add(spans)
+	}
+	if len(metrics) > 0 {
+		w.AddMetrics(metrics)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	engine, err := query.Open(dir)
+	if err != nil {
+		t.Fatalf("opening engine: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	return NewCore(engine)
+}
+
+func TestTraceSummarySelfTime(t *testing.T) {
+	base := time.Now().Add(-10 * time.Minute)
+	at := func(ms int) time.Time { return base.Add(time.Duration(ms) * time.Millisecond) }
+	ok := "STATUS_CODE_OK"
+	c := newSpansCore(t, []writer.TraceSpan{
+		// Children 10-30 and 20-50 overlap (union 10-50), plus 60-70:
+		// the root spends 50 of its 100 ms outside its children.
+		summarySpan("web", "acme", "t-overlap", "root", "", "GET /overlap", at(0), 100, ok, ""),
+		summarySpan("db", "acme", "t-overlap", "c1", "root", "q", at(10), 20, ok, ""),
+		summarySpan("db", "acme", "t-overlap", "c2", "root", "q", at(20), 30, ok, ""),
+		summarySpan("db", "acme", "t-overlap", "c3", "root", "q", at(60), 10, ok, ""),
+
+		// A child that runs past the parent: only 90-100 counts as covered.
+		summarySpan("web", "acme", "t-clip", "root", "", "GET /clip", at(0), 100, ok, ""),
+		summarySpan("db", "acme", "t-clip", "long", "root", "long", at(90), 60, ok, ""),
+
+		// P is fully covered by its child Q, so P's self time is 0 and
+		// Q's is its whole duration.
+		summarySpan("web", "acme", "t-nested", "root", "", "GET /nested", at(0), 100, ok, ""),
+		summarySpan("svc", "acme", "t-nested", "p", "root", "P", at(0), 100, ok, ""),
+		summarySpan("svc", "acme", "t-nested", "q", "p", "Q", at(0), 100, ok, ""),
+	}, nil)
+
+	overlap, err := c.SummarizeTrace("t-overlap", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overlap.Root.SelfMs != 50 {
+		t.Errorf("overlap root self_ms = %v, want 100-40-10 = 50", overlap.Root.SelfMs)
+	}
+	if overlap.UntracedMs != 50 {
+		t.Errorf("overlap untraced_ms = %v, want the root's self time 50", overlap.UntracedMs)
+	}
+	if len(overlap.Groups) != 1 || overlap.Groups[0].SelfMs != 60 || overlap.Groups[0].TotalMs != 60 {
+		t.Errorf("overlap leaf group = %+v, want self and total 60 with no children", overlap.Groups)
+	}
+
+	clipped, err := c.SummarizeTrace("t-clip", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clipped.Root.SelfMs != 90 {
+		t.Errorf("clipped root self_ms = %v, want 100-10 = 90", clipped.Root.SelfMs)
+	}
+	if len(clipped.Groups) != 1 || clipped.Groups[0].SelfMs != 60 {
+		t.Errorf("clipped child = %+v, want its full 60 ms self time", clipped.Groups)
+	}
+
+	nested, err := c.SummarizeTrace("t-nested", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nested.Root.SelfMs != 0 || nested.UntracedMs != 0 {
+		t.Errorf("nested root self = %v untraced = %v, want 0 and 0", nested.Root.SelfMs, nested.UntracedMs)
+	}
+	if len(nested.Groups) != 2 {
+		t.Fatalf("nested groups = %+v, want P and Q", nested.Groups)
+	}
+	// Sorted by self time: Q (100) before P (0), although both total 100.
+	if nested.Groups[0].SpanName != "Q" || nested.Groups[0].SelfMs != 100 ||
+		nested.Groups[1].SpanName != "P" || nested.Groups[1].SelfMs != 0 {
+		t.Errorf("nested group order = %+v, want Q self 100 before P self 0", nested.Groups)
+	}
+}
+
+func TestSlowRequestsRoundsMsValues(t *testing.T) {
+	base := time.Now().Add(-5 * time.Minute)
+	exemplar := func(traceID string, value float64) string {
+		return fmt.Sprintf(`[{"time_unix_nano":%d,"trace_id":%q,"span_id":"s","value":%v}]`,
+			base.Add(time.Minute).UnixNano(), traceID, value)
+	}
+	metric := func(name, unit, traceID string, value float64) writer.MetricPoint {
+		return writer.MetricPoint{
+			MetricName: name, MetricType: "histogram", MetricUnit: unit,
+			Timestamp: base.UnixMicro(), StartTimestamp: base.Add(-time.Hour).UnixMicro(),
+			Count: 1, Sum: value, Min: value, Max: value,
+			BucketCounts: "[0,1]", ExplicitBounds: "[50]",
+			AggregationTemporality: temporalityCumulative,
+			Attributes:             "{}",
+			ResourceAttributes:     `{"service.name":"web","tenant.id":"acme"}`,
+			ServiceName:            "web",
+			Exemplars:              exemplar(traceID, value),
+		}
+	}
+	ok := "STATUS_CODE_OK"
+	c := newSpansCore(t, []writer.TraceSpan{
+		summarySpan("web", "acme", "t-span-round", "root", "", "GET /span", base, 12.3456, ok, ""),
+		summarySpan("web", "acme", "t-metric-ms", "root", "", "GET /metric", base, 1, ok, ""),
+		summarySpan("web", "acme", "t-metric-s", "root", "", "GET /metric-s", base, 1, ok, ""),
+	}, []writer.MetricPoint{
+		metric("rpc.duration.ms", "ms", "t-metric-ms", 7.8912),
+		metric("rpc.duration.s", "s", "t-metric-s", 3.14159),
+	})
+
+	spans, err := c.SlowRequests("acme", SlowOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spanRow *SlowRequest
+	for i := range spans {
+		if spans[i].TraceID == "t-span-round" {
+			spanRow = &spans[i]
+		}
+	}
+	if spanRow == nil || spanRow.Value != 12.35 {
+		t.Errorf("span source value = %+v, want 12.35 ms", spanRow)
+	}
+
+	msRows, err := c.SlowRequests("acme", SlowOpts{MetricName: "rpc.duration.ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msRows) != 1 || msRows[0].Value != 7.89 {
+		t.Errorf("ms metric value = %+v, want 7.89", msRows)
+	}
+
+	sRows, err := c.SlowRequests("acme", SlowOpts{MetricName: "rpc.duration.s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sRows) != 1 || sRows[0].Value != 3.14159 {
+		t.Errorf("non-ms metric value = %+v, want 3.14159 unchanged", sRows)
+	}
 }
 
 func TestTraceSummaryUnknownIDSerializesEmptySlices(t *testing.T) {
@@ -213,7 +389,7 @@ func TestTraceSummaryUnknownIDSerializesEmptySlices(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"root":null`, `"services":[]`, `"groups":[]`, `"slowest":[]`,
-		`"errors":[]`, `"problems":[]`, `"by_severity":{}`,
+		`"errors":[]`, `"problems":[]`, `"by_severity":{}`, `"untraced_ms":0`,
 	} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("unknown id JSON lacks %s: %s", want, b)

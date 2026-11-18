@@ -173,11 +173,11 @@ interpretation is the caller's job.
 
 | Tool | Purpose |
 |------|---------|
-| `trace_lookup(trace_id, tenant, detail, limit)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time, slowest spans, errors, WARN-and-above logs; `detail=spans` returns every span with attributes, ordered by start time, which can be large |
+| `trace_lookup(trace_id, tenant, detail, limit)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, errors, WARN-and-above logs; `detail=spans` returns every span with attributes, ordered by start time, which can be large |
 | `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms)` | spans matching attribute key/value filters, optionally by duration |
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
 | `metric_query(metric_name, aggregation, since_minutes, group_by, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99, buckets (histograms), exemplars |
-| `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, top repeated span groups, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
+| `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, untraced time, top repeated span groups with their self time, the 3 slowest spans, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
 | `flush_buffer()` | make just-received telemetry queryable now (see Flush semantics) |
 
 **Start with `slow_requests` for "why is X slow".** One call returns the slowest

@@ -78,11 +78,15 @@ func (c *Core) SlowRequests(tenant string, o SlowOpts) ([]SlowRequest, error) {
 		}
 
 		for _, r := range rows {
+			value := toFloat(r["value"])
+			if unit == "ms" {
+				value = roundMs(value)
+			}
 			sr := SlowRequest{
 				TraceID:   strVal(r["trace_id"]),
 				SpanID:    strVal(r["span_id"]),
 				Timestamp: intVal(r["timestamp"]),
-				Value:     toFloat(r["value"]),
+				Value:     value,
 				Unit:      unit,
 			}
 			out = append(out, sr)
@@ -115,7 +119,7 @@ func (c *Core) SlowRequests(tenant string, o SlowOpts) ([]SlowRequest, error) {
 				TraceID:   strVal(r["trace_id"]),
 				SpanID:    strVal(r["span_id"]),
 				Timestamp: intVal(r["start_time"]),
-				Value:     toFloat(r["duration_ms"]),
+				Value:     roundMs(toFloat(r["duration_ms"])),
 				Unit:      "ms",
 			}
 			out = append(out, sr)

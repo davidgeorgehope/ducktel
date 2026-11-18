@@ -42,8 +42,9 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "trace_lookup",
 		Description: "Look up one trace. By default (detail=summary) this returns a compact, already-aggregated summary: " +
-			"the root span, span count, duration, services, groups of repeated spans with their total time " +
-			"(e.g. 107 x SELECT, 2100 ms), the slowest spans, error spans, and WARN-and-above log records. " +
+			"the root span, span count, duration, services, repeated span groups with total_ms and self_ms " +
+			"(time not spent in child spans, so groups add up), untraced_ms (root time no child span covers, " +
+			"i.e. uninstrumented code), the slowest spans, error spans, and WARN-and-above log records. " +
 			"Use this first to understand a request without spending context on every span. " +
 			"detail=spans returns every span with attributes, ordered by start time, which can be large: " +
 			"use it only when the summary is not enough. Requires the tenant the trace belongs to.",
@@ -71,7 +72,8 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "slow_requests",
 		Description: "The slowest requests in one call, each with a brief trace summary " +
-			"(root, span count, top repeated span groups, errors, first WARN-or-above log). " +
+			"(root, span count, untraced_ms, top repeated span groups with self_ms, the 3 slowest spans, " +
+			"errors, first WARN-or-above log). " +
 			"This is the first call for \"why is X slow\": with metric_name it follows that " +
 			"metric's exemplars (min_value/max_value are in the metric's unit, for example one " +
 			"histogram bucket), otherwise it returns the slowest root spans (min_value/max_value " +
