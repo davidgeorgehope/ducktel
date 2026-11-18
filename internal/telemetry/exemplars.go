@@ -3,6 +3,7 @@ package telemetry
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // exemplarsJSONShape is how the receiver stores a point's exemplars (see
@@ -17,7 +18,7 @@ const exemplarsJSONShape = `[{"time_unix_nano":"UBIGINT","trace_id":"VARCHAR","s
 // A cumulative series may repeat an exemplar in several exports, so each
 // (trace_id, span_id) is returned once. Exemplars without a trace id (taken
 // outside a sampled span) cannot be followed and are skipped.
-func (c *Core) queryExemplars(groupExprs, aliases []string, conds string, params []any, opts MetricOpts) ([]map[string]any, []string, error) {
+func (c *Core) queryExemplars(groupExprs, aliases []string, conds string, params []any, cutoff time.Time, opts MetricOpts) ([]map[string]any, []string, error) {
 	if err := opts.Value.validate("value"); err != nil {
 		return nil, nil, err
 	}
@@ -53,7 +54,7 @@ ORDER BY value DESC, timestamp DESC
 LIMIT ?`
 
 	args := append(append(append([]any{}, params...), vp...), limit)
-	rows, _, err := c.engine.Query(q, args...)
+	rows, _, err := c.engine.QuerySince(cutoff, q, args...)
 	if err != nil {
 		return nil, nil, err
 	}
