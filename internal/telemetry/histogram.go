@@ -32,47 +32,96 @@ const (
 	typeExpHistogram      = "exponential_histogram"
 )
 
+// histogramSeriesKey is the series identity the window used to partition on
+// (attributes, resource_attributes, start_timestamp and explicit_bounds),
+// hashed into one UBIGINT. Carrying one integer instead of the attribute and
+// bounds strings through the window and the later CTEs is what keeps a 6 h
+// scan inside a 1 GB container. A hash collision would merge two series;
+// with 64 bits that is far less likely than a corrupted Parquet file, and the
+// alternative (carrying the strings) does not fit in the container at all.
+const histogramSeriesKey = "hash(attributes, resource_attributes, start_timestamp, explicit_bounds)"
+
 // histogramDeltasCTE returns the WITH clause that yields one row per point
 // with its increment (dc, ds, db) and the group columns g1..gN. db is NULL
-// for exponential histograms, whose buckets are not merged here.
+// for exponential histograms, whose buckets are not merged here, and absent
+// entirely when withBuckets is false: count/sum/avg do not read bucket_counts
+// at all, so its JSON is never parsed. min/max do not use this CTE either
+// (they aggregate the points directly).
 //
-// The temporality and cutoff parameters are bound after conds' own params.
-func histogramDeltasCTE(groupExprs []string, conds string) string {
-	gsel := ""
+// Delta-temporality points are already increments: they never enter the
+// window, they are unioned in as they are. Only cumulative points are lagged,
+// and they are partitioned by the single hashed series key. The returned
+// params are bound after conds' own params.
+func histogramDeltasCTE(groupExprs []string, conds string, withBuckets bool, cutoff time.Time) (string, []any) {
+	gdefs, gcols := "", ""
 	for i, e := range groupExprs {
-		gsel += fmt.Sprintf("%s AS g%d, ", e, i+1)
+		gdefs += fmt.Sprintf("%s AS g%d, ", e, i+1)
+		gcols += fmt.Sprintf("g%d, ", i+1)
 	}
-	return `WITH pts AS (
-	SELECT ` + gsel + `
-	       attributes AS a, resource_attributes AS ra, start_timestamp AS st,
-	       explicit_bounds AS bounds, timestamp AS ts, aggregation_temporality AS temp,
-	       CAST(count AS DOUBLE) AS c, sum AS s, min AS mn, max AS mx,
-	       CASE WHEN metric_type = 'histogram'
-	            THEN from_json(bucket_counts, '["DOUBLE"]') END AS b
+
+	head := `WITH pts AS (
+	SELECT ` + gdefs + histogramSeriesKey + ` AS k,
+	       timestamp AS ts, start_timestamp AS st, aggregation_temporality AS temp,
+	       CAST(count AS DOUBLE) AS c`
+	// The temporality and cutoff parameters are bound after conds' own params,
+	// in the order the placeholders appear below.
+	params := []any{temporalityCumulative}
+
+	if !withBuckets {
+		q := head + `, sum AS s
 	FROM metrics WHERE ` + conds + `
-), lagged AS (
-	SELECT *,
-	       lag(c) OVER w AS pc, lag(s) OVER w AS ps, lag(b) OVER w AS pb
-	FROM pts
-	WINDOW w AS (PARTITION BY a, ra, st, bounds ORDER BY ts)
-), modes AS (
-	SELECT *,
-	       CASE WHEN temp <> ? THEN 1
-	            WHEN pc IS NULL THEN CASE WHEN st >= ? THEN 1 ELSE 0 END
-	            WHEN c < pc THEN 1
-	            ELSE 2 END AS mode
-	FROM lagged
+), del AS (
+	SELECT ` + gcols + `c AS dc, s AS ds
+	FROM pts WHERE temp <> ?
+), cum AS (
+	SELECT ` + gcols + `k, ts, st, c, s,
+	       lag(c) OVER (PARTITION BY k ORDER BY ts) AS pc,
+	       lag(s) OVER (PARTITION BY k ORDER BY ts) AS ps
+	FROM pts WHERE temp IS NOT DISTINCT FROM ?
+), cd AS (
+	SELECT ` + gcols + `CASE WHEN pc IS NULL THEN CASE WHEN st >= ? THEN c ELSE 0 END
+	            WHEN c < pc THEN c
+	            ELSE c - pc END AS dc,
+	       CASE WHEN pc IS NULL THEN CASE WHEN st >= ? THEN s ELSE 0 END
+	            WHEN c < pc THEN s
+	            ELSE s - ps END AS ds
+	FROM cum
 ), d AS (
-	SELECT *,
-	       CASE mode WHEN 1 THEN c WHEN 2 THEN c - pc ELSE 0 END AS dc,
-	       CASE mode WHEN 1 THEN s WHEN 2 THEN s - ps ELSE 0 END AS ds,
-	       CASE mode WHEN 1 THEN b
-	                 WHEN 2 THEN CASE WHEN len(b) = len(pb)
-	                                  THEN list_transform(b, (x, i) -> x - pb[i]) END
-	       END AS db
-	FROM modes
+	SELECT ` + gcols + `dc, ds FROM del
+	UNION ALL
+	SELECT ` + gcols + `dc, ds FROM cd
 )
 `
+		params = append(params, temporalityCumulative, cutoff.UnixMicro(), cutoff.UnixMicro())
+		return q, params
+	}
+
+	q := head + `, explicit_bounds AS bounds,
+	       from_json(bucket_counts, '["DOUBLE"]') AS b
+	FROM metrics WHERE ` + conds + `
+), del AS (
+	SELECT ` + gcols + `bounds, b AS db
+	FROM pts WHERE temp <> ?
+), cum AS (
+	SELECT ` + gcols + `k, ts, st, c, bounds, b,
+	       lag(c) OVER (PARTITION BY k ORDER BY ts) AS pc,
+	       lag(b) OVER (PARTITION BY k ORDER BY ts) AS pb
+	FROM pts WHERE temp IS NOT DISTINCT FROM ?
+), cd AS (
+	SELECT ` + gcols + `bounds,
+	       CASE WHEN pc IS NULL THEN CASE WHEN st >= ? THEN b END
+	            WHEN c < pc THEN b
+	            WHEN len(b) = len(pb) THEN list_transform(b, (x, i) -> x - pb[i])
+	       END AS db
+	FROM cum
+), d AS (
+	SELECT ` + gcols + `bounds, db FROM del
+	UNION ALL
+	SELECT ` + gcols + `bounds, db FROM cd
+)
+`
+	params = append(params, temporalityCumulative, cutoff.UnixMicro())
+	return q, params
 }
 
 // queryHistogram aggregates histogram points. groupExprs/aliases are the
@@ -92,14 +141,12 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 		return nil, nil, invalidInput("aggregation %q is not supported; use one of: avg, sum, min, max, count, p50, p95, p99, buckets, exemplars", aggregation)
 	}
 
-	params = append(params, temporalityCumulative, cutoff.UnixMicro())
-	cte := histogramDeltasCTE(groupExprs, conds)
-
+	gdefs, gsel, gby := "", "", ""
 	gcols := make([]string, len(groupExprs))
-	for i := range groupExprs {
+	for i, e := range groupExprs {
 		gcols[i] = fmt.Sprintf("g%d", i+1)
+		gdefs += fmt.Sprintf("%s AS g%d, ", e, i+1)
 	}
-	gsel, gby := "", ""
 	if len(gcols) > 0 {
 		gsel = strings.Join(gcols, ", ") + ", "
 		gby = " GROUP BY " + strings.Join(gcols, ", ") + " ORDER BY " + strings.Join(gcols, ", ")
@@ -119,6 +166,30 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 		return out
 	}
 
+	if agg == "min" || agg == "max" {
+		// min/max read the values the points report, not an increment, so they
+		// do not need the window (or the bucket JSON) at all. Aggregating the
+		// points directly is both cheaper and exactly the old result: the old
+		// d carried every point through unchanged for this filter.
+		expr := "min(mn)"
+		if agg == "max" {
+			expr = "max(mx)"
+		}
+		// An unset min/max is stored as 0; only points that carry one count.
+		expr += " FILTER (WHERE c > 0 AND (mn <> 0 OR mx <> 0))"
+		pts := `SELECT ` + gdefs + `CAST(count AS DOUBLE) AS c, min AS mn, max AS mx
+		        FROM metrics WHERE ` + conds
+		rows, _, err := c.engine.QuerySince(cutoff, `SELECT `+gsel+expr+` AS value FROM (`+pts+`)`+gby, params...)
+		if err != nil {
+			return nil, nil, err
+		}
+		return rename(rows), cols, nil
+	}
+
+	withBuckets := q != 0
+	cte, cteParams := histogramDeltasCTE(groupExprs, conds, withBuckets, cutoff)
+	params = append(params, cteParams...)
+
 	if q == 0 {
 		var expr string
 		switch agg {
@@ -128,11 +199,6 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 			expr = "sum(ds)"
 		case "avg", "mean":
 			expr = "sum(ds) / nullif(sum(dc), 0)"
-		case "min":
-			// An unset min/max is stored as 0; only points that carry one count.
-			expr = "min(mn) FILTER (WHERE c > 0 AND (mn <> 0 OR mx <> 0))"
-		case "max":
-			expr = "max(mx) FILTER (WHERE c > 0 AND (mn <> 0 OR mx <> 0))"
 		}
 		rows, _, err := c.engine.QuerySince(cutoff, cte+"SELECT "+gsel+expr+" AS value FROM d"+gby, params...)
 		if err != nil {
@@ -143,11 +209,34 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 
 	// Percentiles and buckets: merge the increments bucket by bucket, per
 	// group and bounds.
-	bq := cte + `, bk AS (
+	var bq string
+	if len(aliases) > 0 && aliases[0] == "time" {
+		// With a step the group key includes the time bucket. Unnesting every
+		// point in SQL then creates points * bucket count rows and one hash
+		// group per (time, group, bounds, bucket): a 6 h window at a 5 m step
+		// with 9 buckets peaks around 1.4 GB. Merge the lists per (time,
+		// group, bounds) in SQL and walk the resulting small list in Go
+		// instead. list_reduce adds two bucket lists element by element;
+		// greatest(len) keeps every index of unequal lists, matching what the
+		// old unnest-and-group did (a point whose list is shorter contributes 0
+		// beyond its end).
+		bq = cte + `, merged AS (
+	SELECT ` + gsel + `bounds,
+	       CAST(list_reduce(list(db), (x, y) -> list_transform(
+	           range(1, greatest(len(x), len(y)) + 1),
+	           i -> (CASE WHEN i <= len(x) THEN x[i] ELSE 0 END) +
+	                (CASE WHEN i <= len(y) THEN y[i] ELSE 0 END))) AS DOUBLE[]) AS db
+	FROM d WHERE db IS NOT NULL
+	GROUP BY ` + gsel + `bounds
+)
+SELECT ` + gsel + `bounds, db FROM merged`
+	} else {
+		bq = cte + `, bk AS (
 	SELECT ` + gsel + `bounds, unnest(db) AS v, unnest(generate_series(1, len(db))) AS i
 	FROM d WHERE db IS NOT NULL
 )
 SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i`
+	}
 	rows, _, err := c.engine.QuerySince(cutoff, bq, params...)
 	if err != nil {
 		return nil, nil, err
@@ -177,15 +266,24 @@ SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i
 				continue
 			}
 		}
-		idx := int(toFloat(r["i"])) // 1-based
-		lo, hi := math.Inf(-1), math.Inf(1)
-		if idx-2 >= 0 && idx-2 < len(bounds) {
-			lo = bounds[idx-2]
+		add := func(idx int, n float64) {
+			lo, hi := math.Inf(-1), math.Inf(1)
+			if idx-2 >= 0 && idx-2 < len(bounds) {
+				lo = bounds[idx-2]
+			}
+			if idx-1 < len(bounds) {
+				hi = bounds[idx-1]
+			}
+			g.buckets = append(g.buckets, bucket{lo: lo, hi: hi, n: n})
 		}
-		if idx-1 < len(bounds) {
-			hi = bounds[idx-1]
+		if db, ok := r["db"]; ok {
+			// The step path returns one merged list per (time, group, bounds).
+			for j, v := range toFloats(db) {
+				add(j+1, v)
+			}
+			continue
 		}
-		g.buckets = append(g.buckets, bucket{lo: lo, hi: hi, n: toFloat(r["v"])})
+		add(int(toFloat(r["i"])), toFloat(r["v"]))
 	}
 	// The query has no ORDER BY because the groups are assembled in Go. When
 	// time leads the group keys it must sort numerically (a string sort would
@@ -311,6 +409,22 @@ func bucketQuantile(q float64, bs []bucket) (float64, bool) {
 		cum += b.n
 	}
 	return 0, false
+}
+
+// toFloats reads a DuckDB list (scanned as []interface{}) into []float64.
+// The driver returns DOUBLE[] as []interface{} of float64.
+func toFloats(v any) []float64 {
+	switch x := v.(type) {
+	case []float64:
+		return x
+	case []any:
+		out := make([]float64, len(x))
+		for i, e := range x {
+			out[i] = toFloat(e)
+		}
+		return out
+	}
+	return nil
 }
 
 func toFloat(v any) float64 {

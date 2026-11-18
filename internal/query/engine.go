@@ -109,6 +109,16 @@ func Open(dataDir string) (*Engine, error) {
 		return nil, fmt.Errorf("opening duckdb: %w", err)
 	}
 
+	// Every query that needs an order says ORDER BY itself, so DuckDB does not
+	// have to keep the input row order through a blocking operator. That order
+	// is a large share of the memory a wide aggregation uses; dropping it lets
+	// the engine release batches as soon as they are consumed. See the ORDER BY
+	// audit in internal/telemetry.
+	if _, err := db.Exec("SET preserve_insertion_order = false;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("disabling duckdb preserve_insertion_order: %w", err)
+	}
+
 	if limit := cgroupMemoryLimit(); limit > 0 {
 		// DuckDB sizes its buffer manager to ~80% of what it detects; inside
 		// a cgroup-limited container that left almost nothing for the rest of

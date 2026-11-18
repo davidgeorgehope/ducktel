@@ -279,3 +279,322 @@ func TestMetricTypeAndUnitViaGroupBy(t *testing.T) {
 		t.Errorf("rows = %v, want one histogram/ms row with count 40", rows)
 	}
 }
+
+// TestHistogramMixedTemporalities exercises delta and cumulative series in one
+// metric, including a cumulative counter reset and a cumulative series that
+// started inside the window. Expectations are computed by hand from the
+// documented rules: a baseline contributes nothing, a reset is counted whole,
+// an in-window start is counted whole, and delta points are already increments.
+func TestHistogramMixedTemporalities(t *testing.T) {
+	base := stepBase()
+	cumStart := base.Add(-time.Hour)
+	hist := func(route, temp string, start, ts time.Time, count uint64, sum float64, buckets string) writer.MetricPoint {
+		p := stepHistPoint("mixed.duration", temp, start, ts, count, sum, buckets)
+		p.Attributes = `{"route":"` + route + `"}`
+		return p
+	}
+	c := newStepCore(t, []writer.MetricPoint{
+		// Cumulative, started before the window: first point is the baseline.
+		hist("/cum", temporalityCumulative, cumStart, base, 90, 900, "[50,40,0]"),
+		hist("/cum", temporalityCumulative, cumStart, base.Add(time.Minute), 100, 1000, "[55,45,0]"),
+		hist("/cum", temporalityCumulative, cumStart, base.Add(2*time.Minute), 120, 1200, "[60,60,0]"),
+		// A reset: the count drops and 4 is counted whole.
+		hist("/cum", temporalityCumulative, cumStart, base.Add(3*time.Minute), 4, 20, "[4,0,0]"),
+		// Cumulative, started inside the window: the first point counts whole.
+		hist("/cumnew", temporalityCumulative, base, base, 7, 70, "[2,5,0]"),
+		hist("/cumnew", temporalityCumulative, base, base.Add(2*time.Minute), 9, 90, "[3,6,0]"),
+		// Delta points are already increments.
+		hist("/delta", deltaTemporality, base, base, 3, 30, "[1,2,0]"),
+		hist("/delta", deltaTemporality, base, base.Add(time.Minute), 1, 10, "[0,1,0]"),
+	})
+
+	// Without step, grouped by the series' route.
+	byRoute := func(metric, agg, groupBy string) map[string]float64 {
+		t.Helper()
+		rows, _, err := c.QueryMetricWith("acme", metric, agg, 60, groupBy, nil, MetricOpts{})
+		if err != nil {
+			t.Fatalf("%s %s: %v", metric, agg, err)
+		}
+		out := map[string]float64{}
+		for _, r := range rows {
+			key := ""
+			if groupBy != "" {
+				key = r[groupBy].(string)
+			}
+			out[key] = toFloat(r["value"])
+		}
+		return out
+	}
+	check := func(what string, got, want map[string]float64) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s: got %v, want %v", what, got, want)
+		}
+		for k, w := range want {
+			if g, ok := got[k]; !ok || !near(g, w) {
+				t.Errorf("%s[%q] = %v (present %v), want %v", what, k, g, ok, w)
+			}
+		}
+	}
+
+	check("count", byRoute("mixed.duration", "count", "attr.route"),
+		map[string]float64{"/cum": 34, "/cumnew": 9, "/delta": 4})
+	check("sum", byRoute("mixed.duration", "sum", "attr.route"),
+		map[string]float64{"/cum": 320, "/cumnew": 90, "/delta": 40})
+	check("p95", byRoute("mixed.duration", "p95", "attr.route"),
+		map[string]float64{
+			"/cum":    10 + 90*(0.95*34-14)/20,
+			"/cumnew": 10 + 90*(0.95*9-3)/6,
+			"/delta":  10 + 90*(0.95*4-1)/3,
+		})
+	check("count ungrouped", byRoute("mixed.duration", "count", ""), map[string]float64{"": 47})
+	check("p95 ungrouped", byRoute("mixed.duration", "p95", ""),
+		map[string]float64{"": 10 + 90*(0.95*47-18)/29})
+
+	// Buckets, without step: one row per group and upper bound. le is null for
+	// the +Inf bucket, so it is keyed by +Inf here.
+	bucketMap := func(rows []map[string]any, groupBy string) map[string]map[float64]float64 {
+		t.Helper()
+		out := map[string]map[float64]float64{}
+		for _, r := range rows {
+			g := ""
+			if groupBy != "" {
+				g = r[groupBy].(string)
+			}
+			if out[g] == nil {
+				out[g] = map[float64]float64{}
+			}
+			le := math.Inf(1)
+			if v, ok := r["le"]; ok && v != nil {
+				le = toFloat(v)
+			}
+			out[g][le] = toFloat(r["value"])
+		}
+		return out
+	}
+	brows, bcols, err := c.QueryMetricWith("acme", "mixed.duration", "buckets", 60, "attr.route", nil, MetricOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bcols) != 3 || bcols[0] != "attr.route" || bcols[1] != "le" || bcols[2] != "value" {
+		t.Fatalf("bucket columns = %v", bcols)
+	}
+	wantBuckets := map[string]map[float64]float64{
+		"/cum":    {10: 14, 100: 20, math.Inf(1): 0},
+		"/cumnew": {10: 3, 100: 6, math.Inf(1): 0},
+		"/delta":  {10: 1, 100: 3, math.Inf(1): 0},
+	}
+	gotBuckets := bucketMap(brows, "attr.route")
+	if len(gotBuckets) != len(wantBuckets) {
+		t.Fatalf("bucket groups = %v, want %v", gotBuckets, wantBuckets)
+	}
+	for g, want := range wantBuckets {
+		for hi, w := range want {
+			if got, ok := gotBuckets[g][hi]; !ok || got != w {
+				t.Errorf("buckets[%q][%v] = %v (present %v), want %v", g, hi, got, ok, w)
+			}
+		}
+	}
+
+	// With step, one row per time bucket and group. A baseline is still a
+	// zero-count row for count, but contributes no bucket row (its increment
+	// list is null).
+	type stepKey struct {
+		ts    int64
+		route string
+	}
+	stepMap := func(agg string) map[stepKey]float64 {
+		t.Helper()
+		rows, _, err := c.QueryMetricWith("acme", "mixed.duration", agg, 60, "attr.route", nil, MetricOpts{Step: "1m"})
+		if err != nil {
+			t.Fatalf("%s with step: %v", agg, err)
+		}
+		out := map[stepKey]float64{}
+		for _, r := range rows {
+			out[stepKey{asInt64(t, r["time"]), r["attr.route"].(string)}] = toFloat(r["value"])
+		}
+		return out
+	}
+	wantStepCount := map[stepKey]float64{
+		{base.UnixMicro(), "/cum"}:                         0,
+		{base.UnixMicro(), "/cumnew"}:                      7,
+		{base.UnixMicro(), "/delta"}:                       3,
+		{base.Add(time.Minute).UnixMicro(), "/cum"}:        10,
+		{base.Add(time.Minute).UnixMicro(), "/delta"}:      1,
+		{base.Add(2 * time.Minute).UnixMicro(), "/cum"}:    20,
+		{base.Add(2 * time.Minute).UnixMicro(), "/cumnew"}: 2,
+		{base.Add(3 * time.Minute).UnixMicro(), "/cum"}:    4,
+	}
+	gotStepCount := stepMap("count")
+	if len(gotStepCount) != len(wantStepCount) {
+		t.Fatalf("step count rows = %v, want %v", gotStepCount, wantStepCount)
+	}
+	for k, w := range wantStepCount {
+		if got, ok := gotStepCount[k]; !ok || got != w {
+			t.Errorf("step count[%v] = %v (present %v), want %v", k, got, ok, w)
+		}
+	}
+
+	wantStepP95 := map[stepKey]float64{
+		{base.UnixMicro(), "/cumnew"}:                      10 + 90*(0.95*7-2)/5,
+		{base.UnixMicro(), "/delta"}:                       10 + 90*(0.95*3-1)/2,
+		{base.Add(time.Minute).UnixMicro(), "/cum"}:        10 + 90*(0.95*10-5)/5,
+		{base.Add(time.Minute).UnixMicro(), "/delta"}:      10 + 90*(0.95*1-0)/1,
+		{base.Add(2 * time.Minute).UnixMicro(), "/cum"}:    10 + 90*(0.95*20-5)/15,
+		{base.Add(2 * time.Minute).UnixMicro(), "/cumnew"}: 10 + 90*(0.95*2-1)/1,
+		{base.Add(3 * time.Minute).UnixMicro(), "/cum"}:    10 * (0.95 * 4) / 4,
+	}
+	gotStepP95 := stepMap("p95")
+	if len(gotStepP95) != len(wantStepP95) {
+		t.Fatalf("step p95 rows = %v, want %v", gotStepP95, wantStepP95)
+	}
+	for k, w := range wantStepP95 {
+		if got, ok := gotStepP95[k]; !ok || !near(got, w) {
+			t.Errorf("step p95[%v] = %v (present %v), want %v", k, got, ok, w)
+		}
+	}
+
+	wantStepBuckets := map[stepKey]map[float64]float64{
+		{base.UnixMicro(), "/cumnew"}:                      {10: 2, 100: 5, math.Inf(1): 0},
+		{base.UnixMicro(), "/delta"}:                       {10: 1, 100: 2, math.Inf(1): 0},
+		{base.Add(time.Minute).UnixMicro(), "/cum"}:        {10: 5, 100: 5, math.Inf(1): 0},
+		{base.Add(time.Minute).UnixMicro(), "/delta"}:      {10: 0, 100: 1, math.Inf(1): 0},
+		{base.Add(2 * time.Minute).UnixMicro(), "/cum"}:    {10: 5, 100: 15, math.Inf(1): 0},
+		{base.Add(2 * time.Minute).UnixMicro(), "/cumnew"}: {10: 1, 100: 1, math.Inf(1): 0},
+		{base.Add(3 * time.Minute).UnixMicro(), "/cum"}:    {10: 4, 100: 0, math.Inf(1): 0},
+	}
+	stepBucketMap := func() map[stepKey]map[float64]float64 {
+		t.Helper()
+		rows, _, err := c.QueryMetricWith("acme", "mixed.duration", "buckets", 60, "attr.route", nil, MetricOpts{Step: "1m"})
+		if err != nil {
+			t.Fatalf("buckets with step: %v", err)
+		}
+		out := map[stepKey]map[float64]float64{}
+		for _, r := range rows {
+			k := stepKey{asInt64(t, r["time"]), r["attr.route"].(string)}
+			if out[k] == nil {
+				out[k] = map[float64]float64{}
+			}
+			le := math.Inf(1)
+			if v, ok := r["le"]; ok && v != nil {
+				le = toFloat(v)
+			}
+			out[k][le] = toFloat(r["value"])
+		}
+		return out
+	}
+	gotStepBuckets := stepBucketMap()
+	if len(gotStepBuckets) != len(wantStepBuckets) {
+		t.Fatalf("step bucket groups = %v, want %v", gotStepBuckets, wantStepBuckets)
+	}
+	for k, want := range wantStepBuckets {
+		for hi, w := range want {
+			if got, ok := gotStepBuckets[k][hi]; !ok || got != w {
+				t.Errorf("step buckets[%v][%v] = %v (present %v), want %v", k, hi, got, ok, w)
+			}
+		}
+	}
+}
+
+// TestHistogramMixedTemporalitiesUngroupedStep shares one group between every
+// series: the step path merges bucket lists across series within a (time,
+// group, bounds), so this pins that merging as well as the per-series one.
+func TestHistogramMixedTemporalitiesUngroupedStep(t *testing.T) {
+	base := stepBase()
+	cumStart := base.Add(-time.Hour)
+	hist := func(route, temp string, start, ts time.Time, count uint64, sum float64, buckets string) writer.MetricPoint {
+		p := stepHistPoint("mixed.duration", temp, start, ts, count, sum, buckets)
+		p.Attributes = `{"route":"` + route + `"}`
+		return p
+	}
+	c := newStepCore(t, []writer.MetricPoint{
+		hist("/cum", temporalityCumulative, cumStart, base, 90, 900, "[50,40,0]"),
+		hist("/cum", temporalityCumulative, cumStart, base.Add(time.Minute), 100, 1000, "[55,45,0]"),
+		hist("/cum", temporalityCumulative, cumStart, base.Add(2*time.Minute), 120, 1200, "[60,60,0]"),
+		hist("/cum", temporalityCumulative, cumStart, base.Add(3*time.Minute), 4, 20, "[4,0,0]"),
+		hist("/cumnew", temporalityCumulative, base, base, 7, 70, "[2,5,0]"),
+		hist("/cumnew", temporalityCumulative, base, base.Add(2*time.Minute), 9, 90, "[3,6,0]"),
+		hist("/delta", deltaTemporality, base, base, 3, 30, "[1,2,0]"),
+		hist("/delta", deltaTemporality, base, base.Add(time.Minute), 1, 10, "[0,1,0]"),
+	})
+
+	minutes := []int64{
+		base.UnixMicro(),
+		base.Add(time.Minute).UnixMicro(),
+		base.Add(2 * time.Minute).UnixMicro(),
+		base.Add(3 * time.Minute).UnixMicro(),
+	}
+
+	values := func(agg string) map[int64]float64 {
+		t.Helper()
+		rows, _, err := c.QueryMetricWith("acme", "mixed.duration", agg, 60, "", nil, MetricOpts{Step: "1m"})
+		if err != nil {
+			t.Fatalf("%s ungrouped step: %v", agg, err)
+		}
+		out := map[int64]float64{}
+		for _, r := range rows {
+			out[asInt64(t, r["time"])] = toFloat(r["value"])
+		}
+		return out
+	}
+
+	wantCounts := []float64{10, 11, 22, 4}
+	counts := values("count")
+	if len(counts) != len(minutes) {
+		t.Fatalf("ungrouped step count rows = %v, want %d", counts, len(minutes))
+	}
+	for i, ts := range minutes {
+		if got := counts[ts]; got != wantCounts[i] {
+			t.Errorf("ungrouped step count[%d] = %v, want %v", i, got, wantCounts[i])
+		}
+	}
+
+	wantP95 := []float64{
+		10 + 90*(0.95*10-3)/7,
+		10 + 90*(0.95*11-5)/6,
+		10 + 90*(0.95*22-6)/16,
+		10 * (0.95 * 4) / 4,
+	}
+	p95 := values("p95")
+	if len(p95) != len(minutes) {
+		t.Fatalf("ungrouped step p95 rows = %v, want %d", p95, len(minutes))
+	}
+	for i, ts := range minutes {
+		if got := p95[ts]; !near(got, wantP95[i]) {
+			t.Errorf("ungrouped step p95[%d] = %v, want %v", i, got, wantP95[i])
+		}
+	}
+
+	brows, _, err := c.QueryMetricWith("acme", "mixed.duration", "buckets", 60, "", nil, MetricOpts{Step: "1m"})
+	if err != nil {
+		t.Fatalf("buckets ungrouped step: %v", err)
+	}
+	gotBuckets := map[int64]map[float64]float64{}
+	for _, r := range brows {
+		ts := asInt64(t, r["time"])
+		if gotBuckets[ts] == nil {
+			gotBuckets[ts] = map[float64]float64{}
+		}
+		le := math.Inf(1)
+		if v, ok := r["le"]; ok && v != nil {
+			le = toFloat(v)
+		}
+		gotBuckets[ts][le] = toFloat(r["value"])
+	}
+	wantBuckets := []map[float64]float64{
+		{10: 3, 100: 7, math.Inf(1): 0},
+		{10: 5, 100: 6, math.Inf(1): 0},
+		{10: 6, 100: 16, math.Inf(1): 0},
+		{10: 4, 100: 0, math.Inf(1): 0},
+	}
+	if len(gotBuckets) != len(minutes) {
+		t.Fatalf("ungrouped step bucket rows = %v, want %d", gotBuckets, len(minutes))
+	}
+	for i, ts := range minutes {
+		for hi, w := range wantBuckets[i] {
+			if got, ok := gotBuckets[ts][hi]; !ok || got != w {
+				t.Errorf("ungrouped step buckets[%d][%v] = %v (present %v), want %v", i, hi, got, ok, w)
+			}
+		}
+	}
+}
