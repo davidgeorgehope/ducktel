@@ -7,9 +7,11 @@
 // tradeoff; a 401 still clears it immediately), sent as a Bearer header on
 // every /api/* call.
 
+import { applyInvestigateView, enterInvestigate, initInvestigate, refreshInvestigate } from "./investigate.js";
+
 const TOKEN_KEY = "ducktel_token";
 
-const state = {
+export const state = {
   tenant: null,
   tenants: [],
   connected: false,
@@ -25,8 +27,8 @@ const state = {
 
 // Request tokens per panel: a slower earlier run cannot overwrite a newer one.
 const seq = {};
-function ticket(panel) { seq[panel] = (seq[panel] || 0) + 1; return seq[panel]; }
-function current(panel, t) { return seq[panel] === t; }
+export function ticket(panel) { seq[panel] = (seq[panel] || 0) + 1; return seq[panel]; }
+export function current(panel, t) { return seq[panel] === t; }
 
 // --- deep links ---
 //
@@ -36,7 +38,7 @@ function current(panel, t) { return seq[panel] === t; }
 // trace_id=... or #metrics?tenant=...&metric_name=...&aggregation=...) to
 // land straight on a specific view instead of an empty form.
 
-function parseHash() {
+export function parseHash() {
   const raw = location.hash.replace(/^#/, "");
   const qIdx = raw.indexOf("?");
   const view = qIdx === -1 ? raw : raw.slice(0, qIdx);
@@ -49,7 +51,7 @@ function parseHash() {
 // have been observed firing hashchange for replaceState fragment changes, so
 // "we wrote it" is the only reliable way to tell our own URL updates apart
 // from a real navigation.
-function setHash(view, params) {
+export function setHash(view, params) {
   const next = "#" + view + "?" + params.toString();
   if (location.hash !== next) {
     state.writtenHash = next;
@@ -75,7 +77,7 @@ function clearToken() {
 // token and re-shows the gate, since the token is either wrong or was never
 // set (the server has no login flow — a 401 here always means "type the
 // token again").
-async function api(path, opts) {
+export async function api(path, opts) {
   const headers = Object.assign({}, (opts && opts.headers) || {});
   const token = getToken();
   if (token) headers["Authorization"] = "Bearer " + token;
@@ -117,7 +119,7 @@ function hideGate() {
 // --- toast ---
 
 let toastTimer = null;
-function toast(msg, isErr) {
+export function toast(msg, isErr) {
   const el = document.getElementById("toast");
   el.textContent = msg;
   el.classList.toggle("err", !!isErr);
@@ -129,11 +131,11 @@ function requireTenant() {
   if (!state.tenant) toast("no tenant selected - send some telemetry first", true);
   return !!state.tenant;
 }
-function splitFilter(s) {
+export function splitFilter(s) {
   const i = s.indexOf(":");
   return { key: i === -1 ? s : s.slice(0, i), value: i === -1 ? "" : s.slice(i + 1) };
 }
-function joinFilter(key, value) { return key + ":" + value; }
+export function joinFilter(key, value) { return key + ":" + value; }
 
 // --- tenant resolution ---
 //
@@ -189,6 +191,7 @@ async function resolveTenant() {
     const tab = activeTab();
     if (tab === "logs") await runLogSearch();
     else if (tab === "metrics") await runMetricQuery();
+    else if (tab === "investigate") await refreshInvestigate();
     else await runTraceSearch();
   };
 }
@@ -289,7 +292,10 @@ function fitTracesSplit() {
 
 function initTabs() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => activateTab(btn.dataset.tab));
+    btn.addEventListener("click", () => {
+      activateTab(btn.dataset.tab);
+      if (btn.dataset.tab === "investigate") enterInvestigate();
+    });
   });
 }
 
@@ -329,7 +335,7 @@ function statusClass(code) {
   return "status-unset";
 }
 
-function fmtTime(us) {
+export function fmtTime(us) {
   if (!us) return "";
   return new Date(us / 1000).toLocaleString();
 }
@@ -466,7 +472,7 @@ async function runSlowestSearch() {
 
 // fmtMs formats a millisecond value from the API without inventing decimals
 // it did not have.
-function fmtMs(v) {
+export function fmtMs(v) {
   const n = Number(v);
   return (Number.isFinite(n) ? Math.round(n * 100) / 100 : 0) + " ms";
 }
@@ -474,7 +480,7 @@ function fmtMs(v) {
 // traceSummaryMarkup renders the compact trace summary above the waterfall.
 // Every number comes from /api/traces/{id}/summary; only the bar widths are
 // scaled here, because a bar has to be a percentage of the pane.
-function traceSummaryMarkup(s) {
+export function traceSummaryMarkup(s) {
   if (!s) return "";
   const parts = [];
   const root = s.root;
@@ -565,43 +571,11 @@ function bindSummaryGroups(wf) {
   });
 }
 
-async function loadWaterfall(traceId) {
-  const t = ticket("waterfall");
-  const tenant = encodeURIComponent(state.tenant);
-
-  // Spans, the trace's log records and its summary are independent; fetch
-  // all three up front. The log and summary fetches are best-effort: a
-  // waterfall without them is still useful, so their failures must not kill
-  // the whole view.
-  const spansP = api("/api/traces/" + encodeURIComponent(traceId) + "?tenant=" + tenant);
-  const logsP = api("/api/logs?tenant=" + tenant + "&trace_id=" + encodeURIComponent(traceId) + "&limit=1000")
-    .then((r) => r.rows)
-    .catch(() => []);
-  const summaryP = api("/api/traces/" + encodeURIComponent(traceId) + "/summary?tenant=" + tenant)
-    .catch(() => null);
-
-  let resp;
-  try {
-    resp = await spansP;
-  } catch (e) {
-    if (current("waterfall", t)) toast(e.message, true);
-    logsP.catch(() => {});
-    return;
-  }
-  if (!current("waterfall", t)) return;
-  const logs = await logsP;
-  if (!current("waterfall", t)) return;
-  const summary = await summaryP;
-  if (!current("waterfall", t)) return;
-
-  // Record trace_id in the hash so this exact waterfall is itself a
-  // permalink, not just the search that found it.
-  const { params: hashParams } = parseHash();
-  hashParams.set("trace_id", traceId);
-  setHash("traces", hashParams);
-
-  const spans = resp.rows;
-  const wf = document.getElementById("waterfall");
+// renderWaterfall draws one trace's spans, logs and summary into wf. It is
+// separate from loadWaterfall so the investigate tab can show the same
+// waterfall inline without switching tabs.
+export function renderWaterfall(wf, traceId, spans, logs, summary) {
+  logs = Array.isArray(logs) ? logs : [];
   wf.classList.remove("hidden");
   if (spans.length === 0) {
     wf.innerHTML = `<div class="empty">no spans</div>`;
@@ -677,6 +651,46 @@ async function loadWaterfall(traceId) {
   wf.scrollTop = 0;
 }
 
+async function loadWaterfall(traceId) {
+  const t = ticket("waterfall");
+  const tenant = encodeURIComponent(state.tenant);
+
+  // Spans, the trace's log records and its summary are independent; fetch
+  // all three up front. The log and summary fetches are best-effort: a
+  // waterfall without them is still useful, so their failures must not kill
+  // the whole view.
+  const spansP = api("/api/traces/" + encodeURIComponent(traceId) + "?tenant=" + tenant);
+  const logsP = api("/api/logs?tenant=" + tenant + "&trace_id=" + encodeURIComponent(traceId) + "&limit=1000")
+    .then((r) => r.rows)
+    .catch(() => []);
+  const summaryP = api("/api/traces/" + encodeURIComponent(traceId) + "/summary?tenant=" + tenant)
+    .catch(() => null);
+
+  let resp;
+  try {
+    resp = await spansP;
+  } catch (e) {
+    if (current("waterfall", t)) toast(e.message, true);
+    logsP.catch(() => {});
+    return;
+  }
+  if (!current("waterfall", t)) return;
+  const logs = await logsP;
+  if (!current("waterfall", t)) return;
+  const summary = await summaryP;
+  if (!current("waterfall", t)) return;
+
+  // Record trace_id in the hash so this exact waterfall is itself a
+  // permalink, not just the search that found it.
+  const { params: hashParams } = parseHash();
+  hashParams.set("trace_id", traceId);
+  setHash("traces", hashParams);
+
+  const spans = resp.rows;
+  const wf = document.getElementById("waterfall");
+  renderWaterfall(wf, traceId, spans, logs, summary);
+}
+
 // --- logs view ---
 
 function severityClass(sev) {
@@ -699,7 +713,7 @@ function traceCell(traceId) {
 
 // logLineMarkup renders one compact log record, used under a waterfall span
 // (attached by span_id) and in the trace-level block.
-function logLineMarkup(r) {
+export function logLineMarkup(r) {
   return `<div class="wf-log">
     <span class="wf-log-sev ${severityClass(r.severity_text)}">${escapeHtml(r.severity_text || "")}</span>
     <span class="log-body" title="${escapeHtml(r.body || "")}">${escapeHtml(r.body || "")}</span>
@@ -768,21 +782,34 @@ async function runLogSearch() {
 
 // --- metrics view ---
 
-function metricParams(base, aggregation, filters, extra) {
+// appendFilterParams writes filter pairs in the endpoint's own form. A string
+// is an equality filter; an object carries op so exclusions reach filter_not.
+function appendFilterParams(p, filters) {
+  for (const f of filters || []) {
+    if (typeof f === "string") {
+      p.append("filter", f);
+      continue;
+    }
+    const param = f.op === "!=" ? "filter_not" : "filter";
+    p.append(param, joinFilter(f.key, f.value));
+  }
+}
+
+export function metricParams(base, aggregation, filters, extra) {
   const p = new URLSearchParams();
-  for (const k of ["tenant", "metric_name", "since_minutes"]) if (base.has(k)) p.set(k, base.get(k));
+  for (const k of ["tenant", "metric_name", "since_minutes", "until_minutes"]) if (base.has(k)) p.set(k, base.get(k));
   p.set("aggregation", aggregation);
-  (filters || []).forEach((f) => p.append("filter", f));
+  appendFilterParams(p, filters);
   for (const [k, v] of Object.entries(extra || {})) if (v !== null && v !== undefined && v !== "") p.set(k, v);
   return p;
 }
 
 // slowParams is the /api/slow counterpart of metricParams: the same base
 // window, the same filter pairs, and the endpoint's own extra parameters.
-function slowParams(base, filters, extra) {
+export function slowParams(base, filters, extra) {
   const p = new URLSearchParams();
-  for (const k of ["tenant", "metric_name", "since_minutes"]) if (base.has(k)) p.set(k, base.get(k));
-  (filters || []).forEach((f) => p.append("filter", f));
+  for (const k of ["tenant", "metric_name", "since_minutes", "until_minutes"]) if (base.has(k)) p.set(k, base.get(k));
+  appendFilterParams(p, filters);
   for (const [k, v] of Object.entries(extra || {})) if (v !== null && v !== undefined && v !== "") p.set(k, v);
   return p;
 }
@@ -934,58 +961,74 @@ function groupFilters(groupCols, row) {
 //
 // aggregation=buckets on the same metric_query, plus p50/p95/p99 from the
 // server, so nothing is re-derived here.
+// renderDistribution is the metrics tab's distribution for the current form.
+// The investigate tab reuses renderDistributionInto with its own target, unit
+// and bucket handler, so both views present the same buckets and quantiles.
 async function renderDistribution(label, filters, baseParams) {
-  const t = ticket("dist");
-  const dist = document.getElementById("metric-dist");
+  return renderDistributionInto(document.getElementById("metric-dist"), label, filters, baseParams, {});
+}
+
+export async function renderDistributionInto(target, label, filters, baseParams, opts) {
+  opts = opts || {};
+  const key = opts.ticketKey || "dist";
+  const t = ticket(key);
   const ask = (agg) => api("/api/metrics?" + metricParams(baseParams, agg, filters).toString());
   let buckets, p50, p95, p99;
   try {
     [buckets, p50, p95, p99] = await Promise.all(["buckets", "p50", "p95", "p99"].map(ask));
   } catch (e) {
-    if (current("dist", t)) toast(e.message, true);
+    if (current(key, t)) {
+      if (opts.onError) opts.onError(e.message);
+      else toast(e.message, true);
+    }
     return;
   }
-  if (!current("dist", t)) return;
+  if (!current(key, t)) return;
   const rows = buckets.rows;
   const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
   if (total === 0) {
-    dist.innerHTML = `<div class="empty">no observations for ${escapeHtml(label)}</div>`;
+    target.innerHTML = `<div class="empty">no observations for ${escapeHtml(label)}</div>`;
     return;
   }
   // Trim empty buckets at both ends; keep empty ones in between.
   let first = rows.findIndex((r) => Number(r.value) > 0);
   let last = rows.length - 1 - [...rows].reverse().findIndex((r) => Number(r.value) > 0);
   const shown = rows.slice(first, last + 1);
-  const unit = metricUnit();
+  const unit = opts.unit !== undefined ? opts.unit : metricUnit();
   const q = { p50: val(p50), p95: val(p95), p99: val(p99) };
   const prevLe = (i) => (i > 0 ? rows[i - 1].le : null);
   const max = Math.max(...shown.map((r) => Number(r.value) || 0), 1);
   const lines = shown.map((r, j) => {
     const i = first + j;
     const le = r.le;
-    const name = le === null ? `> ${fmtValue(prevLe(i), unit)}` : `≤ ${fmtValue(le, unit)}`;
     const lo = prevLe(i);
+    const name = le === null ? `> ${fmtValue(lo, unit)}` : `≤ ${fmtValue(le, unit)}`;
     const marks = Object.entries(q)
       .filter(([, v]) => v !== null && (lo === null || v > lo) && (le === null || v <= le))
       .map(([k]) => `<span class="qmark">${k}</span>`).join("");
     const v = Number(r.value) || 0;
+    const selected = opts.selectedFn && opts.selectedFn(lo, le) ? " selected" : "";
     return `
-      <div class="bar-row clickable" data-i="${i}" title="click for the requests in this bucket">
+      <div class="bar-row clickable${selected}" data-i="${i}" title="click for the requests in this bucket">
         <div class="bar-label">${name}</div>
         <div class="bar-track"><div class="bar-fill dist" style="width:${(v / max) * 100}%"></div></div>
         <div class="bar-value">${fmtValue(v)}</div>
         <div class="bar-marks">${marks}</div>
       </div>`;
   });
-  dist.innerHTML = `
+  // The metrics tab needs a place for the bucket's requests; investigate
+  // handles the click itself and passes no slot.
+  const slot = opts.onBucket ? "" : `<div id="${opts.bucketSlotId || "bucket-req"}"></div>`;
+  target.innerHTML = `
     <div class="dist-head"><b>${escapeHtml(label)}</b> · ${fmtValue(total)} observations ·
       p50 ${fmtValue(q.p50, unit)} · p95 ${fmtValue(q.p95, unit)} · p99 ${fmtValue(q.p99, unit)}</div>
     <div class="bar-chart">${lines.join("")}</div>
-    <div id="bucket-req"></div>`;
-  dist.querySelectorAll(".bar-row.clickable").forEach((el) => {
+    ${slot}`;
+  target.querySelectorAll(".bar-row.clickable").forEach((el) => {
     el.addEventListener("click", () => {
       const i = Number(el.dataset.i);
-      showBucketRequests(prevLe(i), rows[i].le, filters, baseParams, unit);
+      if (opts.onBucket) opts.onBucket(prevLe(i), rows[i].le, unit);
+      else showBucketRequests(prevLe(i), rows[i].le, filters, baseParams, unit);
     });
   });
 }
@@ -1039,8 +1082,10 @@ async function showBucketRequests(lo, le, filters, baseParams, unit) {
 }
 
 // slowTable renders /api/slow rows: the measurement and the brief trace
-// summary the API already attached, so no follow-up query is needed.
-function slowTable(rows, since) {
+// summary the API already attached, so no follow-up query is needed. opts
+// can replace the default tab-switching trace click.
+export function slowTable(rows, since, opts) {
+  opts = opts || {};
   const table = document.createElement("table");
   table.className = "data-table";
   table.innerHTML = `<thead><tr><th>Time</th><th>Value</th><th>Request</th><th>Spans</th>
@@ -1073,7 +1118,10 @@ function slowTable(rows, since) {
       <td>${escapeHtml(String(Number(trace.error_count) || 0))}</td>
       <td class="ts-log" title="${escapeHtml(logText)}">${p ? `<span class="${severityClass(p.severity_text)}">${escapeHtml(p.severity_text || "")}</span> ${escapeHtml(p.body || "")}` : "-"}</td>
       <td>${traceCell(r.trace_id)}</td>`;
-    tr.addEventListener("click", () => viewTrace(r.trace_id, since));
+    tr.addEventListener("click", () => {
+      if (opts.onTraceClick) opts.onTraceClick(r.trace_id);
+      else viewTrace(r.trace_id, since);
+    });
     tbody.appendChild(tr);
   });
   return table;
@@ -1130,7 +1178,7 @@ function val(resp) {
 
 // fmtValue returns HTML: metric_unit comes from whatever the sender reported,
 // so it is escaped here, and callers put the result into markup as is.
-function fmtValue(v, unit) {
+export function fmtValue(v, unit) {
   if (v === null || v === undefined) return "—";
   const n = Number(v);
   const s = Number.isInteger(n) ? String(n) : n.toFixed(3);
@@ -1166,7 +1214,7 @@ function logout() {
 
 // --- misc ---
 
-function escapeHtml(s) {
+export function escapeHtml(s) {
   return String(s)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -1214,6 +1262,12 @@ async function applyInitialView() {
     localStorage.setItem(TENANT_KEY, state.tenant);
     syncTenantPicker();
     await Promise.all([loadServices(), loadMetricNames()]);
+  }
+
+  if (view === "investigate" || view === "compare") {
+    activateTab("investigate");
+    await applyInvestigateView(params);
+    return;
   }
 
   if (view === "logs") {
@@ -1297,6 +1351,7 @@ function init() {
   initGate();
   initTabs();
   initAttrFilters();
+  initInvestigate();
 
   document.getElementById("traces-form").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -1340,4 +1395,6 @@ function init() {
   }
 }
 
-init();
+// Scripts that only import the pure helpers (the node tests) have no DOM,
+// and must not try to boot the dashboard.
+if (typeof document !== "undefined") init();

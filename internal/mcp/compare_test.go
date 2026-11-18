@@ -180,8 +180,8 @@ func TestCompareSpansToolDashboardLink(t *testing.T) {
 	if isErr {
 		t.Fatalf("compare_spans: %s", body)
 	}
-	if !strings.Contains(body, "dashboard_url: http://dash.example#compare?") {
-		t.Errorf("missing compare dashboard link: %s", body)
+	if !strings.Contains(body, "dashboard_url: http://dash.example#investigate?") {
+		t.Errorf("missing investigate dashboard link: %s", body)
 	}
 	for _, want := range []string{"tenant=acme", "service_name=api", "span_kind=any", "since_minutes=60", "min_ms=50"} {
 		if !strings.Contains(body, want) {

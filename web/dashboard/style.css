@@ -355,3 +355,103 @@ tr.clickable { cursor: pointer; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* --- investigate ---
+   The context bar stays put while the panels scroll: every panel answers a
+   question about that one context, so it should never scroll out of sight. */
+
+.inv-context {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  align-items: center;
+}
+.inv-presets { display: inline-flex; gap: 4px; }
+.inv-presets button { padding: 3px 8px; font-size: 12px; }
+.inv-presets button.active { border-color: var(--accent); color: var(--accent); }
+.inv-range { color: var(--muted); font-size: 12px; align-self: center; }
+.inv-filters { display: inline-flex; gap: 6px; flex-wrap: wrap; align-self: center; }
+.inv-filters .chip {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 4px 1px 8px;
+  font-size: 12px;
+}
+.inv-filters .chip button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.inv-notice {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.inv-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.inv-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.inv-panel-head b { color: var(--text); font-size: 13px; }
+.inv-panel-head a { color: var(--accent); }
+.inv-hint { color: var(--muted); }
+.inv-error { color: var(--err); }
+.inv-standout { padding: 10px; }
+.inv-link-btn { padding: 2px 8px; font-size: 12px; }
+
+.inv-charts-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.inv-chart-box { min-width: 0; }
+.inv-chart-title { color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+.inv-chart { width: 100%; height: auto; display: block; touch-action: none; cursor: crosshair; }
+.inv-axis-line { stroke: var(--border); stroke-width: 1; }
+.inv-axis-text { fill: var(--muted); font-size: 9px; }
+.inv-line { stroke-linecap: round; stroke-linejoin: round; }
+.inv-sel-rect { fill: rgba(242, 193, 78, 0.18); }
+.inv-axis-labels {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 6px;
+}
+
+.bar-row.selected .bar-label { color: var(--accent); font-weight: 600; }
+.bar-row.selected .bar-track { outline: 1px solid var(--accent); }
+
+.inv-why-row {
+  border-top: 1px solid var(--border);
+  padding: 8px 0;
+}
+.inv-why-row:first-of-type { border-top: none; }
+.inv-why-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.inv-why-kv { font-size: 12px; }
+.inv-why-diff { color: var(--accent); font-weight: 600; }
+.inv-why-actions { margin-left: auto; display: flex; gap: 6px; }
+.inv-why-actions button { padding: 2px 8px; font-size: 11px; }
+.inv-why-bar { margin-top: 3px; }
+.inv-why-bar .bar-label { width: 40px; color: var(--muted); }
+.inv-why-bar .bar-track { height: 6px; }
+.inv-why-bar .bar-fill.rest { background: #6aa6f8; }
+.inv-why-also { color: var(--muted); font-size: 11px; margin-top: 3px; }
+
+#inv-trace-body .waterfall, #inv-logs-body .wf-logs { margin-top: 4px; }
+#inv-trace-body .waterfall { border: none; padding: 0; background: transparent; }

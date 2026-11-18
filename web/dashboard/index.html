@@ -26,6 +26,7 @@
     </div>
     <span id="tenant-label" class="tenant-label hidden"></span>
     <nav class="tabs">
+      <button class="tab-btn" data-tab="investigate">Investigate</button>
       <button class="tab-btn active" data-tab="traces">Traces</button>
       <button class="tab-btn" data-tab="logs">Logs</button>
       <button class="tab-btn" data-tab="metrics">Metrics</button>
@@ -34,6 +35,61 @@
     <button id="logout-btn" class="secondary" type="button">Log out</button>
     <span id="toast" class="toast"></span>
   </header>
+
+  <section id="tab-investigate" class="tab hidden">
+    <div class="filters inv-context">
+      <label>Service <select id="inv-service"><option value="">any</option></select></label>
+      <label>Span name <input id="inv-span-name" type="text" placeholder="optional"></label>
+      <label>Latency metric <select id="inv-metric"><option value="">none</option></select></label>
+      <label>Window
+        <span id="inv-presets" class="inv-presets">
+          <button type="button" class="secondary" data-minutes="60">1h</button>
+          <button type="button" class="secondary" data-minutes="360">6h</button>
+          <button type="button" class="secondary" data-minutes="1440">24h</button>
+          <button type="button" class="secondary" data-minutes="10080">7d</button>
+        </span>
+      </label>
+      <span id="inv-range" class="inv-range"></span>
+      <span id="inv-filters" class="inv-filters"></span>
+    </div>
+
+    <div id="inv-no-latency" class="inv-notice hidden"></div>
+
+    <div id="inv-panel-time" class="inv-panel">
+      <div class="inv-panel-head"><b>Time</b>
+        <span class="inv-hint">drag to choose a range</span>
+        <a href="#" id="inv-time-reset" class="hidden">reset</a>
+      </div>
+      <div id="inv-charts"></div>
+    </div>
+
+    <div id="inv-panel-dist" class="inv-panel">
+      <div class="inv-panel-head"><b>Latency distribution</b>
+        <span class="inv-hint">click a bucket to narrow the slow range</span>
+      </div>
+      <div id="inv-dist-body"></div>
+    </div>
+
+    <div id="inv-panel-requests" class="inv-panel">
+      <div class="inv-panel-head"><span id="inv-requests-head"></span></div>
+      <div id="inv-requests-body"></div>
+    </div>
+
+    <div id="inv-panel-trace" class="inv-panel">
+      <div class="inv-panel-head"><b>Trace</b> <span id="inv-trace-head"></span></div>
+      <div id="inv-trace-body"></div>
+    </div>
+
+    <div id="inv-panel-logs" class="inv-panel">
+      <div class="inv-panel-head"><b>Logs of that trace</b></div>
+      <div id="inv-logs-body"></div>
+    </div>
+
+    <div id="inv-panel-why" class="inv-panel">
+      <div class="inv-panel-head"><b>Why</b></div>
+      <div id="inv-why-body"></div>
+    </div>
+  </section>
 
   <section id="tab-traces" class="tab tab-split">
     <form id="traces-form" class="filters">
