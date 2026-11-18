@@ -41,34 +41,51 @@ const (
 // alternative (carrying the strings) does not fit in the container at all.
 const histogramSeriesKey = "hash(attributes, resource_attributes, start_timestamp, explicit_bounds)"
 
-// histogramDeltasCTE returns the WITH clause that yields one row per point
-// with its increment (dc, ds, db) and the group columns g1..gN. db is NULL
-// for exponential histograms, whose buckets are not merged here, and absent
-// entirely when withBuckets is false: count/sum/avg do not read bucket_counts
-// at all, so its JSON is never parsed. min/max do not use this CTE either
-// (they aggregate the points directly).
+// histogramDeltasCTE returns the WITH clause that yields increment rows
+// (dc, ds or db) and the group columns g1..gN. db is absent entirely when
+// withBuckets is false: count/sum/avg do not read bucket_counts at all, so
+// its JSON is never parsed. min/max do not use this CTE either (they
+// aggregate the points directly).
 //
 // Delta-temporality points are already increments: they never enter the
 // window, they are unioned in as they are. Only cumulative points are lagged,
-// and they are partitioned by the single hashed series key. The returned
-// params are bound after conds' own params.
-func histogramDeltasCTE(groupExprs []string, conds string, withBuckets bool, cutoff time.Time) (string, []any) {
+// and they are partitioned by the single hashed series key.
+//
+// Cumulative increments telescope inside a segment: a segment is a run of
+// points between counter resets (and, for bucket lists, changes of the list
+// length). The running segment id is a window over the scalar count and list
+// length only, never over the bucket list itself. One row per segment is then
+// enough: last - first gives the sum of every interior increment, and the
+// first point contributes itself only when the segment starts with a reset
+// or with an in-window start. With a step the same holds per (segment, time
+// bucket), with a lag over the few per-bucket rows instead of every point.
+//
+// step means the first group expression is the time bucket (queryHistogram
+// prepends it when the caller asked for a step). Parameters are returned in
+// full, including condsParams, because a bucket query reads metrics once more
+// to fetch only the segment and bucket boundary lists.
+func histogramDeltasCTE(groupExprs []string, conds string, condsParams []any, withBuckets bool, cutoff time.Time, step bool) (string, []any) {
 	gdefs, gcols := "", ""
 	for i, e := range groupExprs {
 		gdefs += fmt.Sprintf("%s AS g%d, ", e, i+1)
 		gcols += fmt.Sprintf("g%d, ", i+1)
 	}
+	if withBuckets {
+		return histogramBucketCTE(gdefs, gcols, conds, condsParams, cutoff, step)
+	}
+	return histogramScalarCTE(gdefs, gcols, conds, condsParams, cutoff, step)
+}
 
-	head := `WITH pts AS (
+// histogramScalarCTE is the count/sum/avg path: no bucket JSON is read.
+// A reset is a point whose count drops. Over one series every regular
+// increment telescopes to last - first, and each reset adds back the point
+// before it (its increment is counted whole instead of as a drop). That needs
+// only lag(c) and lag(s), not a running segment id.
+func histogramScalarCTE(gdefs, gcols, conds string, condsParams []any, cutoff time.Time, step bool) (string, []any) {
+	q := `WITH pts AS NOT MATERIALIZED (
 	SELECT ` + gdefs + histogramSeriesKey + ` AS k,
 	       timestamp AS ts, start_timestamp AS st, aggregation_temporality AS temp,
-	       CAST(count AS DOUBLE) AS c`
-	// The temporality and cutoff parameters are bound after conds' own params,
-	// in the order the placeholders appear below.
-	params := []any{temporalityCumulative}
-
-	if !withBuckets {
-		q := head + `, sum AS s
+	       CAST(count AS DOUBLE) AS c, sum AS s
 	FROM metrics WHERE ` + conds + `
 ), del AS (
 	SELECT ` + gcols + `c AS dc, s AS ds
@@ -78,49 +95,192 @@ func histogramDeltasCTE(groupExprs []string, conds string, withBuckets bool, cut
 	       lag(c) OVER (PARTITION BY k ORDER BY ts) AS pc,
 	       lag(s) OVER (PARTITION BY k ORDER BY ts) AS ps
 	FROM pts WHERE temp IS NOT DISTINCT FROM ?
-), cd AS (
-	SELECT ` + gcols + `CASE WHEN pc IS NULL THEN CASE WHEN st >= ? THEN c ELSE 0 END
-	            WHEN c < pc THEN c
-	            ELSE c - pc END AS dc,
-	       CASE WHEN pc IS NULL THEN CASE WHEN st >= ? THEN s ELSE 0 END
-	            WHEN c < pc THEN s
-	            ELSE s - ps END AS ds
+), marked AS (
+	SELECT ` + gcols + `k, ts, st, c, s, pc, ps,
+	       CASE WHEN pc IS NOT NULL AND c < pc THEN TRUE ELSE FALSE END AS rst
 	FROM cum
+), `
+	params := append(append([]any{}, condsParams...), temporalityCumulative, temporalityCumulative)
+
+	if step {
+		q += `bucketagg AS (
+	SELECT ` + gcols + `k,
+	       arg_min(c, ts) AS c0, arg_max(c, ts) AS c1,
+	       arg_min(s, ts) AS s0, arg_max(s, ts) AS s1,
+	       min(st) AS st0,
+	       sum(CASE WHEN rst THEN pc ELSE 0 END) AS rc,
+	       sum(CASE WHEN rst THEN ps ELSE 0 END) AS rs
+	FROM marked GROUP BY ` + gcols + `k
+), lagged AS (
+	SELECT *,
+	       lag(c1) OVER (PARTITION BY k ORDER BY g1) AS pc1,
+	       lag(s1) OVER (PARTITION BY k ORDER BY g1) AS ps1,
+	       row_number() OVER (PARTITION BY k ORDER BY g1) AS rn
+	FROM bucketagg
+), cuminc AS (
+	SELECT ` + gcols + `CASE WHEN rn = 1 THEN CASE WHEN st0 >= ? THEN c1 ELSE c1 - c0 END
+	            ELSE c1 - pc1 END + rc AS dc,
+	       CASE WHEN rn = 1 THEN CASE WHEN st0 >= ? THEN s1 ELSE s1 - s0 END
+	            ELSE s1 - ps1 END + rs AS ds
+	FROM lagged
 ), d AS (
 	SELECT ` + gcols + `dc, ds FROM del
 	UNION ALL
-	SELECT ` + gcols + `dc, ds FROM cd
+	SELECT ` + gcols + `dc, ds FROM cuminc
 )
 `
-		params = append(params, temporalityCumulative, cutoff.UnixMicro(), cutoff.UnixMicro())
+		params = append(params, cutoff.UnixMicro(), cutoff.UnixMicro())
 		return q, params
 	}
 
-	q := head + `, explicit_bounds AS bounds,
-	       from_json(bucket_counts, '["DOUBLE"]') AS b
+	q += `seg AS (
+	SELECT ` + gcols + `k,
+	       arg_min(c, ts) AS c0, arg_max(c, ts) AS c1,
+	       arg_min(s, ts) AS s0, arg_max(s, ts) AS s1,
+	       min(st) AS st0,
+	       sum(CASE WHEN rst THEN pc ELSE 0 END) AS rc,
+	       sum(CASE WHEN rst THEN ps ELSE 0 END) AS rs
+	FROM marked GROUP BY ` + gcols + `k
+), cuminc AS (
+	SELECT ` + gcols + `CASE WHEN st0 >= ? THEN c1 ELSE c1 - c0 END + rc AS dc,
+	       CASE WHEN st0 >= ? THEN s1 ELSE s1 - s0 END + rs AS ds
+	FROM seg
+), d AS (
+	SELECT ` + gcols + `dc, ds FROM del
+	UNION ALL
+	SELECT ` + gcols + `dc, ds FROM cuminc
+)
+`
+	params = append(params, cutoff.UnixMicro(), cutoff.UnixMicro())
+	return q, params
+}
+
+// histogramBucketCTE is the p50/p95/p99/buckets path. The window carries the
+// scalar count and the bucket list length only. Bucket lists are parsed at
+// segment boundaries (or per time bucket for a step), which is a small
+// multiple of the series count rather than one parse per exported point.
+func histogramBucketCTE(gdefs, gcols, conds string, condsParams []any, cutoff time.Time, step bool) (string, []any) {
+	q := `WITH pts AS NOT MATERIALIZED (
+	SELECT ` + gdefs + histogramSeriesKey + ` AS k,
+	       timestamp AS ts, aggregation_temporality AS temp,
+	       CAST(count AS DOUBLE) AS c,
+	       json_array_length(bucket_counts) AS bl
 	FROM metrics WHERE ` + conds + `
 ), del AS (
-	SELECT ` + gcols + `bounds, b AS db
-	FROM pts WHERE temp <> ?
+	SELECT ` + gdefs + `explicit_bounds AS bounds,
+	       from_json(bucket_counts, '["DOUBLE"]') AS db
+	FROM metrics WHERE ` + conds + ` AND aggregation_temporality <> ?
 ), cum AS (
-	SELECT ` + gcols + `k, ts, st, c, bounds, b,
+	SELECT ` + gcols + `k, ts, c, bl,
 	       lag(c) OVER (PARTITION BY k ORDER BY ts) AS pc,
-	       lag(b) OVER (PARTITION BY k ORDER BY ts) AS pb
+	       lag(bl) OVER (PARTITION BY k ORDER BY ts) AS pbl
 	FROM pts WHERE temp IS NOT DISTINCT FROM ?
-), cd AS (
+), segs AS (
+	SELECT ` + gcols + `k, ts, seg, rst FROM (
+		SELECT *,
+		       sum(CASE WHEN pc IS NOT NULL AND (c < pc OR bl IS DISTINCT FROM pbl) THEN 1 ELSE 0 END)
+		         OVER (PARTITION BY k ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS seg,
+		       CASE WHEN pc IS NOT NULL AND c < pc THEN TRUE ELSE FALSE END AS rst
+		FROM cum
+	)
+), `
+	// Placeholder order: pts conds, del conds, del temporality, cum
+	// temporality, the boundary join's conds, then the cutoff(s).
+	params := append([]any{}, condsParams...)
+	params = append(params, condsParams...)
+	params = append(params, temporalityCumulative, temporalityCumulative)
+
+	if step {
+		q += `bucketmeta AS (
+	SELECT ` + gcols + `k, seg,
+	       count(*) AS n,
+	       arg_min(rst, ts) AS rst0,
+	       min(ts) AS ts0, max(ts) AS ts1
+	FROM segs GROUP BY ` + gcols + `k, seg
+), bucketrows AS (
+	SELECT *, row_number() OVER (PARTITION BY k, seg ORDER BY g1) AS rn
+	FROM bucketmeta
+), lastb AS (
+	SELECT br.*,
+	       m.bucket_counts AS bc1,
+	       m.start_timestamp AS st0, m.explicit_bounds AS bounds
+	FROM bucketrows br
+	JOIN metrics m
+	  ON m.timestamp = br.ts1
+	 AND hash(m.attributes, m.resource_attributes, m.start_timestamp, m.explicit_bounds) = br.k
+	WHERE ` + conds + `
+), firstrows AS (
+	SELECT * FROM bucketrows WHERE rn = 1
+), firstb AS (
+	SELECT fr.k, fr.seg, fr.g1,
+	       m.bucket_counts AS bc0
+	FROM firstrows fr
+	JOIN metrics m
+	  ON m.timestamp = fr.ts0
+	 AND hash(m.attributes, m.resource_attributes, m.start_timestamp, m.explicit_bounds) = fr.k
+	WHERE ` + conds + `
+), bucketagg AS (
+	SELECT lb.*, fb.bc0
+	FROM lastb lb
+	LEFT JOIN firstb fb ON lb.k = fb.k AND lb.seg = fb.seg AND lb.g1 = fb.g1
+), lagged AS (
+	SELECT *,
+	       lag(bc1) OVER (PARTITION BY k, seg ORDER BY g1) AS pbc1
+	FROM bucketagg
+), cuminc AS (
 	SELECT ` + gcols + `bounds,
-	       CASE WHEN pc IS NULL THEN CASE WHEN st >= ? THEN b END
-	            WHEN c < pc THEN b
-	            WHEN len(b) = len(pb) THEN list_transform(b, (x, i) -> x - pb[i])
-	       END AS db
-	FROM cum
+	       CASE WHEN rn = 1 THEN
+	                 CASE WHEN rst0 OR (seg = 0 AND st0 >= ?) THEN from_json(bc1, '["DOUBLE"]')
+	                      WHEN n = 1 THEN NULL
+	                      ELSE list_transform(from_json(bc1, '["DOUBLE"]'),
+	                                          (x, i) -> x - from_json(bc0, '["DOUBLE"]')[i]) END
+	            ELSE list_transform(from_json(bc1, '["DOUBLE"]'),
+	                                (x, i) -> x - from_json(pbc1, '["DOUBLE"]')[i]) END AS db
+	FROM lagged
 ), d AS (
 	SELECT ` + gcols + `bounds, db FROM del
 	UNION ALL
-	SELECT ` + gcols + `bounds, db FROM cd
+	SELECT ` + gcols + `bounds, db FROM cuminc
 )
 `
-	params = append(params, temporalityCumulative, cutoff.UnixMicro())
+		params = append(params, condsParams...)
+		params = append(params, condsParams...)
+		params = append(params, cutoff.UnixMicro())
+		return q, params
+	}
+
+	q += `segmeta AS (
+	SELECT ` + gcols + `k, seg,
+	       count(*) AS n,
+	       arg_min(rst, ts) AS rst0,
+	       min(ts) AS ts0, max(ts) AS ts1
+	FROM segs GROUP BY ` + gcols + `k, seg
+), seg_b AS (
+	SELECT sm.k, sm.seg,
+	       arg_min(from_json(m.bucket_counts, '["DOUBLE"]'), m.timestamp) AS b0,
+	       arg_max(from_json(m.bucket_counts, '["DOUBLE"]'), m.timestamp) AS b1,
+	       min(m.start_timestamp) AS st0, min(m.explicit_bounds) AS bounds
+	FROM segmeta sm
+	JOIN metrics m
+	  ON m.timestamp IN (sm.ts0, sm.ts1)
+	 AND hash(m.attributes, m.resource_attributes, m.start_timestamp, m.explicit_bounds) = sm.k
+	WHERE ` + conds + `
+	GROUP BY sm.k, sm.seg
+), cuminc AS (
+	SELECT ` + gcols + `bounds,
+	       CASE WHEN rst0 OR (sm.seg = 0 AND sb.st0 >= ?) THEN b1
+	            WHEN n = 1 THEN NULL
+	            ELSE list_transform(b1, (x, i) -> x - b0[i]) END AS db
+	FROM segmeta sm
+	JOIN seg_b sb ON sm.k = sb.k AND sm.seg = sb.seg
+), d AS (
+	SELECT ` + gcols + `bounds, db FROM del
+	UNION ALL
+	SELECT ` + gcols + `bounds, db FROM cuminc
+)
+`
+	params = append(params, condsParams...)
+	params = append(params, cutoff.UnixMicro())
 	return q, params
 }
 
@@ -186,11 +346,10 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 		return rename(rows), cols, nil
 	}
 
-	withBuckets := q != 0
-	cte, cteParams := histogramDeltasCTE(groupExprs, conds, withBuckets, cutoff)
-	params = append(params, cteParams...)
+	step := len(aliases) > 0 && aliases[0] == "time"
 
 	if q == 0 {
+		cte, qp := histogramDeltasCTE(groupExprs, conds, params, false, cutoff, step)
 		var expr string
 		switch agg {
 		case "count":
@@ -200,7 +359,7 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 		case "avg", "mean":
 			expr = "sum(ds) / nullif(sum(dc), 0)"
 		}
-		rows, _, err := c.engine.QuerySince(cutoff, cte+"SELECT "+gsel+expr+" AS value FROM d"+gby, params...)
+		rows, _, err := c.engine.QuerySince(cutoff, cte+"SELECT "+gsel+expr+" AS value FROM d"+gby, qp...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -208,19 +367,25 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 	}
 
 	// Percentiles and buckets: merge the increments bucket by bucket, per
-	// group and bounds.
-	var bq string
-	if len(aliases) > 0 && aliases[0] == "time" {
+	// group and bounds. The time-bucket path returns one bucket list per
+	// (time, group, bounds); the Go side below turns those into quantiles.
+	bucketSQL := func(cte string) string {
+		if !step {
+			return cte + `, bk AS (
+	SELECT ` + gsel + `bounds, unnest(db) AS v, unnest(generate_series(1, len(db))) AS i
+	FROM d WHERE db IS NOT NULL
+)
+SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i`
+		}
 		// With a step the group key includes the time bucket. Unnesting every
 		// point in SQL then creates points * bucket count rows and one hash
 		// group per (time, group, bounds, bucket): a 6 h window at a 5 m step
 		// with 9 buckets peaks around 1.4 GB. Merge the lists per (time,
-		// group, bounds) in SQL and walk the resulting small list in Go
-		// instead. list_reduce adds two bucket lists element by element;
-		// greatest(len) keeps every index of unequal lists, matching what the
-		// old unnest-and-group did (a point whose list is shorter contributes 0
-		// beyond its end).
-		bq = cte + `, merged AS (
+		// group, bounds) in SQL. list_reduce adds two bucket lists element by
+		// element; greatest(len) keeps every index of unequal lists, matching
+		// what the old unnest-and-group did (a point whose list is shorter
+		// contributes 0 beyond its end).
+		return cte + `, merged AS (
 	SELECT ` + gsel + `bounds,
 	       CAST(list_reduce(list(db), (x, y) -> list_transform(
 	           range(1, greatest(len(x), len(y)) + 1),
@@ -230,16 +395,46 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 	GROUP BY ` + gsel + `bounds
 )
 SELECT ` + gsel + `bounds, db FROM merged`
-	} else {
-		bq = cte + `, bk AS (
-	SELECT ` + gsel + `bounds, unnest(db) AS v, unnest(generate_series(1, len(db))) AS i
-	FROM d WHERE db IS NOT NULL
-)
-SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i`
 	}
-	rows, _, err := c.engine.QuerySince(cutoff, bq, params...)
-	if err != nil {
-		return nil, nil, err
+
+	var rows []map[string]any
+	if step {
+		// A day of 2000 cumulative series at a 5 m step still has 576k
+		// per-bucket list rows. Query the series space in hash partitions so
+		// only a fraction of those lists is live at once, then concatenate the
+		// partial (time, group, bounds) aggregates. Summing the partials is
+		// the same as summing the series in one query; mergeStepBucketRows
+		// below combines duplicate bucket rows by group and bound. Short
+		// windows need fewer partitions, and more partitions cost more scans.
+		seriesChunks := 4
+		switch hours := time.Since(cutoff).Hours(); {
+		case hours > 48:
+			seriesChunks = 32
+		case hours > 12:
+			seriesChunks = 16
+		case hours > 8:
+			seriesChunks = 8
+		}
+		for i := 0; i < seriesChunks; i++ {
+			chunkConds := conds + " AND " + histogramSeriesKey + " % ? = ?"
+			chunkParams := append(append([]any{}, params...), seriesChunks, i)
+			cte, cp := histogramDeltasCTE(groupExprs, chunkConds, chunkParams, true, cutoff, true)
+			part, _, err := c.engine.QuerySince(cutoff, bucketSQL(cte), cp...)
+			if err != nil {
+				return nil, nil, err
+			}
+			rows = append(rows, part...)
+		}
+	} else {
+		cte, cp := histogramDeltasCTE(groupExprs, conds, params, true, cutoff, false)
+		var err error
+		rows, _, err = c.engine.QuerySince(cutoff, bucketSQL(cte), cp...)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if step {
+		rows = mergeStepBucketRows(rows, gcols)
 	}
 
 	type group struct {
@@ -289,7 +484,7 @@ SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i
 	// time leads the group keys it must sort numerically (a string sort would
 	// rely on every timestamp having the same width), then by the remaining
 	// group values.
-	if len(aliases) > 0 && aliases[0] == "time" {
+	if step {
 		sort.SliceStable(order, func(i, j int) bool {
 			a, b := groups[order[i]], groups[order[j]]
 			if ta, tb := toFloat(a.vals[0]), toFloat(b.vals[0]); ta != tb {
@@ -320,6 +515,48 @@ SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i
 		out = append(out, m)
 	}
 	return out, cols, nil
+}
+
+// mergeStepBucketRows combines the per-partition results of a chunked step
+// bucket query. Each partition returns one list per (time, group, bounds);
+// summing those lists element by element is exactly the sum a single query
+// would have produced, but without holding every series' list at once.
+func mergeStepBucketRows(rows []map[string]any, gcols []string) []map[string]any {
+	type acc struct {
+		row map[string]any
+		db  []float64
+	}
+	byKey := map[string]*acc{}
+	var keys []string
+	for _, r := range rows {
+		key := ""
+		for _, g := range gcols {
+			key += fmt.Sprint(r[g]) + "\x00"
+		}
+		if b, _ := r["bounds"].(string); b != "" {
+			key += b
+		}
+		a, ok := byKey[key]
+		if !ok {
+			a = &acc{row: r}
+			byKey[key] = a
+			keys = append(keys, key)
+		}
+		db := toFloats(r["db"])
+		if len(db) > len(a.db) {
+			a.db = append(a.db, make([]float64, len(db)-len(a.db))...)
+		}
+		for i, v := range db {
+			a.db[i] += v
+		}
+	}
+	out := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		a := byKey[key]
+		a.row["db"] = a.db
+		out = append(out, a.row)
+	}
+	return out
 }
 
 type bucket struct{ lo, hi, n float64 }
