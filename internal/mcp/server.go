@@ -182,7 +182,8 @@ func (s *Server) traceLookup(ctx context.Context, req *sdkmcp.CallToolRequest, a
 
 type attrFilter struct {
 	Key   string `json:"key" jsonschema:"attribute key to match, e.g. service.name or http.request.method. Dotted keys are handled correctly."`
-	Value string `json:"value" jsonschema:"exact value to match for this key"`
+	Value string `json:"value" jsonschema:"value to match for this key; with op != the record is excluded when it has this value"`
+	Op    string `json:"op,omitempty" jsonschema:"match operator: = (default) or != (exclude records where the key has this value; records without the key are kept)"`
 }
 
 type spanSearchArgs struct {
@@ -199,7 +200,7 @@ type spanSearchArgs struct {
 func (s *Server) spanSearch(ctx context.Context, req *sdkmcp.CallToolRequest, args spanSearchArgs) (*sdkmcp.CallToolResult, any, error) {
 	filters := make([]telemetry.AttrFilter, len(args.Filters))
 	for i, f := range args.Filters {
-		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value}
+		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value, Op: f.Op}
 	}
 
 	tenant := args.Tenant
@@ -229,7 +230,7 @@ type compareSpansArgs struct {
 func (s *Server) compareSpans(ctx context.Context, req *sdkmcp.CallToolRequest, args compareSpansArgs) (*sdkmcp.CallToolResult, any, error) {
 	filters := make([]telemetry.AttrFilter, len(args.Filters))
 	for i, f := range args.Filters {
-		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value}
+		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value, Op: f.Op}
 	}
 
 	tenant := args.Tenant
@@ -266,7 +267,7 @@ type logSearchArgs struct {
 func (s *Server) logSearch(ctx context.Context, req *sdkmcp.CallToolRequest, args logSearchArgs) (*sdkmcp.CallToolResult, any, error) {
 	filters := make([]telemetry.AttrFilter, len(args.Filters))
 	for i, f := range args.Filters {
-		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value}
+		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value, Op: f.Op}
 	}
 
 	rows, cols, err := s.core.SearchLogs(args.Tenant, args.TraceID, args.ServiceName, args.Severity, args.Search, filters, args.SinceMinutes, args.UntilMinutes, args.Limit)
@@ -294,7 +295,7 @@ type slowRequestsArgs struct {
 func (s *Server) slowRequests(ctx context.Context, req *sdkmcp.CallToolRequest, args slowRequestsArgs) (*sdkmcp.CallToolResult, any, error) {
 	filters := make([]telemetry.AttrFilter, len(args.Filters))
 	for i, f := range args.Filters {
-		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value}
+		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value, Op: f.Op}
 	}
 
 	tenant := args.Tenant
@@ -333,7 +334,7 @@ type metricQueryArgs struct {
 func (s *Server) metricQuery(ctx context.Context, req *sdkmcp.CallToolRequest, args metricQueryArgs) (*sdkmcp.CallToolResult, any, error) {
 	filters := make([]telemetry.AttrFilter, len(args.Filters))
 	for i, f := range args.Filters {
-		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value}
+		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value, Op: f.Op}
 	}
 
 	tenant := args.Tenant

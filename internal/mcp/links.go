@@ -54,7 +54,11 @@ func setFloat(p url.Values, k string, v *float64) {
 
 func addFilters(p url.Values, fs []attrFilter) {
 	for _, f := range fs {
-		p.Add("filter", fmt.Sprintf("%s:%s", f.Key, f.Value))
+		param := "filter"
+		if f.Op == "!=" {
+			param = "filter_not"
+		}
+		p.Add(param, fmt.Sprintf("%s:%s", f.Key, f.Value))
 	}
 }
 
@@ -90,6 +94,7 @@ func (s *Server) logLink(tenant string, a logSearchArgs) string {
 	setIf(p, "search", a.Search)
 	setInt(p, "since_minutes", a.SinceMinutes)
 	setInt(p, "limit", a.Limit)
+	addFilters(p, a.Filters)
 	return s.link("logs", p)
 }
 

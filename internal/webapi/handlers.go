@@ -92,17 +92,23 @@ func writeErr(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), status)
 }
 
-// queryFilters parses repeated ?filter=key:value pairs, the form used by the
-// span search, log search, metric and slow-request endpoints.
+// queryFilters parses repeated ?filter=key:value pairs (equal matches) and
+// ?filter_not=key:value pairs (exclusions), the form used by the span search,
+// log search, metric, slow-request and compare endpoints.
 func queryFilters(w http.ResponseWriter, r *http.Request) ([]telemetry.AttrFilter, bool) {
 	var filters []telemetry.AttrFilter
-	for _, raw := range r.URL.Query()["filter"] {
-		key, value, ok := strings.Cut(raw, ":")
-		if !ok {
-			http.Error(w, fmt.Sprintf("filter %q must be key:value", raw), http.StatusBadRequest)
-			return nil, false
+	for _, p := range []struct{ name, op string }{
+		{"filter", ""},
+		{"filter_not", "!="},
+	} {
+		for _, raw := range r.URL.Query()[p.name] {
+			key, value, ok := strings.Cut(raw, ":")
+			if !ok {
+				http.Error(w, fmt.Sprintf("%s %q must be key:value", p.name, raw), http.StatusBadRequest)
+				return nil, false
+			}
+			filters = append(filters, telemetry.AttrFilter{Key: key, Value: value, Op: p.op})
 		}
-		filters = append(filters, telemetry.AttrFilter{Key: key, Value: value})
 	}
 	return filters, true
 }
@@ -283,7 +289,7 @@ const metricParamsHelp = "metric_name and aggregation are required. Parameters: 
 	"until_minutes (optional; where the window ends, default 0 = now, must be less than since_minutes), " +
 	"group_by (comma-separated columns, attr.<key> data-point attributes, or resource.<key> resource attributes), " +
 	"step (optional time series: 30s, 1m, 5m, 1h or whole seconds; adds a time column), " +
-	"filter=key:value (repeatable), " +
+	"filter=key:value (repeatable), filter_not=key:value (repeatable exclusion), " +
 	"min_value, max_value, limit (exemplars only)"
 
 func (h *Handlers) handleQueryMetric(w http.ResponseWriter, r *http.Request) {

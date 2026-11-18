@@ -31,10 +31,43 @@ func NewCore(engine *query.Engine) *Core {
 	return &Core{engine: engine, tenantAttr: "tenant.id"}
 }
 
-// AttrFilter is one key/value attribute match, ANDed with any others.
+// AttrFilter is one key/value attribute match, ANDed with any others. Op is
+// "" or "=" for an exact match, and "!=" to exclude records whose key has
+// that value.
 type AttrFilter struct {
 	Key   string
 	Value string
+	Op    string
+}
+
+// attrFilterCond builds the SQL and parameters for one attribute filter. Both
+// the record's own attributes and its resource attributes are checked, so a
+// caller does not need to know which one holds the key. Equal filters keep the
+// original SQL exactly; callers that already passed no op see no change.
+func attrFilterCond(f AttrFilter) (string, []any, error) {
+	if f.Key == "" {
+		return "", nil, invalidInput("attribute filter key must not be empty")
+	}
+	key := jsonPath(f.Key)
+	switch f.Op {
+	case "", "=":
+		return "(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)",
+			[]any{key, f.Value, key, f.Value}, nil
+	case "!=":
+		// A missing key coalesces to '', so it is kept for a non-empty
+		// exclusion value. With an empty value the caller means "present and
+		// non-empty somewhere", which needs OR rather than AND: the plain
+		// expression would require the key in both scopes.
+		op := "AND"
+		if f.Value == "" {
+			op = "OR"
+		}
+		return "(coalesce(json_extract_string(attributes, ?), '') <> ? " + op +
+				" coalesce(json_extract_string(resource_attributes, ?), '') <> ?)",
+			[]any{key, f.Value, key, f.Value}, nil
+	default:
+		return "", nil, invalidInput("attribute filter op %q is not supported; use = (default) or !=", f.Op)
+	}
 }
 
 // errInvalidInput classifies an error as a caller input problem (missing or
@@ -266,17 +299,17 @@ func (c *Core) spanConds(tenant, serviceName string, filters []AttrFilter, d Ran
 		params = append(params, serviceName)
 	}
 	for _, f := range filters {
-		if f.Key == "" {
-			return nil, nil, invalidInput("attribute filter key must not be empty")
-		}
 		// Search span attributes AND resource attributes: a caller should not
 		// need to know which one a key lives in. `service.name`, for example,
 		// arrives as a resource attribute (and is additionally promoted to the
 		// service_name column) but is absent from span attributes — filtering
 		// only attributes silently matches nothing for the most common key.
-		conds = append(conds,
-			"(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)")
-		params = append(params, jsonPath(f.Key), f.Value, jsonPath(f.Key), f.Value)
+		cond, p, err := attrFilterCond(f)
+		if err != nil {
+			return nil, nil, err
+		}
+		conds = append(conds, cond)
+		params = append(params, p...)
 	}
 	dc, dp := d.conds("duration_ms")
 	conds = append(conds, dc...)
@@ -352,15 +385,15 @@ func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string,
 		params = append(params, "%"+search+"%")
 	}
 	for _, f := range filters {
-		if f.Key == "" {
-			return nil, nil, invalidInput("attribute filter key must not be empty")
-		}
 		// Dual-scope like SearchSpans: the caller should not need to know
 		// whether a key lives in the record's own attributes or its resource
 		// attributes.
-		conds = append(conds,
-			"(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)")
-		params = append(params, jsonPath(f.Key), f.Value, jsonPath(f.Key), f.Value)
+		cond, p, err := attrFilterCond(f)
+		if err != nil {
+			return nil, nil, err
+		}
+		conds = append(conds, cond)
+		params = append(params, p...)
 	}
 
 	params = append(params, limit)
@@ -600,15 +633,15 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	}
 
 	for _, f := range filters {
-		if f.Key == "" {
-			return nil, nil, invalidInput("attribute filter key must not be empty")
-		}
 		// Same dual-scope match as span_search: a caller should not need to
 		// know whether a key lives in data-point attributes or resource
 		// attributes.
-		conds = append(conds,
-			"(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)")
-		params = append(params, jsonPath(f.Key), f.Value, jsonPath(f.Key), f.Value)
+		cond, p, err := attrFilterCond(f)
+		if err != nil {
+			return nil, nil, err
+		}
+		conds = append(conds, cond)
+		params = append(params, p...)
 	}
 
 	if strings.EqualFold(aggregation, "exemplars") {
