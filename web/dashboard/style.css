@@ -496,6 +496,8 @@ tr.clickable { cursor: pointer; }
 #inv-requests-body .inv-more { margin-top: 6px; white-space: nowrap; }
 /* The distribution needs less width than the why rows beside it. */
 .inv-grid-why { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+/* Without a latency metric the distribution is hidden: why takes the row. */
+.inv-grid-why:has(> #inv-panel-dist.hidden) { grid-template-columns: minmax(0, 1fr); }
 /* A big trace scrolls inside its panel instead of stretching the page. */
 #inv-trace-body, #inv-logs-body { max-height: 70vh; overflow: auto; }
 #inv-dist-body .bar-label { width: 90px; }
