@@ -13,6 +13,11 @@ const state = {
   tenant: null,
   tenants: [],
   connected: false,
+  // metricInfo is {type, unit} of the selected metric, from metric_query.
+  metricInfo: null,
+  metricFilters: [],
+  // min_value/max_value/limit of an exemplars deep link.
+  metricRange: {},
   // writtenHash is the last hash we set ourselves — see the hashchange
   // listener for why every self-write must be recognisable.
   writtenHash: "",
@@ -316,6 +321,10 @@ async function runTraceSearch() {
   if (service) params.set("service_name", service);
   params.set("since_minutes", document.getElementById("f-since").value || "60");
   params.set("limit", document.getElementById("f-limit").value || "100");
+  const minMs = document.getElementById("f-min-ms").value;
+  const maxMs = document.getElementById("f-max-ms").value;
+  if (minMs) params.set("min_ms", minMs);
+  if (maxMs) params.set("max_ms", maxMs);
   collectAttrFilters().forEach((f) => params.append("filter", f));
 
   setHash("traces", params);
@@ -565,10 +574,18 @@ async function runMetricQuery() {
   params.set("since_minutes", document.getElementById("m-since").value || "60");
   const groupBy = document.getElementById("m-groupby").value.trim();
   if (groupBy) params.set("group_by", groupBy);
+  state.metricFilters.forEach((f) => params.append("filter", f));
+  if (params.get("aggregation") === "exemplars") {
+    for (const [k, v] of Object.entries(state.metricRange)) params.set(k, v);
+  }
 
   setHash("metrics", params);
 
   const out = document.getElementById("metric-result");
+  const dist = document.getElementById("metric-dist");
+  dist.innerHTML = "";
+  await loadMetricInfo();
+  const unit = metricUnit();
   let resp;
   try {
     resp = await api("/api/metrics?" + params.toString());
@@ -586,30 +603,285 @@ async function runMetricQuery() {
   // one value overall) — not a time series — so a bar comparison (or a
   // single stat when there's nothing to compare) is the right shape, not a
   // line chart.
-  const groupCol = resp.columns.find((c) => c !== "value");
-  if (!groupCol) {
-    out.innerHTML = `<div class="stat-big">${fmtValue(resp.rows[0].value)}</div>`;
+  const agg = params.get("aggregation");
+  if (agg === "exemplars") {
+    out.innerHTML = "";
+    out.appendChild(exemplarTable(resp, unit, params.get("since_minutes")));
+    return;
+  }
+  const valueUnit = agg === "count" ? "" : unit;
+  const isHistogram = state.metricInfo && state.metricInfo.type === "histogram";
+  const groupCols = resp.columns.filter((c) => c !== "value");
+  if (groupCols.length === 0) {
+    out.innerHTML = `<div class="stat-big">${fmtValue(resp.rows[0].value, valueUnit)}</div>`;
+    if (isHistogram) await renderDistribution("all", state.metricFilters, params);
     return;
   }
 
   const max = Math.max(...resp.rows.map((r) => Number(r.value) || 0), 1);
-  const bars = resp.rows.map((r) => {
+  const bars = resp.rows.map((r, i) => {
     const v = Number(r.value) || 0;
     const pct = (v / max) * 100;
+    // Every group key in the label, not just the first.
+    const label = groupCols.map((c) => (r[c] === null || r[c] === undefined ? "—" : String(r[c]))).join(" · ");
+    const filters = isHistogram ? groupFilters(groupCols, r) : null;
+    const clickable = filters ? ` clickable" data-idx="${i}` : "";
     return `
-      <div class="bar-row">
-        <div class="bar-label" title="${escapeHtml(String(r[groupCol]))}">${escapeHtml(String(r[groupCol]))}</div>
+      <div class="bar-row${clickable}" title="${escapeHtml(label)}${filters ? " — click for the distribution" : ""}">
+        <div class="bar-label">${escapeHtml(label)}</div>
         <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
-        <div class="bar-value">${fmtValue(v)}</div>
+        <div class="bar-value">${fmtValue(v, valueUnit)}</div>
       </div>`;
   });
   out.innerHTML = `<div class="bar-chart">${bars.join("")}</div>`;
+  if (isHistogram) {
+    out.querySelectorAll(".bar-row.clickable").forEach((el) => {
+      el.addEventListener("click", () => {
+        const r = resp.rows[Number(el.dataset.idx)];
+        const label = groupCols.map((c) => String(r[c])).join(" · ");
+        renderDistribution(label, state.metricFilters.concat(groupFilters(groupCols, r)), params);
+      });
+    });
+  }
 }
 
-function fmtValue(v) {
+// --- metric type and unit ---
+//
+// Asked through the same metric_query an agent uses: count grouped by
+// metric_type and metric_unit. No separate endpoint, so the dashboard sees
+// exactly what the MCP tools see.
+async function loadMetricInfo() {
+  const el = document.getElementById("m-info");
+  const name = document.getElementById("m-name").value;
+  state.metricInfo = null;
+  el.textContent = "";
+  if (!state.tenant || !name) return;
+  const p = new URLSearchParams();
+  p.set("tenant", state.tenant);
+  p.set("metric_name", name);
+  p.set("aggregation", "count");
+  p.set("since_minutes", document.getElementById("m-since").value || "60");
+  p.set("group_by", "metric_type,metric_unit");
+  let resp;
+  try {
+    resp = await api("/api/metrics?" + p.toString());
+  } catch (e) {
+    return;
+  }
+  const row = (resp && resp.rows[0]) || null;
+  if (!row) return;
+  state.metricInfo = { type: row.metric_type, unit: row.metric_unit || "" };
+  const hint = {
+    histogram: "count = observations · p50/p95/p99 from buckets · click a bar for the distribution",
+    exponential_histogram: "count = observations",
+    gauge: "count = exported points, not events",
+    sum: "count = exported points, not events",
+  }[row.metric_type] || "";
+  el.innerHTML = `<b>${escapeHtml(row.metric_type)}${state.metricInfo.unit ? " · " + escapeHtml(state.metricInfo.unit) : ""}</b>` +
+    (hint ? ` <span class="muted">${escapeHtml(hint)}</span>` : "");
+}
+
+function metricUnit() {
+  return (state.metricInfo && state.metricInfo.unit) || "";
+}
+
+// groupFilters turns one result row's group values into filter=key:value
+// pairs, so the distribution of that bar is the same metric_query with a
+// filter. Only keys a filter can match (data-point or resource attributes)
+// qualify; a missing value cannot be filtered on.
+function groupFilters(groupCols, row) {
+  const out = [];
+  for (const c of groupCols) {
+    const v = row[c];
+    if (v === null || v === undefined) return null;
+    let key = null;
+    if (c.startsWith("attr.")) key = c.slice(5);
+    else if (c.startsWith("attributes.")) key = c.slice(11);
+    else if (c === "service_name") key = "service.name";
+    if (!key) return null;
+    out.push(key + ":" + v);
+  }
+  return out;
+}
+
+// --- histogram distribution ---
+//
+// aggregation=buckets on the same metric_query, plus p50/p95/p99 from the
+// server, so nothing is re-derived here.
+async function renderDistribution(label, filters, baseParams) {
+  const dist = document.getElementById("metric-dist");
+  const ask = (agg) => {
+    const p = new URLSearchParams();
+    for (const k of ["tenant", "metric_name", "since_minutes"]) p.set(k, baseParams.get(k));
+    p.set("aggregation", agg);
+    filters.forEach((f) => p.append("filter", f));
+    return api("/api/metrics?" + p.toString());
+  };
+  let buckets, p50, p95, p99;
+  try {
+    [buckets, p50, p95, p99] = await Promise.all(["buckets", "p50", "p95", "p99"].map(ask));
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+  const rows = buckets.rows;
+  const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
+  if (total === 0) {
+    dist.innerHTML = `<div class="empty">no observations for ${escapeHtml(label)}</div>`;
+    return;
+  }
+  // Trim empty buckets at both ends; keep empty ones in between.
+  let first = rows.findIndex((r) => Number(r.value) > 0);
+  let last = rows.length - 1 - [...rows].reverse().findIndex((r) => Number(r.value) > 0);
+  const shown = rows.slice(first, last + 1);
+  const unit = metricUnit();
+  const q = { p50: val(p50), p95: val(p95), p99: val(p99) };
+  const prevLe = (i) => (i > 0 ? rows[i - 1].le : null);
+  const max = Math.max(...shown.map((r) => Number(r.value) || 0), 1);
+  const lines = shown.map((r, j) => {
+    const i = first + j;
+    const le = r.le;
+    const name = le === null ? `> ${fmtValue(prevLe(i), unit)}` : `≤ ${fmtValue(le, unit)}`;
+    const lo = prevLe(i);
+    const marks = Object.entries(q)
+      .filter(([, v]) => v !== null && (lo === null || v > lo) && (le === null || v <= le))
+      .map(([k]) => `<span class="qmark">${k}</span>`).join("");
+    const v = Number(r.value) || 0;
+    return `
+      <div class="bar-row clickable" data-i="${i}" title="click for the requests in this bucket">
+        <div class="bar-label">${name}</div>
+        <div class="bar-track"><div class="bar-fill dist" style="width:${(v / max) * 100}%"></div></div>
+        <div class="bar-value">${fmtValue(v)}</div>
+        <div class="bar-marks">${marks}</div>
+      </div>`;
+  });
+  dist.innerHTML = `
+    <div class="dist-head"><b>${escapeHtml(label)}</b> · ${fmtValue(total)} observations ·
+      p50 ${fmtValue(q.p50, unit)} · p95 ${fmtValue(q.p95, unit)} · p99 ${fmtValue(q.p99, unit)}</div>
+    <div class="bar-chart">${lines.join("")}</div>
+    <div id="bucket-req"></div>`;
+  dist.querySelectorAll(".bar-row.clickable").forEach((el) => {
+    el.addEventListener("click", () => {
+      const i = Number(el.dataset.i);
+      showBucketRequests(prevLe(i), rows[i].le, filters, baseParams);
+    });
+  });
+}
+
+// --- from a bucket to the requests in it ---
+//
+// aggregation=exemplars on the same metric_query, narrowed to the bucket's
+// bounds: the concrete requests the SDK attached to those observations. Each
+// leads to its trace (waterfall + logs). "All spans in this range" is
+// span_search with min_ms/max_ms, for when the exemplars are too few.
+async function showBucketRequests(lo, le, filters, baseParams) {
+  const box = document.getElementById("bucket-req");
+  const unit = metricUnit();
+  const p = new URLSearchParams();
+  for (const k of ["tenant", "metric_name", "since_minutes"]) p.set(k, baseParams.get(k));
+  p.set("aggregation", "exemplars");
+  if (lo !== null) p.set("min_value", lo);
+  if (le !== null) p.set("max_value", le);
+  p.set("limit", "20");
+  filters.forEach((f) => p.append("filter", f));
+  let resp;
+  try {
+    resp = await api("/api/metrics?" + p.toString());
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+  const range = `${lo === null ? "" : fmtValue(lo, unit)} – ${le === null ? "∞" : fmtValue(le, unit)}`;
+  box.innerHTML = `<div class="dist-head"><b>requests ${range}</b> ·
+    ${resp.rows.length} exemplar${resp.rows.length === 1 ? "" : "s"}</div>`;
+
+  // Same bounds as a span duration filter, when the unit converts to ms.
+  const toMs = { ms: 1, s: 1000, us: 0.001 }[unit];
+  if (toMs !== undefined) {
+    const sp = new URLSearchParams();
+    sp.set("tenant", baseParams.get("tenant"));
+    sp.set("since_minutes", baseParams.get("since_minutes"));
+    sp.set("limit", "100");
+    if (lo !== null) sp.set("min_ms", lo * toMs);
+    if (le !== null) sp.set("max_ms", le * toMs);
+    const svc = filters.find((f) => f.startsWith("service.name:"));
+    if (svc) sp.set("service_name", svc.slice("service.name:".length));
+    box.querySelector(".dist-head").insertAdjacentHTML("beforeend",
+      ` · <a href="#traces?${escapeHtml(sp.toString())}">all spans in this range →</a>`);
+  }
+  if (resp.rows.length === 0) {
+    box.insertAdjacentHTML("beforeend", `<div class="empty">no exemplars in this bucket — the sender attached none, or they had no trace</div>`);
+    return;
+  }
+  box.appendChild(exemplarTable(resp, unit, baseParams.get("since_minutes")));
+}
+
+// exemplarTable renders aggregation=exemplars rows; a row opens its trace.
+function exemplarTable(resp, unit, since) {
+  const groupCols = resp.columns.filter((c) => !["timestamp", "value", "trace_id", "span_id"].includes(c));
+  const table = document.createElement("table");
+  table.className = "data-table";
+  table.innerHTML = `<thead><tr><th>Time</th>${groupCols.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}
+    <th>Value</th><th>Trace</th></tr></thead><tbody></tbody>`;
+  const tbody = table.querySelector("tbody");
+  if (resp.rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="${groupCols.length + 3}" class="empty">no exemplars</td></tr>`;
+  }
+  resp.rows.forEach((r) => {
+    const tr = document.createElement("tr");
+    tr.className = "clickable";
+    tr.innerHTML = `<td>${fmtTime(r.timestamp)}</td>` +
+      groupCols.map((c) => `<td>${escapeHtml(r[c] === null || r[c] === undefined ? "—" : r[c])}</td>`).join("") +
+      `<td>${fmtValue(r.value, unit)}</td><td class="mono">${escapeHtml((r.trace_id || "").slice(0, 12))}…</td>`;
+    tr.addEventListener("click", () => openTrace(r.trace_id, since));
+    tbody.appendChild(tr);
+  });
+  return table;
+}
+
+// openTrace navigates to a trace's waterfall through its deep link, so the
+// address bar is a permalink to it and back returns here.
+function openTrace(traceId, since) {
+  const p = new URLSearchParams();
+  p.set("tenant", state.tenant);
+  if (since) p.set("since_minutes", since);
+  p.set("trace_id", traceId);
+  location.hash = "#traces?" + p.toString();
+}
+
+// --- metric filters (from a deep link) ---
+//
+// The metrics form has no filter editor; filters arrive in a deep link
+// (an agent's metric_query with filters) and are shown as removable chips.
+function setMetricFilters(list) {
+  state.metricFilters = list.slice();
+  const el = document.getElementById("m-filters");
+  const r = state.metricRange;
+  const range = r.min_value || r.max_value
+    ? `<span class="chip">value ${escapeHtml(r.min_value || "")}–${escapeHtml(r.max_value || "∞")} <button type="button" data-range="1" title="remove">×</button></span>`
+    : "";
+  el.innerHTML = range + state.metricFilters.map((f, i) =>
+    `<span class="chip">${escapeHtml(f)} <button type="button" data-i="${i}" title="remove">×</button></span>`).join("");
+  const rb = el.querySelector("button[data-range]");
+  if (rb) rb.addEventListener("click", () => { state.metricRange = {}; setMetricFilters(state.metricFilters); });
+  el.querySelectorAll("button[data-i]").forEach((b) => b.addEventListener("click", () => {
+    const next = state.metricFilters.filter((_, j) => j !== Number(b.dataset.i));
+    setMetricFilters(next);
+  }));
+}
+
+function val(resp) {
+  const r = resp && resp.rows[0];
+  return r && r.value !== null && r.value !== undefined ? Number(r.value) : null;
+}
+
+// fmtValue returns HTML: metric_unit comes from whatever the sender reported,
+// so it is escaped here, and callers put the result into markup as is.
+function fmtValue(v, unit) {
   if (v === null || v === undefined) return "—";
   const n = Number(v);
-  return Number.isInteger(n) ? String(n) : n.toFixed(3);
+  const s = Number.isInteger(n) ? String(n) : n.toFixed(3);
+  return unit ? `${s} ${escapeHtml(unit)}` : s;
 }
 
 // --- flush ---
@@ -658,6 +930,8 @@ function fillTracesForm(params) {
   if (since) document.getElementById("f-since").value = since;
   const limit = params.get("limit");
   if (limit) document.getElementById("f-limit").value = limit;
+  document.getElementById("f-min-ms").value = params.get("min_ms") || "";
+  document.getElementById("f-max-ms").value = params.get("max_ms") || "";
 
   const container = document.getElementById("f-attr-filters");
   container.innerHTML = "";
@@ -690,7 +964,12 @@ function fillMetricsForm(params) {
   const since = params.get("since_minutes");
   if (since) document.getElementById("m-since").value = since;
   const groupBy = params.get("group_by");
-  if (groupBy) document.getElementById("m-groupby").value = groupBy;
+  document.getElementById("m-groupby").value = groupBy || "";
+  state.metricRange = {};
+  for (const k of ["min_value", "max_value", "limit"]) {
+    if (params.get(k)) state.metricRange[k] = params.get(k);
+  }
+  setMetricFilters(params.getAll("filter"));
 }
 
 // applyInitialView reads the URL hash (if any) and either lands directly on
@@ -806,6 +1085,12 @@ function init() {
   document.getElementById("metrics-form").addEventListener("submit", (e) => {
     e.preventDefault();
     runMetricQuery();
+  });
+  document.getElementById("m-name").addEventListener("change", () => {
+    // Filters from a deep link belonged to the previous metric.
+    state.metricRange = {};
+    setMetricFilters([]);
+    loadMetricInfo();
   });
   document.getElementById("flush-btn").addEventListener("click", runFlush);
   document.getElementById("logout-btn").addEventListener("click", logout);
