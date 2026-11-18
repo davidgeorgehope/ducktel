@@ -59,7 +59,7 @@ func TestAPICompareMatchesCore(t *testing.T) {
 	mux, core := newCompareMux(t)
 
 	rec := doReq(t, mux, "GET",
-		"/api/compare?tenant=acme&service_name=api&span_name=op&since_minutes=60&min_ms=50&max_ms=200&limit=15", "")
+		"/api/compare?tenant=acme&service_name=api&span_name=op&span_kind=server&since_minutes=60&min_ms=50&max_ms=200&limit=15", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -72,6 +72,7 @@ func TestAPICompareMatchesCore(t *testing.T) {
 	want, err := core.CompareSpans("acme", telemetry.CompareOpts{
 		ServiceName: "api",
 		SpanName:    "op",
+		SpanKind:    "server",
 		Since:       60,
 		Slow:        telemetry.Range{Min: &minMs, Max: &maxMs},
 		Limit:       15,
@@ -117,6 +118,7 @@ func TestAPICompareInvalidInputIs400(t *testing.T) {
 		"/api/compare?tenant=acme&min_ms=200&max_ms=50",
 		"/api/compare?tenant=acme&since_minutes=10&until_minutes=10",
 		"/api/compare?tenant=acme&since_minutes=30&until_minutes=-1",
+		"/api/compare?tenant=acme&span_kind=bogus",
 		"/api/compare?service_name=api",
 		"/api/compare?tenant=acme&filter=no-colon",
 	}

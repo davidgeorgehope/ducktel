@@ -260,6 +260,7 @@ func (h *Handlers) handleCompareSpans(w http.ResponseWriter, r *http.Request) {
 	cmp, err := h.core.CompareSpans(q.Get("tenant"), telemetry.CompareOpts{
 		ServiceName: q.Get("service_name"),
 		SpanName:    q.Get("span_name"),
+		SpanKind:    q.Get("span_kind"),
 		Filters:     filters,
 		Since:       queryInt(r, "since_minutes", 0),
 		Until:       queryInt(r, "until_minutes", 0),

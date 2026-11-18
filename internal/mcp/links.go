@@ -131,6 +131,7 @@ func (s *Server) compareLink(tenant string, a compareSpansArgs) string {
 	p.Set("tenant", tenant)
 	setIf(p, "service_name", a.ServiceName)
 	setIf(p, "span_name", a.SpanName)
+	setIf(p, "span_kind", a.SpanKind)
 	setInt(p, "since_minutes", a.SinceMinutes)
 	setInt(p, "until_minutes", a.UntilMinutes)
 	setFloat(p, "min_ms", a.MinMs)

@@ -217,6 +217,7 @@ type compareSpansArgs struct {
 	Tenant       string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
 	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
 	SpanName     string       `json:"span_name,omitempty" jsonschema:"optional exact span_name to match"`
+	SpanKind     string       `json:"span_kind,omitempty" jsonschema:"which span kind to compare: server (default when span_name is not given), client, internal, producer, consumer, or any"`
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together), against span attributes or resource attributes. Omit to compare all spans in the time range."`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to look, in minutes. Default 60."`
 	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
@@ -235,6 +236,7 @@ func (s *Server) compareSpans(ctx context.Context, req *sdkmcp.CallToolRequest, 
 	cmp, err := s.core.CompareSpans(tenant, telemetry.CompareOpts{
 		ServiceName: args.ServiceName,
 		SpanName:    args.SpanName,
+		SpanKind:    args.SpanKind,
 		Filters:     filters,
 		Since:       args.SinceMinutes,
 		Until:       args.UntilMinutes,

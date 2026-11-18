@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"math"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -246,6 +247,232 @@ func TestCompareSpansEmptyScope(t *testing.T) {
 	}
 }
 
+// seedCompareCore writes spans and returns a Core over them, for tests whose
+// fixture needs span kinds or attributes the shared compareSpan does not set.
+func seedCompareCore(t *testing.T, spans []writer.TraceSpan) *Core {
+	t.Helper()
+	dir := t.TempDir()
+	w := writer.New(dir, time.Hour, 1000)
+	w.Add(spans)
+	if err := w.Flush(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	engine, err := query.Open(dir)
+	if err != nil {
+		t.Fatalf("opening engine: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	return NewCore(engine)
+}
+
+// compareKindSpan seeds one span with an explicit kind, name and attributes.
+func compareKindSpan(id string, durationMs float64, kind, spanName, attrs string) writer.TraceSpan {
+	now := time.Now()
+	return writer.TraceSpan{
+		TraceID: "trace-" + id, SpanID: "span-" + id, ParentSpanID: "",
+		ServiceName: "api", SpanName: spanName, SpanKind: kind,
+		StartTime: now.UnixMicro(), EndTime: now.UnixMicro(), DurationMs: durationMs,
+		StatusCode: "STATUS_CODE_OK", Attributes: attrs,
+		ResourceAttributes: `{"service.name":"api","tenant.id":"acme"}`,
+		Events:             "[]", Links: "[]",
+	}
+}
+
+// mixedKindCore seeds 100 requests, each with one server span and two always
+// fast client spans. Half the server spans are slow and carry cache=miss, so
+// only a server-scoped comparison finds the cause rather than the children.
+func mixedKindCore(t *testing.T) *Core {
+	t.Helper()
+	var spans []writer.TraceSpan
+	for i := 0; i < 100; i++ {
+		dur, cache := 20.0, "hit"
+		if i < 50 {
+			dur, cache = 400, "miss"
+		}
+		id := strconv.Itoa(i)
+		spans = append(spans,
+			compareKindSpan("server-"+id, dur, "SPAN_KIND_SERVER", "GET /api/orders", `{"cache":"`+cache+`"}`),
+			compareKindSpan("db1-"+id, 5, "SPAN_KIND_CLIENT", "SELECT", `{"db.system":"postgres"}`),
+			compareKindSpan("db2-"+id, 6, "SPAN_KIND_CLIENT", "SELECT", `{"db.system":"postgres"}`),
+		)
+	}
+	return seedCompareCore(t, spans)
+}
+
+func TestNormalizeSpanKind(t *testing.T) {
+	cases := []struct {
+		in       string
+		want     string
+		explicit bool
+		invalid  bool
+	}{
+		{"", "", false, false},
+		{"any", "", true, false},
+		{"SERVER", "SPAN_KIND_SERVER", true, false},
+		{"Client", "SPAN_KIND_CLIENT", true, false},
+		{"span_kind_internal", "SPAN_KIND_INTERNAL", true, false},
+		{"SPAN_KIND_PRODUCER", "SPAN_KIND_PRODUCER", true, false},
+		{"consumer", "SPAN_KIND_CONSUMER", true, false},
+		{"bogus", "", false, true},
+	}
+	for _, tc := range cases {
+		got, explicit, err := normalizeSpanKind(tc.in)
+		if tc.invalid {
+			if err == nil || !IsInvalidInput(err) {
+				t.Errorf("normalizeSpanKind(%q) error = %v, want an invalid input error", tc.in, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("normalizeSpanKind(%q): %v", tc.in, err)
+			continue
+		}
+		if got != tc.want || explicit != tc.explicit {
+			t.Errorf("normalizeSpanKind(%q) = %q, %v; want %q, %v", tc.in, got, explicit, tc.want, tc.explicit)
+		}
+	}
+}
+
+func TestCompareSpansMixedKindsDefaultsToServer(t *testing.T) {
+	c := mixedKindCore(t)
+	minMs, maxMs := 300.0, 500.0
+
+	cmp, err := c.CompareSpans("acme", CompareOpts{
+		ServiceName: "api",
+		Slow:        Range{Min: &minMs, Max: &maxMs},
+	})
+	if err != nil {
+		t.Fatalf("CompareSpans: %v", err)
+	}
+	if cmp.SpanKind != "SPAN_KIND_SERVER" {
+		t.Errorf("span_kind = %q, want SPAN_KIND_SERVER", cmp.SpanKind)
+	}
+	if cmp.SlowN != 50 || cmp.RestN != 50 {
+		t.Errorf("slow_n/rest_n = %d/%d, want only the server spans' 50/50", cmp.SlowN, cmp.RestN)
+	}
+	if len(cmp.Rows) == 0 || cmp.Rows[0].Key != "cache" || cmp.Rows[0].Value != "miss" {
+		t.Fatalf("first row = %+v, want cache=miss", cmp.Rows)
+	}
+	for _, r := range cmp.Rows {
+		if r.Key == "span_kind" {
+			t.Errorf("a kind-scoped comparison should not emit span_kind rows: %+v", r)
+		}
+		if r.Key == "db.system" {
+			t.Errorf("a server-scoped comparison should not see child spans: %+v", r)
+		}
+	}
+}
+
+func TestCompareSpansAnyKindKeepsKindRows(t *testing.T) {
+	c := mixedKindCore(t)
+	minMs, maxMs := 300.0, 500.0
+
+	cmp, err := c.CompareSpans("acme", CompareOpts{
+		ServiceName: "api",
+		SpanKind:    "any",
+		Slow:        Range{Min: &minMs, Max: &maxMs},
+	})
+	if err != nil {
+		t.Fatalf("CompareSpans: %v", err)
+	}
+	if cmp.SpanKind != "" {
+		t.Errorf("span_kind = %q, want empty for a mixed-kind scope", cmp.SpanKind)
+	}
+	foundKind := false
+	for _, r := range cmp.Rows {
+		if r.Key == "span_kind" {
+			foundKind = true
+		}
+	}
+	if !foundKind {
+		t.Errorf("span_kind=any should keep the old kind rows: %+v", cmp.Rows)
+	}
+}
+
+func TestCompareSpansFallsBackWhenDefaultKindIsEmpty(t *testing.T) {
+	var spans []writer.TraceSpan
+	for i := 0; i < 20; i++ {
+		dur, cache := 20.0, "hit"
+		if i < 10 {
+			dur, cache = 400, "miss"
+		}
+		spans = append(spans, compareKindSpan(strconv.Itoa(i), dur, "SPAN_KIND_CONSUMER", "process",
+			`{"cache":"`+cache+`"}`))
+	}
+	c := seedCompareCore(t, spans)
+	minMs, maxMs := 300.0, 500.0
+
+	cmp, err := c.CompareSpans("acme", CompareOpts{
+		ServiceName: "api",
+		Slow:        Range{Min: &minMs, Max: &maxMs},
+	})
+	if err != nil {
+		t.Fatalf("CompareSpans: %v", err)
+	}
+	if cmp.SpanKind != "" {
+		t.Errorf("fallback span_kind = %q, want empty", cmp.SpanKind)
+	}
+	if cmp.SlowN != 10 || cmp.RestN != 10 {
+		t.Errorf("fallback slow_n/rest_n = %d/%d, want 10/10", cmp.SlowN, cmp.RestN)
+	}
+	if len(cmp.Rows) == 0 || cmp.Rows[0].Key != "cache" || cmp.Rows[0].Value != "miss" {
+		t.Fatalf("fallback rows = %+v, want cache=miss first", cmp.Rows)
+	}
+}
+
+func TestCompareSpansCollapsesDuplicateFacts(t *testing.T) {
+	var spans []writer.TraceSpan
+	for i := 0; i < 20; i++ {
+		dur, name, attrs := 20.0, "", `{"cache":"hit"}`
+		if i < 10 {
+			dur, name = 400, "GET /api/orders"
+			attrs = `{"http.route":"GET /api/orders","url.path":"/api/orders","region":"us-east"}`
+		}
+		spans = append(spans, compareKindSpan(strconv.Itoa(i), dur, "SPAN_KIND_SERVER", name, attrs))
+	}
+	c := seedCompareCore(t, spans)
+	minMs, maxMs := 300.0, 500.0
+
+	cmp, err := c.CompareSpans("acme", CompareOpts{
+		ServiceName: "api",
+		Slow:        Range{Min: &minMs, Max: &maxMs},
+	})
+	if err != nil {
+		t.Fatalf("CompareSpans: %v", err)
+	}
+
+	var route *CompareRow
+	for i := range cmp.Rows {
+		r := &cmp.Rows[i]
+		if r.Key == "span_name" || r.Key == "url.path" {
+			t.Errorf("duplicate fact should be collapsed away: %+v", *r)
+		}
+		if r.Key == "http.route" {
+			route = r
+		}
+	}
+	if route == nil {
+		t.Fatalf("no http.route row: %+v", cmp.Rows)
+	}
+	if route.Value != "GET /api/orders" || route.SlowPct != 100 || route.RestPct != 0 {
+		t.Errorf("route row = %+v, want GET /api/orders 100/0", *route)
+	}
+	wantAlso := []string{"span_name=GET /api/orders", "url.path=/api/orders"}
+	if !reflect.DeepEqual(route.Also, wantAlso) {
+		t.Errorf("route also = %v, want %v", route.Also, wantAlso)
+	}
+
+	var region *CompareRow
+	for i := range cmp.Rows {
+		if cmp.Rows[i].Key == "region" {
+			region = &cmp.Rows[i]
+		}
+	}
+	if region == nil || region.Value != "us-east" || len(region.Also) != 0 {
+		t.Errorf("unrelated attribute with equal shares should stay its own row, got %+v", region)
+	}
+}
+
 func TestCompareSpansInvalidInput(t *testing.T) {
 	c := newWindowCore(t, nil, nil, nil)
 
@@ -259,6 +486,7 @@ func TestCompareSpansInvalidInput(t *testing.T) {
 		{"bad slow range", "acme", CompareOpts{Slow: Range{Min: &minMs, Max: &maxMs}}},
 		{"until after since", "acme", CompareOpts{Since: 10, Until: 10}},
 		{"negative until", "acme", CompareOpts{Until: -1}},
+		{"bad span kind", "acme", CompareOpts{SpanKind: "bogus"}},
 	}
 	for _, tc := range cases {
 		_, err := c.CompareSpans(tc.tenant, tc.opts)

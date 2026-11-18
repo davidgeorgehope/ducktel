@@ -132,6 +132,41 @@ func TestCompareSpansToolInvalidInput(t *testing.T) {
 	if !isErr {
 		t.Errorf("until_minutes at since_minutes should be a tool error, got: %s", body)
 	}
+
+	body, isErr = call(t, s, "compare_spans", map[string]any{
+		"tenant": "acme", "span_kind": "bogus",
+	})
+	if !isErr {
+		t.Errorf("an unknown span_kind should be a tool error, got: %s", body)
+	}
+}
+
+func TestCompareSpansToolSpanKindAny(t *testing.T) {
+	s, _ := newCompareServer(t, nil)
+
+	body, isErr := call(t, s, "compare_spans", map[string]any{
+		"tenant": "acme", "service_name": "api", "span_kind": "any",
+		"min_ms": 50, "max_ms": 200,
+	})
+	if isErr {
+		t.Fatalf("compare_spans: %s", body)
+	}
+	var got telemetry.SpanComparison
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("compare_spans is not JSON: %v\n%s", err, body)
+	}
+	if got.SpanKind != "" {
+		t.Errorf("span_kind = %q, want empty for span_kind=any", got.SpanKind)
+	}
+	foundKind := false
+	for _, r := range got.Rows {
+		if r.Key == "span_kind" {
+			foundKind = true
+		}
+	}
+	if !foundKind {
+		t.Errorf("span_kind=any should keep the old kind rows: %+v", got.Rows)
+	}
 }
 
 func TestCompareSpansToolDashboardLink(t *testing.T) {
@@ -140,7 +175,7 @@ func TestCompareSpansToolDashboardLink(t *testing.T) {
 	})
 
 	body, isErr := call(t, s, "compare_spans", map[string]any{
-		"tenant": "acme", "service_name": "api", "since_minutes": 60, "min_ms": 50,
+		"tenant": "acme", "service_name": "api", "span_kind": "any", "since_minutes": 60, "min_ms": 50,
 	})
 	if isErr {
 		t.Fatalf("compare_spans: %s", body)
@@ -148,7 +183,7 @@ func TestCompareSpansToolDashboardLink(t *testing.T) {
 	if !strings.Contains(body, "dashboard_url: http://dash.example#compare?") {
 		t.Errorf("missing compare dashboard link: %s", body)
 	}
-	for _, want := range []string{"tenant=acme", "service_name=api", "since_minutes=60", "min_ms=50"} {
+	for _, want := range []string{"tenant=acme", "service_name=api", "span_kind=any", "since_minutes=60", "min_ms=50"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("link is missing %q: %s", want, body)
 		}

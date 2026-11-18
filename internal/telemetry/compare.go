@@ -28,6 +28,7 @@ const (
 type CompareOpts struct {
 	ServiceName string
 	SpanName    string // optional exact span_name
+	SpanKind    string // optional kind scope; short name, SPAN_KIND_* name, or "any"
 	Filters     []AttrFilter
 	Since       int // minutes, default 60
 	Until       int // minutes before now where the window ends; default 0 (now)
@@ -39,6 +40,9 @@ type CompareOpts struct {
 // do not": the attribute values whose share differs most between the two
 // groups, plus the sizes both shares were computed from.
 type SpanComparison struct {
+	// SpanKind is the kind actually compared, empty when the scope mixed kinds.
+	SpanKind string `json:"span_kind,omitempty"`
+
 	// ThresholdMs is the derived p95 duration when Slow had no bound.
 	ThresholdMs *float64 `json:"threshold_ms,omitempty"`
 	// MinMs and MaxMs are the duration bounds actually used for "slow".
@@ -61,6 +65,37 @@ type CompareRow struct {
 	SlowPct float64 `json:"slow_pct"` // share of slow spans with this value, 0-100, 1 decimal
 	RestPct float64 `json:"rest_pct"`
 	Diff    float64 `json:"diff"` // slow_pct - rest_pct
+	// Also lists the other key=value forms of the same fact this row stands
+	// for, e.g. span_name=... and url.path=... beside http.route.
+	Also []string `json:"also,omitempty"`
+}
+
+// spanKindShort maps the short names a caller is likely to use to the span
+// kind values stored in the trace table.
+var spanKindShort = map[string]string{
+	"server":   "SPAN_KIND_SERVER",
+	"client":   "SPAN_KIND_CLIENT",
+	"internal": "SPAN_KIND_INTERNAL",
+	"producer": "SPAN_KIND_PRODUCER",
+	"consumer": "SPAN_KIND_CONSUMER",
+}
+
+// normalizeSpanKind turns a caller's span_kind into the stored value. The
+// second result reports whether the caller chose a kind explicitly: "any" is
+// explicit (no kind condition), while an empty value lets CompareSpans pick a
+// default.
+func normalizeSpanKind(kind string) (string, bool, error) {
+	k := strings.ToLower(strings.TrimSpace(kind))
+	if k == "" || k == "any" {
+		return "", k == "any", nil
+	}
+	if full, ok := spanKindShort[k]; ok {
+		return full, true, nil
+	}
+	if strings.HasPrefix(k, "span_kind_") {
+		return strings.ToUpper(k), true, nil
+	}
+	return "", false, invalidInput("span_kind %q is not supported; use server, client, internal, producer, consumer, any, or a full SPAN_KIND_* name", kind)
 }
 
 // CompareSpans compares the slow spans of one scope with the rest of that
@@ -75,6 +110,16 @@ func (c *Core) CompareSpans(tenant string, o CompareOpts) (*SpanComparison, erro
 	}
 	if err := o.Slow.validate("slow duration"); err != nil {
 		return nil, err
+	}
+	kind, kindExplicit, err := normalizeSpanKind(o.SpanKind)
+	if err != nil {
+		return nil, err
+	}
+	defaultKind := !kindExplicit && o.SpanName == ""
+	if defaultKind {
+		// A span name already fixes the kind in practice, so only a bare
+		// service scope needs a default.
+		kind = "SPAN_KIND_SERVER"
 	}
 
 	limit := o.Limit
@@ -98,19 +143,41 @@ func (c *Core) CompareSpans(tenant string, o CompareOpts) (*SpanComparison, erro
 	if err != nil {
 		return nil, err
 	}
-	conds := append([]string{"start_time >= ?"}, scopeConds...)
-	params := append([]any{cutoffTime.UnixMicro()}, scopeParams...)
-	if !endTime.IsZero() {
-		conds = append(conds, "start_time < ?")
-		params = append(params, endTime.UnixMicro())
+	buildScope := func(kind string) (string, []any) {
+		conds := append([]string{"start_time >= ?"}, scopeConds...)
+		params := append([]any{cutoffTime.UnixMicro()}, scopeParams...)
+		if !endTime.IsZero() {
+			conds = append(conds, "start_time < ?")
+			params = append(params, endTime.UnixMicro())
+		}
+		if o.SpanName != "" {
+			conds = append(conds, "span_name = ?")
+			params = append(params, o.SpanName)
+		}
+		if kind != "" {
+			conds = append(conds, "span_kind = ?")
+			params = append(params, kind)
+		}
+		return strings.Join(conds, " AND "), params
 	}
-	if o.SpanName != "" {
-		conds = append(conds, "span_name = ?")
-		params = append(params, o.SpanName)
-	}
-	scopeWhere := strings.Join(conds, " AND ")
+	scopeWhere, params := buildScope(kind)
 
-	out := &SpanComparison{Rows: []CompareRow{}}
+	if defaultKind {
+		// A worker with only consumer or internal spans has no server spans at
+		// all. One cheap count detects that; only then drop the default kind,
+		// so the expensive feature query still runs once.
+		q := `SELECT count(*) AS n FROM traces WHERE ` + scopeWhere
+		rows, _, err := c.engine.QuerySince(cutoffTime, q, params...)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 || intVal(rows[0]["n"]) == 0 {
+			kind = ""
+			scopeWhere, params = buildScope(kind)
+		}
+	}
+
+	out := &SpanComparison{Rows: []CompareRow{}, SpanKind: kind}
 
 	slowConds, slowParams := o.Slow.conds("duration_ms")
 	if len(slowConds) == 0 {
@@ -182,6 +249,14 @@ func (c *Core) CompareSpans(tenant string, o CompareOpts) (*SpanComparison, erro
 	// over a million spans.
 	cols := `span_name, status_code, span_kind, attributes, resource_attributes`
 	capRows := strconv.Itoa(compareSampleCap)
+	// With a kind condition every span_kind row would be 100/100, so only the
+	// mixed-kind scope emits them.
+	kindFeature := ""
+	if kind == "" {
+		kindFeature = `
+	    UNION ALL
+	    SELECT slow, 'span_kind', span_kind FROM sampled`
+	}
 	featureQ := `WITH sampled AS (
 	    SELECT *, true AS slow FROM (
 	        SELECT ` + cols + ` FROM traces WHERE ` + scopeWhere + ` AND (` + slowExpr + `)
@@ -193,9 +268,7 @@ func (c *Core) CompareSpans(tenant string, o CompareOpts) (*SpanComparison, erro
 	), features AS (
 	    SELECT slow, 'span_name' AS key, span_name AS value FROM sampled
 	    UNION ALL
-	    SELECT slow, 'status_code', status_code FROM sampled
-	    UNION ALL
-	    SELECT slow, 'span_kind', span_kind FROM sampled
+	    SELECT slow, 'status_code', status_code FROM sampled` + kindFeature + `
 	    UNION ALL
 	    SELECT slow, k AS key,
 	           json_extract_string(attributes, '$."' || replace(k, '"', chr(92) || '"') || '"') AS value
@@ -236,6 +309,7 @@ func (c *Core) CompareSpans(tenant string, o CompareOpts) (*SpanComparison, erro
 		row.Diff = roundPercent(row.SlowPct - row.RestPct)
 		out.Rows = append(out.Rows, row)
 	}
+	out.Rows = collapseRows(out.Rows)
 
 	// Biggest difference first. On an equal magnitude, the value more common
 	// in the slow group comes first: that is the answer to the question, while
@@ -263,3 +337,94 @@ func (c *Core) CompareSpans(tenant string, o CompareOpts) (*SpanComparison, erro
 // roundPercent keeps a share to one decimal, the precision a comparison is
 // read at; more digits suggest a certainty sampling does not have.
 func roundPercent(v float64) float64 { return math.Round(v*10) / 10 }
+
+// compareKeyRank orders keys for the row that represents a collapsed fact:
+// the route is the most specific description, then the name, then the path
+// forms; every other key is alphabetical.
+func compareKeyRank(key string) int {
+	switch key {
+	case "http.route":
+		return 0
+	case "span_name":
+		return 1
+	case "url.path":
+		return 2
+	case "http.target":
+		return 3
+	}
+	return 4
+}
+
+var httpMethods = map[string]bool{
+	"GET": true, "POST": true, "PUT": true, "DELETE": true, "PATCH": true,
+	"HEAD": true, "OPTIONS": true, "TRACE": true, "CONNECT": true,
+}
+
+// stripHTTPMethod removes a leading HTTP method and space, so the route forms
+// with and without the method can be compared.
+func stripHTTPMethod(v string) string {
+	if i := strings.IndexByte(v, ' '); i > 0 && httpMethods[v[:i]] {
+		return v[i+1:]
+	}
+	return v
+}
+
+// sameFact reports whether two values describe the same fact: equal, or the
+// same path once an HTTP method prefix is stripped and one is a suffix of the
+// other (GET /api/orders and /api/orders).
+func sameFact(a, b string) bool {
+	if a == b {
+		return true
+	}
+	a, b = stripHTTPMethod(a), stripHTTPMethod(b)
+	if a == "" || b == "" {
+		return false
+	}
+	return strings.HasSuffix(a, b) || strings.HasSuffix(b, a)
+}
+
+// collapseRows merges rows that state the same fact with the same shares into
+// one row, keeping the key the preference rank likes best and listing the
+// other key=value forms in also. Equal shares alone are not enough: unrelated
+// values stay separate rows.
+func collapseRows(rows []CompareRow) []CompareRow {
+	byShare := make(map[[2]float64][]int, len(rows))
+	for i := range rows {
+		share := [2]float64{rows[i].SlowPct, rows[i].RestPct}
+		byShare[share] = append(byShare[share], i)
+	}
+
+	out := make([]CompareRow, 0, len(rows))
+	for _, idx := range byShare {
+		// Best key first, so the representative is the one preference wants.
+		sort.SliceStable(idx, func(a, b int) bool {
+			ra, rb := compareKeyRank(rows[idx[a]].Key), compareKeyRank(rows[idx[b]].Key)
+			if ra != rb {
+				return ra < rb
+			}
+			return rows[idx[a]].Key < rows[idx[b]].Key
+		})
+		var reps []int // indexes into out
+		for _, i := range idx {
+			merged := false
+			for _, r := range reps {
+				if sameFact(rows[i].Value, out[r].Value) {
+					out[r].Also = append(out[r].Also, rows[i].Key+"="+rows[i].Value)
+					merged = true
+					break
+				}
+			}
+			if !merged {
+				reps = append(reps, len(out))
+				out = append(out, rows[i])
+			}
+		}
+	}
+
+	for i := range out {
+		if len(out[i].Also) > 1 {
+			sort.Strings(out[i].Also)
+		}
+	}
+	return out
+}
