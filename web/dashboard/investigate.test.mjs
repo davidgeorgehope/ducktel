@@ -16,6 +16,7 @@ import {
   matchingPreset,
   apiTimeMs,
   whyActions,
+  splitAtGaps,
 } from "./investigate.js";
 
 const NOW = new Date("2026-01-01T12:00:00.000Z");
@@ -204,4 +205,11 @@ test("whyActions offers only buttons that can narrow the scope", () => {
   assert.deepEqual(whyActions("span_name"), { focus: true, exclude: false });
   assert.deepEqual(whyActions("status_code"), { focus: false, exclude: false });
   assert.deepEqual(whyActions("span_kind"), { focus: false, exclude: false });
+});
+
+test("splitAtGaps breaks a series where steps are missing", () => {
+  const pts = [0, 60, 120, 600, 660].map((t) => ({ t, v: 1 }));
+  assert.deepEqual(splitAtGaps(pts).map((seg) => seg.map((p) => p.t)), [[0, 60, 120], [600, 660]]);
+  assert.deepEqual(splitAtGaps([{ t: 5, v: 1 }]).length, 1);
+  assert.deepEqual(splitAtGaps([]), []);
 });

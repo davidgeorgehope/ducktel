@@ -1111,10 +1111,10 @@ export function slowTable(rows, since, opts) {
     tr.innerHTML = `
       <td>${escapeHtml(fmtTime(r.timestamp))}</td>
       <td>${escapeHtml(fmtValue(r.value, r.unit))}</td>
-      <td>${escapeHtml(request)}</td>
+      <td class="ts-request" title="${escapeHtml(request)}">${escapeHtml(request)}</td>
       <td>${escapeHtml(String(Number(trace.span_count) || 0))}</td>
       <td>${escapeHtml(untraced > 0 ? fmtMs(untraced) : "-")}</td>
-      <td>${escapeHtml(top)}</td>
+      <td class="ts-top" title="${escapeHtml(top)}">${escapeHtml(top)}</td>
       <td>${escapeHtml(String(Number(trace.error_count) || 0))}</td>
       <td class="ts-log" title="${escapeHtml(logText)}">${p ? `<span class="${severityClass(p.severity_text)}">${escapeHtml(p.severity_text || "")}</span> ${escapeHtml(p.body || "")}` : "-"}</td>
       <td>${traceCell(r.trace_id)}</td>`;

@@ -365,7 +365,14 @@ tr.clickable { cursor: pointer; }
   top: 0;
   z-index: 5;
   align-items: center;
+  gap: 8px 14px;
+  padding: 6px 10px;
+  margin-bottom: 12px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
 }
+/* Labels sit beside their control so the whole context fits in one line. */
+.inv-context label { flex-direction: row; align-items: center; gap: 6px; }
+.inv-context input[type="text"] { width: 160px; }
 .inv-presets { display: inline-flex; gap: 4px; }
 .inv-presets button { padding: 3px 8px; font-size: 12px; }
 .inv-presets button.active { border-color: var(--accent); color: var(--accent); }
@@ -438,20 +445,60 @@ tr.clickable { cursor: pointer; }
 .bar-row.selected .bar-track { outline: 1px solid var(--accent); }
 
 .inv-why-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 84px 44px auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
   border-top: 1px solid var(--border);
-  padding: 8px 0;
+  font-size: 12px;
 }
 .inv-why-row:first-of-type { border-top: none; }
-.inv-why-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.inv-why-kv { font-size: 12px; }
-.inv-why-diff { color: var(--accent); font-weight: 600; }
-.inv-why-actions { margin-left: auto; display: flex; gap: 6px; }
-.inv-why-actions button { padding: 2px 8px; font-size: 11px; }
-.inv-why-bar { margin-top: 3px; }
-.inv-why-bar .bar-label { width: 40px; color: var(--muted); }
-.inv-why-bar .bar-track { height: 6px; }
-.inv-why-bar .bar-fill.rest { background: #6aa6f8; }
-.inv-why-also { color: var(--muted); font-size: 11px; margin-top: 3px; }
+.inv-why-kv { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inv-why-also { color: var(--muted); font-size: 11px; }
+.inv-why-bar { display: flex; align-items: center; gap: 4px; }
+.inv-why-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.inv-why-fill { display: block; height: 100%; background: var(--accent); }
+.inv-why-fill.rest { background: #6aa6f8; }
+.inv-why-pct { width: 38px; text-align: right; color: var(--muted); font-size: 11px; }
+.inv-why-diff { color: var(--accent); font-weight: 600; text-align: right; }
+.inv-why-diff.neg { color: #6aa6f8; }
+.inv-why-actions { display: flex; gap: 4px; }
+.inv-why-actions button { padding: 1px 6px; font-size: 11px; }
+.inv-why-legend { display: flex; gap: 12px; color: var(--muted); font-size: 11px; margin: 2px 0 4px; }
+.inv-why-legend i { display: inline-block; width: 10px; height: 6px; border-radius: 2px; background: var(--accent); margin-right: 4px; }
+.inv-why-legend i.rest { background: #6aa6f8; }
 
 #inv-trace-body .waterfall, #inv-logs-body .wf-logs { margin-top: 4px; }
 #inv-trace-body .waterfall { border: none; padding: 0; background: transparent; }
+
+/* Investigate uses the width of a wide screen: the pairs that answer one
+   question together (distribution | why, trace | its logs) sit side by side,
+   and fall back to one column on a narrow screen. */
+.app:has(#tab-investigate:not(.hidden)) { max-width: 1680px; }
+.inv-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.inv-grid > .inv-panel { margin-bottom: 12px; min-width: 0; }
+
+/* One line per request: long routes and log lines are cut, the full text is
+   in the cell's tooltip. */
+#inv-requests-body .data-table td {
+  white-space: nowrap;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#inv-requests-body .data-table td.ts-request { max-width: 360px; }
+#inv-requests-body .inv-more { margin-top: 6px; white-space: nowrap; }
+/* The distribution needs less width than the why rows beside it. */
+.inv-grid-why { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+/* A big trace scrolls inside its panel instead of stretching the page. */
+#inv-trace-body, #inv-logs-body { max-height: 70vh; overflow: auto; }
+#inv-dist-body .bar-label { width: 90px; }
+@media (max-width: 1150px) {
+  .inv-grid, .inv-grid-why { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}

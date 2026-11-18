@@ -63,11 +63,17 @@
       <div id="inv-charts"></div>
     </div>
 
-    <div id="inv-panel-dist" class="inv-panel">
-      <div class="inv-panel-head"><b>Latency distribution</b>
-        <span class="inv-hint">click a bucket to narrow the slow range</span>
+    <div class="inv-grid inv-grid-why">
+      <div id="inv-panel-dist" class="inv-panel">
+        <div class="inv-panel-head"><b>Latency distribution</b>
+          <span class="inv-hint">click a bucket to narrow the slow range</span>
+        </div>
+        <div id="inv-dist-body"></div>
       </div>
-      <div id="inv-dist-body"></div>
+      <div id="inv-panel-why" class="inv-panel">
+        <div class="inv-panel-head"><b>Why</b></div>
+        <div id="inv-why-body"></div>
+      </div>
     </div>
 
     <div id="inv-panel-requests" class="inv-panel">
@@ -75,19 +81,15 @@
       <div id="inv-requests-body"></div>
     </div>
 
-    <div id="inv-panel-trace" class="inv-panel">
-      <div class="inv-panel-head"><b>Trace</b> <span id="inv-trace-head"></span></div>
-      <div id="inv-trace-body"></div>
-    </div>
-
-    <div id="inv-panel-logs" class="inv-panel">
-      <div class="inv-panel-head"><b>Logs of that trace</b></div>
-      <div id="inv-logs-body"></div>
-    </div>
-
-    <div id="inv-panel-why" class="inv-panel">
-      <div class="inv-panel-head"><b>Why</b></div>
-      <div id="inv-why-body"></div>
+    <div class="inv-grid">
+      <div id="inv-panel-trace" class="inv-panel">
+        <div class="inv-panel-head"><b>Trace</b> <span id="inv-trace-head"></span></div>
+        <div id="inv-trace-body"></div>
+      </div>
+      <div id="inv-panel-logs" class="inv-panel">
+        <div class="inv-panel-head"><b>Logs of that trace</b></div>
+        <div id="inv-logs-body"></div>
+      </div>
     </div>
   </section>
 

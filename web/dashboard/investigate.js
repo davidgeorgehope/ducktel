@@ -27,6 +27,8 @@ const PRESET_MINUTES = [60, 360, 1440, 10080];
 const STEP_MINUTES = [1, 5, 15, 60];
 const LATENCY_METRIC_NAMES = ["http.server.request.duration", "http.server.duration"];
 const ERROR_COLUMNS = ["attr.http.response.status_code", "attr.http.status_code"];
+// REQUEST_ROWS is how many requests show before "show all".
+const REQUEST_ROWS = 10;
 const CHART = { w: 320, h: 82, left: 46, right: 8, top: 8, bottom: 8 };
 
 const inv = {
@@ -458,6 +460,22 @@ function errorSeries(rows, column) {
     .sort((a, b) => a.t - b.t);
 }
 
+// splitAtGaps cuts a series where points are missing: a step with no data
+// is a gap, and joining across it would draw hours of silence as a steady
+// line. The step is the smallest spacing between points; a jump over more
+// than 1.5 steps starts a new segment.
+export function splitAtGaps(series) {
+  if (series.length < 2) return series.length ? [series] : [];
+  let step = Infinity;
+  for (let i = 1; i < series.length; i++) step = Math.min(step, series[i].t - series[i - 1].t);
+  const out = [[series[0]]];
+  for (let i = 1; i < series.length; i++) {
+    if (series[i].t - series[i - 1].t > step * 1.5) out.push([]);
+    out[out.length - 1].push(series[i]);
+  }
+  return out;
+}
+
 function chartSVG(series, stroke) {
   const { w, h, left, right, top, bottom } = CHART;
   const fromMs = timeMs(inv.from);
@@ -466,12 +484,16 @@ function chartSVG(series, stroke) {
   const max = Math.max(1, ...series.map((p) => p.v));
   const x = (t) => left + ((t - fromMs) / span) * (w - left - right);
   const y = (v) => h - bottom - (Math.max(0, Math.min(v, max)) / max) * (h - top - bottom);
-  const points = series.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+  // A lone point between gaps has no line to draw, so it gets a dot.
+  const lines = splitAtGaps(series).map((seg) => seg.length === 1
+    ? `<circle cx="${x(seg[0].t).toFixed(1)}" cy="${y(seg[0].v).toFixed(1)}" r="1.6" fill="${stroke}"></circle>`
+    : `<polyline points="${seg.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ")}" fill="none" stroke="${stroke}" stroke-width="1.6" class="inv-line"></polyline>`,
+  ).join("");
   return `<svg class="inv-chart" viewBox="0 0 ${w} ${h}" data-inv-chart="1" aria-label="time series">
     <line x1="${left}" y1="${h - bottom}" x2="${w - right}" y2="${h - bottom}" class="inv-axis-line"></line>
     <text x="4" y="${top + 8}" class="inv-axis-text">${escapeHtml(fmtNum(max))}</text>
     <text x="4" y="${h - bottom}" class="inv-axis-text">0</text>
-    <polyline points="${points}" fill="none" stroke="${stroke}" stroke-width="1.6" class="inv-line"></polyline>
+    ${lines}
     <rect class="inv-sel-rect" x="0" y="${top}" width="0" height="${h - top - bottom}"></rect>
   </svg>`;
 }
@@ -710,8 +732,22 @@ function renderRequestsPanel() {
       (inv.minMs !== null || inv.maxMs !== null
         ? ` · <button type="button" class="secondary inv-link-btn" data-all-spans="1">all spans in this range</button>`
         : "");
+    // The first rows answer the question; the rest stay one click away so
+    // the table does not push the trace and logs off the screen.
+    const shown = rows.length > REQUEST_ROWS ? rows.slice(0, REQUEST_ROWS) : rows;
     body.innerHTML = "";
-    body.appendChild(slowTable(rows, String(win.sinceMinutes), { onTraceClick: selectTrace }));
+    body.appendChild(slowTable(shown, String(win.sinceMinutes), { onTraceClick: selectTrace }));
+    if (shown.length < rows.length) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "secondary inv-link-btn inv-more";
+      more.textContent = `show all ${rows.length}`;
+      more.addEventListener("click", () => {
+        body.innerHTML = "";
+        body.appendChild(slowTable(rows, String(win.sinceMinutes), { onTraceClick: selectTrace }));
+      });
+      body.appendChild(more);
+    }
     const link = head.querySelector("button[data-all-spans]");
     if (link) link.addEventListener("click", () => renderAllSpans(win));
   })();
@@ -889,26 +925,21 @@ export function whyActions(key) {
 function whyRowMarkup(row, i) {
   const also = Array.isArray(row.also) ? row.also : [];
   const act = whyActions(row.key);
+  const kv = `${row.key}=${row.value}`;
+  // One line per value: the full text and the other forms of the same fact
+  // live in the tooltip, so long values (user agents, routes) cannot push the
+  // bars onto extra lines.
+  const tip = also.length ? `${kv}\nalso: ${also.join(", ")}` : kv;
+  const diffClass = Number(row.diff) >= 0 ? "inv-why-diff" : "inv-why-diff neg";
   return `<div class="inv-why-row">
-    <div class="inv-why-top">
-      <span class="inv-why-kv mono">${escapeHtml(row.key)}=${escapeHtml(row.value)}</span>
-      <span class="inv-why-diff">${escapeHtml(signed(row.diff))}</span>
-      <span class="inv-why-actions">
-        ${act.focus ? `<button type="button" class="secondary" data-why-act="focus" data-why-i="${i}">focus</button>` : ""}
-        ${act.exclude ? `<button type="button" class="secondary" data-why-act="exclude" data-why-i="${i}">exclude</button>` : ""}
-      </span>
-    </div>
-    <div class="bar-row inv-why-bar">
-      <div class="bar-label">slow</div>
-      <div class="bar-track"><div class="bar-fill" style="width:${pctWidth(row.slow_pct)}"></div></div>
-      <div class="bar-value">${escapeHtml(fmtNum(row.slow_pct))}%</div>
-    </div>
-    <div class="bar-row inv-why-bar">
-      <div class="bar-label">rest</div>
-      <div class="bar-track"><div class="bar-fill rest" style="width:${pctWidth(row.rest_pct)}"></div></div>
-      <div class="bar-value">${escapeHtml(fmtNum(row.rest_pct))}%</div>
-    </div>
-    ${also.length ? `<div class="inv-why-also">also: ${escapeHtml(also.join(", "))}</div>` : ""}
+    <span class="inv-why-kv mono" title="${escapeHtml(tip)}">${escapeHtml(kv)}${also.length ? ` <span class="inv-why-also">+${also.length}</span>` : ""}</span>
+    <span class="inv-why-bar" title="slow ${escapeHtml(fmtNum(row.slow_pct))}%"><span class="inv-why-track"><span class="inv-why-fill" style="width:${pctWidth(row.slow_pct)}"></span></span><span class="inv-why-pct">${escapeHtml(fmtNum(row.slow_pct))}%</span></span>
+    <span class="inv-why-bar" title="rest ${escapeHtml(fmtNum(row.rest_pct))}%"><span class="inv-why-track"><span class="inv-why-fill rest" style="width:${pctWidth(row.rest_pct)}"></span></span><span class="inv-why-pct">${escapeHtml(fmtNum(row.rest_pct))}%</span></span>
+    <span class="${diffClass}">${escapeHtml(signed(row.diff))}</span>
+    <span class="inv-why-actions">
+      ${act.focus ? `<button type="button" class="secondary" data-why-act="focus" data-why-i="${i}" title="only spans with this value">focus</button>` : ""}
+      ${act.exclude ? `<button type="button" class="secondary" data-why-act="exclude" data-why-i="${i}" title="drop spans with this value">exclude</button>` : ""}
+    </span>
   </div>`;
 }
 
@@ -951,6 +982,7 @@ function renderWhyPanel() {
       `sampled ${cmp.sampled ? "yes" : "no"}`,
     ];
     let html = `<div class="dist-head"><b>slow vs rest</b> · ${escapeHtml(bits.join(" · "))}</div>`;
+    html += `<div class="inv-why-legend"><span><i></i>share among slow</span><span><i class="rest"></i>share among the rest</span><span>diff = slow - rest, points</span></div>`;
     if (!slowN || !restN) {
       body.innerHTML = html + `<div class="empty">nothing to compare: one group is empty</div>`;
       return;
