@@ -172,7 +172,8 @@ func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, s
 	if since <= 0 {
 		since = 60
 	}
-	cutoff := time.Now().Add(-time.Duration(since) * time.Minute).UnixMicro()
+	cutoffTime := time.Now().Add(-time.Duration(since) * time.Minute)
+	cutoff := cutoffTime.UnixMicro()
 
 	conds := []string{"start_time >= ?", c.tenantPredicate()}
 	params := []any{cutoff, tenant}
@@ -206,7 +207,7 @@ func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, s
 	      ORDER BY start_time DESC
 	      LIMIT ?`
 
-	return c.engine.Query(q, params...)
+	return c.engine.QuerySince(cutoffTime, q, params...)
 }
 
 // SearchLogs finds log records matching filters, scoped to tenant — the
@@ -242,9 +243,11 @@ func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string,
 	if since <= 0 && traceID == "" {
 		since = 60
 	}
+	var cutoffTime time.Time
 	if since > 0 {
+		cutoffTime = time.Now().Add(-time.Duration(since) * time.Minute)
 		conds = append(conds, "timestamp >= ?")
-		params = append(params, time.Now().Add(-time.Duration(since)*time.Minute).UnixMicro())
+		params = append(params, cutoffTime.UnixMicro())
 	}
 
 	if traceID != "" {
@@ -283,7 +286,12 @@ func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string,
 	      ORDER BY timestamp DESC
 	      LIMIT ?`
 
-	return c.engine.Query(q, params...)
+	if cutoffTime.IsZero() {
+		// No time window (trace-scoped lookup without since): every file may
+		// hold a matching row.
+		return c.engine.Query(q, params...)
+	}
+	return c.engine.QuerySince(cutoffTime, q, params...)
 }
 
 // metricGroupKeys splits a group_by string into individual keys: comma-
@@ -392,7 +400,8 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	if since <= 0 {
 		since = 60
 	}
-	cutoff := time.Now().Add(-time.Duration(since) * time.Minute).UnixMicro()
+	cutoffTime := time.Now().Add(-time.Duration(since) * time.Minute)
+	cutoff := cutoffTime.UnixMicro()
 
 	selectCols := []string{}
 	var groupExprs, groupAliases []string
@@ -428,12 +437,12 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	}
 
 	if strings.EqualFold(aggregation, "exemplars") {
-		return c.queryExemplars(groupExprs, groupAliases, strings.Join(conds, " AND "), params, opts)
+		return c.queryExemplars(groupExprs, groupAliases, strings.Join(conds, " AND "), params, cutoffTime, opts)
 	}
 
 	// A histogram keeps its data in count/sum/bucket_counts, not value_double;
 	// the most recent point decides which path aggregates this metric.
-	typeRows, _, err := c.engine.Query(`SELECT metric_type FROM metrics WHERE `+
+	typeRows, _, err := c.engine.QuerySince(cutoffTime, `SELECT metric_type FROM metrics WHERE `+
 		strings.Join(conds, " AND ")+` ORDER BY timestamp DESC LIMIT 1`, params...)
 	if err != nil {
 		return nil, nil, err
@@ -447,7 +456,7 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	if len(typeRows) == 1 {
 		if mt, _ := typeRows[0]["metric_type"].(string); mt == typeHistogram || mt == typeExpHistogram {
 			hconds := strings.Join(append(conds, "metric_type = ?"), " AND ")
-			return c.queryHistogram(mt, aggregation, groupExprs, groupAliases, hconds, append(params, mt), cutoff)
+			return c.queryHistogram(mt, aggregation, groupExprs, groupAliases, hconds, append(params, mt), cutoffTime)
 		}
 	}
 
@@ -471,7 +480,7 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 		q += " GROUP BY " + strings.Join(positions, ", ") + " ORDER BY 1"
 	}
 
-	return c.engine.Query(q, params...)
+	return c.engine.QuerySince(cutoffTime, q, params...)
 }
 
 // discoveryTTL is how long a List* result is reused. Every page load (and

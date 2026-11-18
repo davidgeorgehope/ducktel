@@ -3,11 +3,14 @@ package query
 import (
 	"database/sql"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/marcboeker/go-duckdb"
 )
@@ -111,12 +114,20 @@ func Open(dataDir string) (*Engine, error) {
 	return e, nil
 }
 
-// CreateViews (re)derives the signal views from the Parquet files currently on
-// disk. DuckDB resolves a read_parquet glob when the view is created, so views
-// must be re-derived to observe files written afterwards. See refresh in Query:
-// without it an engine opened before any data existed kept a placeholder
+// CreateViews (re)derives the signal views from every Parquet file currently on
+// disk. DuckDB resolves a read_parquet file list when the view is created, so
+// views must be re-derived to observe files written afterwards. See refresh in
+// Query: without it an engine opened before any data existed kept a placeholder
 // `WHERE false` view and returned zero rows forever.
 func (e *Engine) CreateViews() error {
+	return e.createViews(time.Time{})
+}
+
+// createViews (re)derives the signal views from the Parquet files a query with
+// the given lower bound can read. A zero since means every file; otherwise
+// selectFiles drops day directories and early hours that cannot contain a row
+// at or after since.
+func (e *Engine) createViews(since time.Time) error {
 	views := []struct {
 		name      string
 		signal    string
@@ -162,37 +173,229 @@ func (e *Engine) CreateViews() error {
 	}
 
 	for _, v := range views {
-		glob := filepath.Join(e.dataDir, v.signal, "**", "*.parquet")
-		q := fmt.Sprintf(`CREATE OR REPLACE VIEW %s AS SELECT * FROM read_parquet('%s', union_by_name=true)`, v.name, glob)
-		if _, err := e.db.Exec(q); err != nil {
-			// A glob that matches no files justifies the empty placeholder
-			// view. Anything else must NOT be swallowed: silently replacing a
-			// working view with the empty one made every later query return a
-			// well-formed empty result for data that exists — wrong answers
-			// indistinguishable from "no data" (observed live as a trace
-			// lookup alternating rows:[] / rows:[span] while a concurrent
-			// query was re-deriving the views). Confirm the glob is really
-			// empty, then fall back or report.
-			var matched int64
-			if gerr := e.db.QueryRow(fmt.Sprintf("SELECT count(*) FROM glob('%s')", glob)).Scan(&matched); gerr != nil {
-				return fmt.Errorf("creating %s view: %w (glob check also failed: %v)", v.name, err, gerr)
-			}
-			if matched > 0 {
-				return fmt.Errorf("creating %s view from %d matched file(s): %w", v.name, matched, err)
-			}
+		files, err := selectFiles(filepath.Join(e.dataDir, v.signal), since)
+		if err != nil {
+			return fmt.Errorf("selecting %s files: %w", v.name, err)
+		}
+		if len(files) == 0 {
+			// No file can contain a matching row (or the signal has no data
+			// yet), so the empty placeholder is the correct view.
 			empty := fmt.Sprintf(`CREATE OR REPLACE VIEW %s AS SELECT %s WHERE false`, v.name, v.emptyCols)
-			if _, err2 := e.db.Exec(empty); err2 != nil {
-				return fmt.Errorf("creating empty %s view: %w", v.name, err2)
+			if _, err := e.db.Exec(empty); err != nil {
+				return fmt.Errorf("creating empty %s view: %w", v.name, err)
 			}
+			continue
+		}
+
+		// The placeholder is appended even when files exist, and pruned and
+		// unbounded views both get it, so the view always exposes the full
+		// column set. A pruned set can lack a column an older or newer file
+		// has; without the placeholder a query on that column would fail
+		// with "column not found" depending on which files were selected.
+		q := fmt.Sprintf(
+			`CREATE OR REPLACE VIEW %s AS SELECT * FROM read_parquet([%s], union_by_name=true) UNION ALL BY NAME SELECT %s WHERE false`,
+			v.name, quotePaths(files), v.emptyCols)
+		if _, err := e.db.Exec(q); err != nil {
+			// A failure while files exist must NOT be swallowed: silently
+			// replacing a working view with the empty one made every later
+			// query return a well-formed empty result for data that exists —
+			// wrong answers indistinguishable from "no data" (observed live
+			// as a trace lookup alternating rows:[] / rows:[span] while a
+			// concurrent query was re-deriving the views).
+			return fmt.Errorf("creating %s view from %d file(s): %w", v.name, len(files), err)
 		}
 	}
 	return nil
 }
 
+// quotePaths renders paths as a DuckDB list of SQL string literals. Paths are
+// not identifiers and cannot be bound as placeholders in read_parquet's table
+// argument, so only the string literal escaping applies: a single quote is
+// doubled.
+func quotePaths(paths []string) string {
+	quoted := make([]string, len(paths))
+	for i, p := range paths {
+		quoted[i] = "'" + strings.ReplaceAll(p, "'", "''") + "'"
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// selectFiles lists the Parquet files under signalDir that can hold a row at
+// or after since. A zero since lists every parquet file, matching what the old
+// `<signal>/**/*.parquet` glob read.
+//
+// A time-bounded query is served from a subset. Writer names encode the UTC
+// hour a flush started in, and rows are buffered before that flush, so a row
+// with timestamp >= since can be a little older than since in wall-clock terms.
+// Sender clocks may also be ahead of ours. b = since - 1h is generous slack for
+// both: a row at or after since lands in a file named at or after b.
+//
+// Under that bound: day directories before b's date are skipped; b's own date
+// keeps day.parquet, its hour files and per-flush files at or after b's hour,
+// and any unrecognised parquet name; later dates are kept whole. Dot files
+// (.tmp-* in-flight writes) are never selected. Directories whose names are
+// not dates are outside the compaction layout, so their files are always kept.
+func selectFiles(signalDir string, since time.Time) ([]string, error) {
+	var files []string
+
+	var b, bDay time.Time
+	if !since.IsZero() {
+		b = since.UTC().Add(-time.Hour)
+		bDay = time.Date(b.Year(), b.Month(), b.Day(), 0, 0, 0, 0, time.UTC)
+	}
+
+	err := filepath.WalkDir(signalDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if since.IsZero() || path == signalDir {
+				return nil
+			}
+			rel, err := filepath.Rel(signalDir, path)
+			if err != nil {
+				return err
+			}
+			parts := strings.Split(rel, string(os.PathSeparator))
+			day, err := time.ParseInLocation("2006-01-02", parts[0], time.UTC)
+			if err == nil && day.Before(bDay) {
+				// An old day directory: nothing in it can be selected, so do
+				// not even list its files.
+				return fs.SkipDir
+			}
+			return nil
+		}
+		base := d.Name()
+		if strings.HasPrefix(base, ".") || !strings.HasSuffix(base, ".parquet") {
+			return nil
+		}
+		if since.IsZero() {
+			files = append(files, path)
+			return nil
+		}
+
+		rel, err := filepath.Rel(signalDir, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(rel, string(os.PathSeparator))
+		if len(parts) < 2 {
+			// Directly in the signal directory: no date information, keep it.
+			files = append(files, path)
+			return nil
+		}
+		day, err := time.ParseInLocation("2006-01-02", parts[0], time.UTC)
+		if err != nil {
+			// Not a date-shaped directory: outside the retention/compaction
+			// layout, so the glob would have included it. Keep it.
+			files = append(files, path)
+			return nil
+		}
+		switch {
+		case day.Before(bDay):
+			return nil
+		case day.After(bDay):
+			files = append(files, path)
+			return nil
+		}
+		if len(parts) > 2 {
+			// An unknown nested directory inside a date directory: keep it
+			// rather than guess at a layout the writer never creates.
+			files = append(files, path)
+			return nil
+		}
+		if keepInDayDir(base, b.Hour()) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("listing parquet files under %s: %w", signalDir, err)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// keepInDayDir reports whether base, a file directly inside b's day
+// directory, may hold a row at or after the bound hour. day.parquet is a merge
+// of the whole day and unknown names are kept: a name this code does not
+// recognise must never cause data to be dropped.
+func keepInDayDir(base string, boundHour int) bool {
+	if base == "day.parquet" {
+		return true
+	}
+	if hour, ok := hourFileHour(base); ok {
+		return hour >= boundHour
+	}
+	if hour, ok := flushFileHour(base); ok {
+		return hour >= boundHour
+	}
+	return true
+}
+
+// hourFileHour returns the hour encoded in an HH.parquet merged-hour name.
+func hourFileHour(base string) (int, bool) {
+	if len(base) != len("00.parquet") || !strings.HasSuffix(base, ".parquet") || !isTwoDigits(base[:2]) {
+		return 0, false
+	}
+	hour, _ := strconv.Atoi(base[:2])
+	if hour > 23 {
+		return 0, false
+	}
+	return hour, true
+}
+
+// flushFileHour returns the hour encoded in a per-flush HH-MM[-n].parquet
+// name, and false for anything else (hour files, day.parquet, unknown names).
+func flushFileHour(base string) (int, bool) {
+	rest, ok := strings.CutSuffix(base, ".parquet")
+	if !ok || len(rest) < len("00-00") || rest[2] != '-' {
+		return 0, false
+	}
+	if !isTwoDigits(rest[:2]) || !isTwoDigits(rest[3:5]) {
+		return 0, false
+	}
+	if len(rest) > len("00-00") {
+		// The collision counter suffix: -n with one or more digits.
+		if rest[5] != '-' || len(rest) == 6 {
+			return 0, false
+		}
+		if _, err := strconv.Atoi(rest[6:]); err != nil {
+			return 0, false
+		}
+	}
+	hour, _ := strconv.Atoi(rest[:2])
+	if hour > 23 {
+		return 0, false
+	}
+	return hour, true
+}
+
+func isTwoDigits(s string) bool {
+	return len(s) == 2 && s[0] >= '0' && s[0] <= '9' && s[1] >= '0' && s[1] <= '9'
+}
+
 // Query executes SQL with optional bound parameters. Values passed in args are
 // sent to DuckDB as placeholders (?) rather than interpolated into the SQL
-// string, which prevents SQL injection from caller-supplied values.
+// string, which prevents SQL injection from caller-supplied values. It is the
+// unbounded form: every Parquet file is visible.
 func (e *Engine) Query(sqlStr string, args ...interface{}) ([]map[string]interface{}, []string, error) {
+	return e.query(time.Time{}, sqlStr, args...)
+}
+
+// QuerySince executes SQL like Query, but derives the signal views from only
+// the Parquet files that can hold a row at or after since. An unbounded or
+// zero since falls back to Query's behaviour. The caller's SQL still carries
+// its own time predicate; this only narrows which files are opened.
+func (e *Engine) QuerySince(since time.Time, sqlStr string, args ...any) ([]map[string]interface{}, []string, error) {
+	return e.query(since, sqlStr, args...)
+}
+
+// query is the shared implementation of Query and QuerySince.
+func (e *Engine) query(since time.Time, sqlStr string, args ...any) ([]map[string]interface{}, []string, error) {
 	// The refresh and the query are one critical section: two requests
 	// interleaving their CREATE OR REPLACE VIEW statements used to leave one
 	// of them querying a view mid-replacement, and its lost race surfaced as
@@ -201,8 +404,8 @@ func (e *Engine) Query(sqlStr string, args ...interface{}) ([]map[string]interfa
 	defer e.mu.Unlock()
 
 	// Re-derive the views so the query sees Parquet files written since the
-	// engine was opened. Cheap: DuckDB resolves the glob at view creation.
-	if err := e.CreateViews(); err != nil {
+	// engine was opened. Cheap: the file list is resolved at view creation.
+	if err := e.createViews(since); err != nil {
 		return nil, nil, fmt.Errorf("refreshing views: %w", err)
 	}
 

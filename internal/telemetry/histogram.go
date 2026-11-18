@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Histogram support for QueryMetric.
@@ -77,7 +78,7 @@ func histogramDeltasCTE(groupExprs []string, conds string) string {
 // queryHistogram aggregates histogram points. groupExprs/aliases are the
 // resolved group_by keys; conds/params the WHERE clause (already including
 // the metric type predicate).
-func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliases []string, conds string, params []any, cutoff int64) ([]map[string]any, []string, error) {
+func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliases []string, conds string, params []any, cutoff time.Time) ([]map[string]any, []string, error) {
 	agg := strings.ToLower(aggregation)
 	var q float64
 	switch agg {
@@ -91,7 +92,7 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 		return nil, nil, invalidInput("aggregation %q is not supported; use one of: avg, sum, min, max, count, p50, p95, p99, buckets, exemplars", aggregation)
 	}
 
-	params = append(params, temporalityCumulative, cutoff)
+	params = append(params, temporalityCumulative, cutoff.UnixMicro())
 	cte := histogramDeltasCTE(groupExprs, conds)
 
 	gcols := make([]string, len(groupExprs))
@@ -133,7 +134,7 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 		case "max":
 			expr = "max(mx) FILTER (WHERE c > 0 AND (mn <> 0 OR mx <> 0))"
 		}
-		rows, _, err := c.engine.Query(cte+"SELECT "+gsel+expr+" AS value FROM d"+gby, params...)
+		rows, _, err := c.engine.QuerySince(cutoff, cte+"SELECT "+gsel+expr+" AS value FROM d"+gby, params...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -147,7 +148,7 @@ func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliase
 	FROM d WHERE db IS NOT NULL
 )
 SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i`
-	rows, _, err := c.engine.Query(bq, params...)
+	rows, _, err := c.engine.QuerySince(cutoff, bq, params...)
 	if err != nil {
 		return nil, nil, err
 	}
