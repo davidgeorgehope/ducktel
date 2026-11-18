@@ -60,6 +60,15 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 	}, s.spanSearch)
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "compare_spans",
+		Description: "Why are the slow spans different? Compares spans in a duration range (default: " +
+			"slower than the scope's p95) with the rest of the same scope (service, span name, attribute " +
+			"filters, time window) and returns the attribute values whose share differs most, biggest " +
+			"difference first: e.g. cache=miss in 90% of slow spans vs 5% of the rest. " +
+			"One call; follow up with slow_requests or span_search narrowed by the top value.",
+	}, s.compareSpans)
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "log_search",
 		Description: "Find log records matching filters within a time range, newest first. " +
 			"Use this for what a service actually logged — error messages, warnings, " +
@@ -200,6 +209,42 @@ func (s *Server) spanSearch(ctx context.Context, req *sdkmcp.CallToolRequest, ar
 		return errResult(err.Error())
 	}
 	return withLink(rows, cols, s.spanLink(tenant, args))
+}
+
+// --- compare_spans ---
+
+type compareSpansArgs struct {
+	Tenant       string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
+	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
+	SpanName     string       `json:"span_name,omitempty" jsonschema:"optional exact span_name to match"`
+	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together), against span attributes or resource attributes. Omit to compare all spans in the time range."`
+	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to look, in minutes. Default 60."`
+	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
+	MinMs        *float64     `json:"min_ms,omitempty" jsonschema:"the slow group is spans lasting at least this many milliseconds (inclusive). Omit min_ms and max_ms to use the scope's p95 duration instead."`
+	MaxMs        *float64     `json:"max_ms,omitempty" jsonschema:"the slow group is spans lasting at most this many milliseconds (inclusive). With min_ms, e.g. one histogram bucket's bounds; omit both to use the scope's p95."`
+	Limit        int          `json:"limit,omitempty" jsonschema:"maximum comparison rows to return, default 15, cap 50"`
+}
+
+func (s *Server) compareSpans(ctx context.Context, req *sdkmcp.CallToolRequest, args compareSpansArgs) (*sdkmcp.CallToolResult, any, error) {
+	filters := make([]telemetry.AttrFilter, len(args.Filters))
+	for i, f := range args.Filters {
+		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value}
+	}
+
+	tenant := args.Tenant
+	cmp, err := s.core.CompareSpans(tenant, telemetry.CompareOpts{
+		ServiceName: args.ServiceName,
+		SpanName:    args.SpanName,
+		Filters:     filters,
+		Since:       args.SinceMinutes,
+		Until:       args.UntilMinutes,
+		Slow:        telemetry.Range{Min: args.MinMs, Max: args.MaxMs},
+		Limit:       args.Limit,
+	})
+	if err != nil {
+		return errResult(err.Error())
+	}
+	return jsonResult(cmp, s.compareLink(tenant, args))
 }
 
 // --- log_search ---

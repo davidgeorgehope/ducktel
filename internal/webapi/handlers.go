@@ -41,6 +41,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/traces/{trace_id}", auth(h.handleLookupTrace))
 	mux.Handle("GET /api/traces/{trace_id}/summary", auth(h.handleTraceSummary))
 	mux.Handle("GET /api/slow", auth(h.handleSlowRequests))
+	mux.Handle("GET /api/compare", auth(h.handleCompareSpans))
 	mux.Handle("GET /api/logs", auth(h.handleSearchLogs))
 	mux.Handle("GET /api/metrics", auth(h.handleQueryMetric))
 	mux.Handle("GET /api/tenants", auth(h.handleListTenants))
@@ -239,6 +240,37 @@ func (h *Handlers) handleSlowRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, rows)
+}
+
+// handleCompareSpans is the REST form of the compare_spans MCP tool: the
+// same scope and slow range, the same SpanComparison body.
+func (h *Handlers) handleCompareSpans(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	filters, ok := queryFilters(w, r)
+	if !ok {
+		return
+	}
+
+	slow, ok := queryRange(w, r, "min_ms", "max_ms")
+	if !ok {
+		return
+	}
+
+	cmp, err := h.core.CompareSpans(q.Get("tenant"), telemetry.CompareOpts{
+		ServiceName: q.Get("service_name"),
+		SpanName:    q.Get("span_name"),
+		Filters:     filters,
+		Since:       queryInt(r, "since_minutes", 0),
+		Until:       queryInt(r, "until_minutes", 0),
+		Slow:        slow,
+		Limit:       queryInt(r, "limit", 0),
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, cmp)
 }
 
 // metricParamsHelp is the 400 body for /api/metrics without its required
