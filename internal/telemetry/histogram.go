@@ -187,7 +187,21 @@ SELECT ` + gsel + `bounds, i, sum(v) AS v FROM bk GROUP BY ` + gsel + `bounds, i
 		}
 		g.buckets = append(g.buckets, bucket{lo: lo, hi: hi, n: toFloat(r["v"])})
 	}
-	sort.Strings(order)
+	// The query has no ORDER BY because the groups are assembled in Go. When
+	// time leads the group keys it must sort numerically (a string sort would
+	// rely on every timestamp having the same width), then by the remaining
+	// group values.
+	if len(aliases) > 0 && aliases[0] == "time" {
+		sort.SliceStable(order, func(i, j int) bool {
+			a, b := groups[order[i]], groups[order[j]]
+			if ta, tb := toFloat(a.vals[0]), toFloat(b.vals[0]); ta != tb {
+				return ta < tb
+			}
+			return fmt.Sprint(a.vals[1:]) < fmt.Sprint(b.vals[1:])
+		})
+	} else {
+		sort.Strings(order)
+	}
 
 	if q < 0 {
 		return bucketRows(order, func(k string) ([]any, []bucket) { return groups[k].vals, groups[k].buckets }, aliases)

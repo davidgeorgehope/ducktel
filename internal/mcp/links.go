@@ -131,6 +131,7 @@ func (s *Server) metricLink(tenant string, a metricQueryArgs) string {
 	p.Set("aggregation", a.Aggregation)
 	setInt(p, "since_minutes", a.SinceMinutes)
 	setIf(p, "group_by", a.GroupBy)
+	setIf(p, "step", a.Step)
 	addFilters(p, a.Filters)
 	setFloat(p, "min_value", a.MinValue)
 	setFloat(p, "max_value", a.MaxValue)

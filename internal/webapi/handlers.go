@@ -246,7 +246,8 @@ const metricParamsHelp = "metric_name and aggregation are required. Parameters: 
 	"metric_name (required; see /api/metric-names), " +
 	"aggregation (required: avg, sum, min, max, count, p50, p95, p99, exemplars; buckets for histograms), " +
 	"tenant, since_minutes (default 60), " +
-	"group_by (comma-separated columns or attr.<key>), " +
+	"group_by (comma-separated columns, attr.<key> data-point attributes, or resource.<key> resource attributes), " +
+	"step (optional time series: 30s, 1m, 5m, 1h or whole seconds; adds a time column), " +
 	"filter=key:value (repeatable), " +
 	"min_value, max_value, limit (exemplars only)"
 
@@ -272,7 +273,7 @@ func (h *Handlers) handleQueryMetric(w http.ResponseWriter, r *http.Request) {
 	rows, cols, err := h.core.QueryMetricWith(
 		q.Get("tenant"), q.Get("metric_name"), q.Get("aggregation"),
 		queryInt(r, "since_minutes", 0), q.Get("group_by"), filters,
-		telemetry.MetricOpts{Value: val, Limit: queryInt(r, "limit", 0)},
+		telemetry.MetricOpts{Value: val, Limit: queryInt(r, "limit", 0), Step: q.Get("step")},
 	)
 	if err != nil {
 		writeErr(w, err)
