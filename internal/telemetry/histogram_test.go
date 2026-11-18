@@ -163,6 +163,37 @@ func TestExponentialHistogram(t *testing.T) {
 	}
 }
 
+// TestHistogramOlderThanProbeWindow pins the metric_type probe fallback: the
+// recent probe window (the last hour) finds nothing, so the full requested
+// window must still decide that this is a histogram. Otherwise count would
+// fall through to count(*) of points (1) instead of observations (7).
+func TestHistogramOlderThanProbeWindow(t *testing.T) {
+	dir := t.TempDir()
+	w := writer.New(dir, time.Hour, 1000)
+	now := time.Now()
+	w.AddMetrics([]writer.MetricPoint{
+		histPoint("/old", deltaTemporality, now.Add(-3*time.Hour), now.Add(-90*time.Minute), 7, 70, "[7,0,0]"),
+	})
+	if err := w.Flush(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	engine, err := query.Open(dir)
+	if err != nil {
+		t.Fatalf("opening engine: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	c := NewCore(engine)
+
+	rows, _, err := c.QueryMetric("acme", "http.server.duration", "count", 180, "", nil)
+	if err != nil {
+		t.Fatalf("count over a 3h window: %v", err)
+	}
+	if len(rows) != 1 || toFloat(rows[0]["value"]) != 7 {
+		t.Errorf("count = %v, want one row with 7 (the old histogram was aggregated as a gauge)", rows)
+	}
+}
+
 func TestHistogramOtherTenantSeesNothing(t *testing.T) {
 	c := newHistogramCore(t)
 	rows, _, err := c.QueryMetric("globex", "http.server.duration", "count", 60, "", nil)

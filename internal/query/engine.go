@@ -40,6 +40,25 @@ type Engine struct {
 	// with each other, and one losing that race used to swap the signal view
 	// for the empty fallback — rows:[] at HTTP 200 for data that exists.
 	mu sync.Mutex
+
+	// builtFrom remembers the exact file list (path, size, mtime) each view
+	// was last created from. Re-running CREATE OR REPLACE VIEW over hundreds
+	// of files was a large share of every query; an unchanged list means the
+	// existing view already reads the same files. Guarded by mu.
+	builtFrom map[string][]fileStamp
+	// viewBuilds counts executed CREATE OR REPLACE VIEW statements. It is
+	// unexported and only read by tests, to prove an unchanged file set does
+	// not rebuild.
+	viewBuilds int
+}
+
+// fileStamp identifies one Parquet file as the view should see it. Size and
+// mtime catch an in-place rewrite under the same name, which a path-only
+// comparison would miss (day.parquet and HH.parquet are compacted in place).
+type fileStamp struct {
+	path  string
+	size  int64
+	mtime int64
 }
 
 // cgroupMemoryFiles are the paths read to detect a container memory limit —
@@ -106,7 +125,7 @@ func Open(dataDir string) (*Engine, error) {
 		}
 	}
 
-	e := &Engine{db: db, dataDir: dataDir}
+	e := &Engine{db: db, dataDir: dataDir, builtFrom: make(map[string][]fileStamp)}
 	if err := e.CreateViews(); err != nil {
 		db.Close()
 		return nil, err
@@ -177,13 +196,21 @@ func (e *Engine) createViews(since time.Time) error {
 		if err != nil {
 			return fmt.Errorf("selecting %s files: %w", v.name, err)
 		}
-		if len(files) == 0 {
+		stamps, err := stampFiles(files)
+		if err != nil {
+			return fmt.Errorf("stamping %s files: %w", v.name, err)
+		}
+		if e.viewUnchanged(v.name, stamps) {
+			continue
+		}
+		if len(stamps) == 0 {
 			// No file can contain a matching row (or the signal has no data
 			// yet), so the empty placeholder is the correct view.
 			empty := fmt.Sprintf(`CREATE OR REPLACE VIEW %s AS SELECT %s WHERE false`, v.name, v.emptyCols)
 			if _, err := e.db.Exec(empty); err != nil {
 				return fmt.Errorf("creating empty %s view: %w", v.name, err)
 			}
+			e.rememberView(v.name, stamps)
 			continue
 		}
 
@@ -194,7 +221,7 @@ func (e *Engine) createViews(since time.Time) error {
 		// with "column not found" depending on which files were selected.
 		q := fmt.Sprintf(
 			`CREATE OR REPLACE VIEW %s AS SELECT * FROM read_parquet([%s], union_by_name=true) UNION ALL BY NAME SELECT %s WHERE false`,
-			v.name, quotePaths(files), v.emptyCols)
+			v.name, quotePaths(stampPaths(stamps)), v.emptyCols)
 		if _, err := e.db.Exec(q); err != nil {
 			// A failure while files exist must NOT be swallowed: silently
 			// replacing a working view with the empty one made every later
@@ -202,10 +229,65 @@ func (e *Engine) createViews(since time.Time) error {
 			// wrong answers indistinguishable from "no data" (observed live
 			// as a trace lookup alternating rows:[] / rows:[span] while a
 			// concurrent query was re-deriving the views).
-			return fmt.Errorf("creating %s view from %d file(s): %w", v.name, len(files), err)
+			return fmt.Errorf("creating %s view from %d file(s): %w", v.name, len(stamps), err)
 		}
+		e.rememberView(v.name, stamps)
 	}
 	return nil
+}
+
+// stampFiles captures the identity of each selected file. A file that vanished
+// between listing and stat cannot contribute rows any more, so it is dropped
+// rather than failing the query: compaction deletes per-flush files from under
+// a running engine.
+func stampFiles(files []string) ([]fileStamp, error) {
+	stamps := make([]fileStamp, 0, len(files))
+	for _, path := range files {
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("stating %s: %w", path, err)
+		}
+		stamps = append(stamps, fileStamp{path: path, size: info.Size(), mtime: info.ModTime().UnixNano()})
+	}
+	return stamps, nil
+}
+
+// stampPaths returns the files still present in stamps, in the same order.
+func stampPaths(stamps []fileStamp) []string {
+	paths := make([]string, len(stamps))
+	for i, s := range stamps {
+		paths[i] = s.path
+	}
+	return paths
+}
+
+// viewUnchanged reports whether name was last created from exactly stamps.
+// The comparison is on the file list, not on since: two bounds that select the
+// same files need the same view.
+func (e *Engine) viewUnchanged(name string, stamps []fileStamp) bool {
+	prev, ok := e.builtFrom[name]
+	if !ok || len(prev) != len(stamps) {
+		return false
+	}
+	for i := range prev {
+		if prev[i] != stamps[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// rememberView records the file list a view was just created from and counts
+// the rebuild for tests.
+func (e *Engine) rememberView(name string, stamps []fileStamp) {
+	if e.builtFrom == nil {
+		e.builtFrom = make(map[string][]fileStamp)
+	}
+	e.builtFrom[name] = stamps
+	e.viewBuilds++
 }
 
 // quotePaths renders paths as a DuckDB list of SQL string literals. Paths are
