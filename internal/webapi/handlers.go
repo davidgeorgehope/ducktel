@@ -39,6 +39,8 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	}
 	mux.Handle("GET /api/traces", auth(h.handleSearchSpans))
 	mux.Handle("GET /api/traces/{trace_id}", auth(h.handleLookupTrace))
+	mux.Handle("GET /api/traces/{trace_id}/summary", auth(h.handleTraceSummary))
+	mux.Handle("GET /api/slow", auth(h.handleSlowRequests))
 	mux.Handle("GET /api/logs", auth(h.handleSearchLogs))
 	mux.Handle("GET /api/metrics", auth(h.handleQueryMetric))
 	mux.Handle("GET /api/tenants", auth(h.handleListTenants))
@@ -61,6 +63,14 @@ type rowsResponse struct {
 // normalises a nil slice to an empty one, so a query that matched nothing
 // serialises as "rows":[] rather than "rows":null — a client iterating the
 // result should never have to special-case an empty set.
+// writeJSON writes an object or array result. It is the non-rows counterpart
+// of writeRows: there are no engine floats here to sanitise, so a plain
+// encoder is enough, but the Content-Type must be set the same way.
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
+
 func writeRows(w http.ResponseWriter, rows []map[string]any, cols []string) {
 	rows = telemetry.SanitizeRows(rows)
 	if rows == nil {
@@ -79,6 +89,21 @@ func writeErr(w http.ResponseWriter, err error) {
 		status = http.StatusBadRequest
 	}
 	http.Error(w, err.Error(), status)
+}
+
+// queryFilters parses repeated ?filter=key:value pairs, the form used by the
+// span search, log search, metric and slow-request endpoints.
+func queryFilters(w http.ResponseWriter, r *http.Request) ([]telemetry.AttrFilter, bool) {
+	var filters []telemetry.AttrFilter
+	for _, raw := range r.URL.Query()["filter"] {
+		key, value, ok := strings.Cut(raw, ":")
+		if !ok {
+			http.Error(w, fmt.Sprintf("filter %q must be key:value", raw), http.StatusBadRequest)
+			return nil, false
+		}
+		filters = append(filters, telemetry.AttrFilter{Key: key, Value: value})
+	}
+	return filters, true
 }
 
 func queryInt(r *http.Request, name string, def int) int {
@@ -121,15 +146,9 @@ func queryRange(w http.ResponseWriter, r *http.Request, minName, maxName string)
 func (h *Handlers) handleSearchSpans(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	// Filters arrive as repeated ?filter=key:value pairs.
-	var filters []telemetry.AttrFilter
-	for _, raw := range q["filter"] {
-		key, value, ok := strings.Cut(raw, ":")
-		if !ok {
-			http.Error(w, fmt.Sprintf("filter %q must be key:value", raw), http.StatusBadRequest)
-			return
-		}
-		filters = append(filters, telemetry.AttrFilter{Key: key, Value: value})
+	filters, ok := queryFilters(w, r)
+	if !ok {
+		return
 	}
 
 	dur, ok := queryRange(w, r, "min_ms", "max_ms")
@@ -151,15 +170,9 @@ func (h *Handlers) handleSearchSpans(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleSearchLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	// Same repeated ?filter=key:value pairs as the span search endpoint.
-	var filters []telemetry.AttrFilter
-	for _, raw := range q["filter"] {
-		key, value, ok := strings.Cut(raw, ":")
-		if !ok {
-			http.Error(w, fmt.Sprintf("filter %q must be key:value", raw), http.StatusBadRequest)
-			return
-		}
-		filters = append(filters, telemetry.AttrFilter{Key: key, Value: value})
+	filters, ok := queryFilters(w, r)
+	if !ok {
+		return
 	}
 
 	rows, cols, err := h.core.SearchLogs(
@@ -185,6 +198,48 @@ func (h *Handlers) handleLookupTrace(w http.ResponseWriter, r *http.Request) {
 	writeRows(w, rows, cols)
 }
 
+// handleTraceSummary is the compact counterpart of handleLookupTrace: the
+// same aggregated object the MCP trace_lookup returns by default.
+func (h *Handlers) handleTraceSummary(w http.ResponseWriter, r *http.Request) {
+	tn := r.URL.Query().Get("tenant")
+	summary, err := h.core.SummarizeTrace(r.PathValue("trace_id"), tn)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, summary)
+}
+
+// handleSlowRequests is the REST form of the slow_requests MCP tool.
+func (h *Handlers) handleSlowRequests(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	filters, ok := queryFilters(w, r)
+	if !ok {
+		return
+	}
+
+	val, ok := queryRange(w, r, "min_value", "max_value")
+	if !ok {
+		return
+	}
+
+	rows, err := h.core.SlowRequests(q.Get("tenant"), telemetry.SlowOpts{
+		MetricName:  q.Get("metric_name"),
+		ServiceName: q.Get("service_name"),
+		SpanName:    q.Get("span_name"),
+		Filters:     filters,
+		Since:       queryInt(r, "since_minutes", 0),
+		Value:       val,
+		Limit:       queryInt(r, "limit", 0),
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, rows)
+}
+
 // metricParamsHelp is the 400 body for /api/metrics without its required
 // parameters.
 const metricParamsHelp = "metric_name and aggregation are required. Parameters: " +
@@ -204,16 +259,9 @@ func (h *Handlers) handleQueryMetric(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Filters arrive as repeated ?filter=key:value pairs, same as the span
-	// search endpoint.
-	var filters []telemetry.AttrFilter
-	for _, raw := range q["filter"] {
-		key, value, ok := strings.Cut(raw, ":")
-		if !ok {
-			http.Error(w, fmt.Sprintf("filter %q must be key:value", raw), http.StatusBadRequest)
-			return
-		}
-		filters = append(filters, telemetry.AttrFilter{Key: key, Value: value})
+	filters, ok := queryFilters(w, r)
+	if !ok {
+		return
 	}
 
 	val, ok := queryRange(w, r, "min_value", "max_value")

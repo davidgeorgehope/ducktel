@@ -158,9 +158,6 @@ func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, s
 	if err := validateTenant(tenant); err != nil {
 		return nil, nil, err
 	}
-	if err := d.validate("duration"); err != nil {
-		return nil, nil, err
-	}
 
 	if limit <= 0 {
 		limit = 100
@@ -175,8 +172,36 @@ func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, s
 	cutoffTime := time.Now().Add(-time.Duration(since) * time.Minute)
 	cutoff := cutoffTime.UnixMicro()
 
-	conds := []string{"start_time >= ?", c.tenantPredicate()}
-	params := []any{cutoff, tenant}
+	fc, fp, err := c.spanConds(tenant, serviceName, filters, d)
+	if err != nil {
+		return nil, nil, err
+	}
+	conds := append([]string{"start_time >= ?"}, fc...)
+	params := append([]any{cutoff}, fp...)
+
+	params = append(params, limit)
+	q := `SELECT trace_id, span_id, service_name, span_name, span_kind,
+	             start_time, end_time, duration_ms, status_code, attributes
+	      FROM traces
+	      WHERE ` + strings.Join(conds, " AND ") + `
+	      ORDER BY start_time DESC
+	      LIMIT ?`
+
+	return c.engine.QuerySince(cutoffTime, q, params...)
+}
+
+// spanConds builds the conditions shared by every span search: tenant,
+// optional exact service name, attribute filters matched against span OR
+// resource attributes, and an optional duration range. The time predicate is
+// left to the caller because SearchSpansIn and SlowRequests express their
+// window differently (a bound versus a root-only ordering).
+func (c *Core) spanConds(tenant, serviceName string, filters []AttrFilter, d Range) ([]string, []any, error) {
+	if err := d.validate("duration"); err != nil {
+		return nil, nil, err
+	}
+
+	conds := []string{c.tenantPredicate()}
+	params := []any{tenant}
 
 	if serviceName != "" {
 		conds = append(conds, "service_name = ?")
@@ -199,15 +224,7 @@ func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, s
 	conds = append(conds, dc...)
 	params = append(params, dp...)
 
-	params = append(params, limit)
-	q := `SELECT trace_id, span_id, service_name, span_name, span_kind,
-	             start_time, end_time, duration_ms, status_code, attributes
-	      FROM traces
-	      WHERE ` + strings.Join(conds, " AND ") + `
-	      ORDER BY start_time DESC
-	      LIMIT ?`
-
-	return c.engine.QuerySince(cutoffTime, q, params...)
+	return conds, params, nil
 }
 
 // SearchLogs finds log records matching filters, scoped to tenant — the

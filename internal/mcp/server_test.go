@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,31 @@ func newTestServerWith(t *testing.T, configure func(*Server)) *sdkmcp.ClientSess
 		{Timestamp: time.Now().UnixMicro(), ServiceName: "api", SeverityText: "INFO",
 			Body: "handled request", Attributes: "{}",
 			ResourceAttributes: `{"service.name":"api","tenant.id":"acme"}`},
+	})
+
+	// Exemplars for slow_requests: each points at one of the seeded traces.
+	// One point per service makes the service_name filter observable.
+	now := time.Now()
+	exemplar := func(ns int64, traceID, spanID string, value float64) string {
+		return fmt.Sprintf(`[{"time_unix_nano":%d,"trace_id":%q,"span_id":%q,"value":%v}]`, ns, traceID, spanID, value)
+	}
+	w.AddMetrics([]writer.MetricPoint{
+		{MetricName: "http.server.duration", MetricType: "histogram", MetricUnit: "ms",
+			Timestamp: now.UnixMicro(), Count: 1, Sum: 100, Min: 100, Max: 100,
+			BucketCounts: "[0,1]", ExplicitBounds: "[50]",
+			AggregationTemporality: "AGGREGATION_TEMPORALITY_CUMULATIVE",
+			Attributes:             "{}",
+			ResourceAttributes:     `{"service.name":"api","tenant.id":"acme"}`,
+			ServiceName:            "api",
+			Exemplars:              exemplar(now.Add(-time.Minute).UnixNano(), "trace-acme-1", "s-api", 100)},
+		{MetricName: "http.server.duration", MetricType: "histogram", MetricUnit: "ms",
+			Timestamp: now.UnixMicro(), Count: 1, Sum: 20, Min: 20, Max: 20,
+			BucketCounts: "[1,0]", ExplicitBounds: "[50]",
+			AggregationTemporality: "AGGREGATION_TEMPORALITY_CUMULATIVE",
+			Attributes:             "{}",
+			ResourceAttributes:     `{"service.name":"worker","tenant.id":"acme"}`,
+			ServiceName:            "worker",
+			Exemplars:              exemplar(now.Add(-2*time.Minute).UnixNano(), "trace-acme-2", "s-worker", 20)},
 	})
 	if err := w.Flush(); err != nil {
 		t.Fatalf("seeding: %v", err)
@@ -136,7 +162,7 @@ func TestToolsAreRegistered(t *testing.T) {
 			t.Errorf("tool %q has no description — models need it to discriminate", tool.Name)
 		}
 	}
-	for _, want := range []string{"trace_lookup", "span_search", "log_search", "metric_query"} {
+	for _, want := range []string{"trace_lookup", "span_search", "log_search", "metric_query", "slow_requests"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered", want)
 		}
@@ -169,7 +195,7 @@ func TestTraceLookupAdapterHappyPath(t *testing.T) {
 	s := newTestServer(t)
 
 	body, isErr := call(t, s, "trace_lookup", map[string]any{
-		"trace_id": "trace-acme-1", "tenant": "acme",
+		"trace_id": "trace-acme-1", "tenant": "acme", "detail": "spans",
 	})
 	if isErr {
 		t.Fatalf("unexpected error: %s", body)
