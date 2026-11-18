@@ -16,6 +16,8 @@ import {
   matchingPreset,
   apiTimeMs,
   whyActions,
+  spanOnlyKey,
+  metricSafeFilters,
   splitAtGaps,
 } from "./investigate.js";
 
@@ -202,9 +204,28 @@ test("apiTimeMs converts the API's Unix microseconds to milliseconds", () => {
 test("whyActions offers only buttons that can narrow the scope", () => {
   assert.deepEqual(whyActions("cache"), { focus: true, exclude: true });
   assert.deepEqual(whyActions("resource.k8s.pod.name"), { focus: true, exclude: true });
-  assert.deepEqual(whyActions("span_name"), { focus: true, exclude: false });
-  assert.deepEqual(whyActions("status_code"), { focus: false, exclude: false });
-  assert.deepEqual(whyActions("span_kind"), { focus: false, exclude: false });
+  assert.deepEqual(whyActions("span_name"), { focus: true, exclude: true });
+  assert.deepEqual(whyActions("status_code"), { focus: true, exclude: true });
+  assert.deepEqual(whyActions("span_kind"), { focus: true, exclude: true });
+});
+
+test("metric queries drop span-column filters", () => {
+  assert.equal(spanOnlyKey("span_name"), true);
+  assert.equal(spanOnlyKey("status_code"), true);
+  assert.equal(spanOnlyKey("span_kind"), true);
+  assert.equal(spanOnlyKey("http.route"), false);
+  const filters = [
+    { key: "span_name", value: "POST /mcp", op: "!=" },
+    { key: "http.route", value: "/orders", op: "" },
+    { key: "status_code", value: "STATUS_CODE_ERROR", op: "" },
+    { key: "env", value: "prod", op: "!=" },
+    { key: "span_kind", value: "SPAN_KIND_CLIENT", op: "" },
+  ];
+  assert.deepEqual(metricSafeFilters(filters), [
+    { key: "http.route", value: "/orders", op: "" },
+    { key: "env", value: "prod", op: "!=" },
+  ]);
+  assert.deepEqual(metricSafeFilters(null), []);
 });
 
 test("splitAtGaps breaks a series where steps are missing", () => {

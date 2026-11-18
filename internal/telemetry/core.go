@@ -40,6 +40,34 @@ type AttrFilter struct {
 	Op    string
 }
 
+// spanFilterColumns is the allow-list of filter keys that address a span's own
+// columns rather than its attribute JSON. The key is never interpolated into
+// SQL; only the column chosen here is used.
+var spanFilterColumns = map[string]string{
+	"span_name":   "span_name",
+	"status_code": "status_code",
+	"span_kind":   "span_kind",
+}
+
+// spanFilterCond builds the condition for one span filter. A reserved span
+// column name compares that column; everything else stays an attribute match,
+// so log, metric and exemplar filters are unaffected. The string columns are
+// non-null in the writer schema, so != is a plain <>.
+func spanFilterCond(f AttrFilter) (string, []any, error) {
+	col, ok := spanFilterColumns[f.Key]
+	if !ok {
+		return attrFilterCond(f)
+	}
+	switch f.Op {
+	case "", "=":
+		return col + " = ?", []any{f.Value}, nil
+	case "!=":
+		return col + " <> ?", []any{f.Value}, nil
+	default:
+		return "", nil, invalidInput("attribute filter op %q is not supported; use = (default) or !=", f.Op)
+	}
+}
+
 // attrFilterCond builds the SQL and parameters for one attribute filter. Both
 // the record's own attributes and its resource attributes are checked, so a
 // caller does not need to know which one holds the key. Equal filters keep the
@@ -304,7 +332,9 @@ func (c *Core) spanConds(tenant, serviceName string, filters []AttrFilter, d Ran
 		// arrives as a resource attribute (and is additionally promoted to the
 		// service_name column) but is absent from span attributes — filtering
 		// only attributes silently matches nothing for the most common key.
-		cond, p, err := attrFilterCond(f)
+		// The span's own name, status and kind are columns, so a filter with
+		// one of those keys must target the column instead.
+		cond, p, err := spanFilterCond(f)
 		if err != nil {
 			return nil, nil, err
 		}

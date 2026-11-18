@@ -188,7 +188,7 @@ type attrFilter struct {
 
 type spanSearchArgs struct {
 	Tenant       string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
-	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together). Omit to match all spans in the time range."`
+	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together); span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}. Omit to match all spans in the time range."`
 	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to search, in minutes. Default 60."`
 	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
@@ -219,7 +219,7 @@ type compareSpansArgs struct {
 	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
 	SpanName     string       `json:"span_name,omitempty" jsonschema:"optional exact span_name to match"`
 	SpanKind     string       `json:"span_kind,omitempty" jsonschema:"which span kind to compare: server (default when span_name is not given), client, internal, producer, consumer, or any"`
-	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together), against span attributes or resource attributes. Omit to compare all spans in the time range."`
+	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together), against span attributes or resource attributes; span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}. Omit to compare all spans in the time range."`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to look, in minutes. Default 60."`
 	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
 	MinMs        *float64     `json:"min_ms,omitempty" jsonschema:"the slow group is spans lasting at least this many milliseconds (inclusive). Omit min_ms and max_ms to use the scope's p95 duration instead."`
@@ -284,7 +284,7 @@ type slowRequestsArgs struct {
 	MetricName   string       `json:"metric_name,omitempty" jsonschema:"when set, follow this metric's exemplars. Omit to use the slowest root spans instead."`
 	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
 	SpanName     string       `json:"span_name,omitempty" jsonschema:"spans source only: exact span_name to match"`
-	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together)"`
+	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together); on the spans source span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}"`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to look, in minutes. Default 60."`
 	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
 	MinValue     *float64     `json:"min_value,omitempty" jsonschema:"with metric_name: keep exemplars at least this value in the metric's unit; without it: keep spans lasting at least this many milliseconds"`

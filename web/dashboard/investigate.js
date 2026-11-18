@@ -277,12 +277,24 @@ function appendFilters(p, filters) {
   for (const f of filters || []) p.append(f.op === "!=" ? "filter_not" : "filter", f.key + ":" + f.value);
 }
 
+// SPAN_ONLY_KEYS are span columns, not metric attributes: sending them to
+// /api/metrics would match nothing and empty the charts.
+const SPAN_ONLY_KEYS = new Set(["span_name", "status_code", "span_kind"]);
+
+export function spanOnlyKey(key) {
+  return SPAN_ONLY_KEYS.has(key);
+}
+
+export function metricSafeFilters(filters) {
+  return (filters || []).filter((f) => !spanOnlyKey(f.key));
+}
+
 function contextFilters() {
   return inv.filters.slice();
 }
 
 function metricFilters() {
-  const out = contextFilters();
+  const out = metricSafeFilters(contextFilters());
   if (inv.serviceName) out.push({ key: "service.name", value: inv.serviceName, op: "" });
   return out;
 }
@@ -705,7 +717,10 @@ function requestSlowParams(win) {
     if (inv.minMs !== null) extra.min_value = fromMs(inv.minMs, unit);
     if (inv.maxMs !== null) extra.max_value = fromMs(inv.maxMs, unit);
   }
-  return slowParams(base, contextFilters(), extra);
+  // With a latency metric the requests come from its exemplars, which are
+  // metric points: span column filters would match nothing there.
+  const filters = inv.noLatency ? contextFilters() : metricSafeFilters(contextFilters());
+  return slowParams(base, filters, extra);
 }
 
 function renderRequestsPanel() {
@@ -913,12 +928,10 @@ function thresholdText(cmp) {
   return "p95";
 }
 
-// whyActions says which row buttons make sense. span_name is a column, not
-// an attribute: focus narrows the context's span name and there is no way to
-// exclude it. status_code and span_kind are columns no filter can reach.
+// whyActions says which row buttons make sense. Span columns now accept the
+// same focus and exclude filters as attributes; span_name focus keeps its
+// dedicated context field.
 export function whyActions(key) {
-  if (key === "span_name") return { focus: true, exclude: false };
-  if (key === "status_code" || key === "span_kind") return { focus: false, exclude: false };
   return { focus: true, exclude: true };
 }
 
@@ -999,7 +1012,7 @@ function renderWhyPanel() {
       btn.addEventListener("click", () => {
         const row = rows[Number(btn.dataset.whyI)];
         if (!row) return;
-        if (row.key === "span_name") {
+        if (row.key === "span_name" && btn.dataset.whyAct === "focus") {
           inv.spanName = row.value;
         } else {
           const op = btn.dataset.whyAct === "exclude" ? "!=" : "";
