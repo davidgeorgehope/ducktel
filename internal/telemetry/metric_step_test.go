@@ -217,7 +217,7 @@ func TestCumulativeHistogramStepCountsIncrements(t *testing.T) {
 	c := newStepCore(t, points)
 
 	// The whole window still reports the same total increments as before.
-	whole, _, err := c.QueryMetric("acme", "cum.duration", "count", 60, "", nil)
+	whole, _, err := c.QueryMetric("acme", "cum.duration", "count", 60, 0, "", nil)
 	if err != nil {
 		t.Fatalf("count without step: %v", err)
 	}

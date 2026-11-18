@@ -286,8 +286,10 @@ func histogramBucketCTE(gdefs, gcols, conds string, condsParams []any, cutoff ti
 
 // queryHistogram aggregates histogram points. groupExprs/aliases are the
 // resolved group_by keys; conds/params the WHERE clause (already including
-// the metric type predicate).
-func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliases []string, conds string, params []any, cutoff time.Time) ([]map[string]any, []string, error) {
+// the metric type predicate and any window end). end is the window's end, or
+// the zero time when it ends at now, which sizes the step path's series
+// partitions from the actual window length.
+func (c *Core) queryHistogram(metricType, aggregation string, groupExprs, aliases []string, conds string, params []any, cutoff, end time.Time) ([]map[string]any, []string, error) {
 	agg := strings.ToLower(aggregation)
 	var q float64
 	switch agg {
@@ -406,8 +408,12 @@ SELECT ` + gsel + `bounds, db FROM merged`
 		// the same as summing the series in one query; mergeStepBucketRows
 		// below combines duplicate bucket rows by group and bound. Short
 		// windows need fewer partitions, and more partitions cost more scans.
+		windowEnd := end
+		if windowEnd.IsZero() {
+			windowEnd = time.Now()
+		}
 		seriesChunks := 4
-		switch hours := time.Since(cutoff).Hours(); {
+		switch hours := windowEnd.Sub(cutoff).Hours(); {
 		case hours > 48:
 			seriesChunks = 32
 		case hours > 12:

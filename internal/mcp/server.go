@@ -181,6 +181,7 @@ type spanSearchArgs struct {
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together). Omit to match all spans in the time range."`
 	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to search, in minutes. Default 60."`
+	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
 	Limit        int          `json:"limit,omitempty" jsonschema:"maximum spans to return, default 100. Cap 1000."`
 	MinMs        *float64     `json:"min_ms,omitempty" jsonschema:"only spans lasting at least this many milliseconds (inclusive)"`
 	MaxMs        *float64     `json:"max_ms,omitempty" jsonschema:"only spans lasting at most this many milliseconds (inclusive). With min_ms, e.g. one histogram bucket's bounds."`
@@ -193,7 +194,7 @@ func (s *Server) spanSearch(ctx context.Context, req *sdkmcp.CallToolRequest, ar
 	}
 
 	tenant := args.Tenant
-	rows, cols, err := s.core.SearchSpansIn(tenant, args.ServiceName, filters, args.SinceMinutes, args.Limit,
+	rows, cols, err := s.core.SearchSpansIn(tenant, args.ServiceName, filters, args.SinceMinutes, args.UntilMinutes, args.Limit,
 		telemetry.Range{Min: args.MinMs, Max: args.MaxMs})
 	if err != nil {
 		return errResult(err.Error())
@@ -211,6 +212,7 @@ type logSearchArgs struct {
 	Search       string       `json:"search,omitempty" jsonschema:"case-insensitive substring to find in the log body"`
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together), against record attributes OR resource attributes. Omit to match all records in the time range."`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to search, in minutes. Default 60 (whole history when trace_id is given)."`
+	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
 	Limit        int          `json:"limit,omitempty" jsonschema:"maximum log records to return, default 100. Cap 1000."`
 }
 
@@ -220,7 +222,7 @@ func (s *Server) logSearch(ctx context.Context, req *sdkmcp.CallToolRequest, arg
 		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value}
 	}
 
-	rows, cols, err := s.core.SearchLogs(args.Tenant, args.TraceID, args.ServiceName, args.Severity, args.Search, filters, args.SinceMinutes, args.Limit)
+	rows, cols, err := s.core.SearchLogs(args.Tenant, args.TraceID, args.ServiceName, args.Severity, args.Search, filters, args.SinceMinutes, args.UntilMinutes, args.Limit)
 	if err != nil {
 		return errResult(err.Error())
 	}
@@ -236,6 +238,7 @@ type slowRequestsArgs struct {
 	SpanName     string       `json:"span_name,omitempty" jsonschema:"spans source only: exact span_name to match"`
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together)"`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to look, in minutes. Default 60."`
+	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
 	MinValue     *float64     `json:"min_value,omitempty" jsonschema:"with metric_name: keep exemplars at least this value in the metric's unit; without it: keep spans lasting at least this many milliseconds"`
 	MaxValue     *float64     `json:"max_value,omitempty" jsonschema:"with metric_name: keep exemplars at most this value in the metric's unit; without it: keep spans lasting at most this many milliseconds"`
 	Limit        int          `json:"limit,omitempty" jsonschema:"maximum requests to return, default 5, cap 20"`
@@ -254,6 +257,7 @@ func (s *Server) slowRequests(ctx context.Context, req *sdkmcp.CallToolRequest, 
 		SpanName:    args.SpanName,
 		Filters:     filters,
 		Since:       args.SinceMinutes,
+		Until:       args.UntilMinutes,
 		Value:       telemetry.Range{Min: args.MinValue, Max: args.MaxValue},
 		Limit:       args.Limit,
 	})
@@ -270,6 +274,7 @@ type metricQueryArgs struct {
 	MetricName   string       `json:"metric_name" jsonschema:"the metric name to aggregate, e.g. process.cpu.utilization"`
 	Aggregation  string       `json:"aggregation" jsonschema:"one of: avg, sum, min, max, count, p50, p95, p99, buckets (histograms only), exemplars"`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to aggregate, in minutes. Default 60."`
+	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
 	GroupBy      string       `json:"group_by,omitempty" jsonschema:"optional comma-separated grouping keys: a column name (service_name, metric_type, ...), a data-point attribute as attr.<key> / attributes.<key>, or a resource attribute as resource.<key> / resource_attributes.<key>, e.g. resource.host.name groups by the resource attributes JSON key 'host.name'. Result rows carry the key as their column name."`
 	Step         string       `json:"step,omitempty" jsonschema:"optional time-series step as a duration (30s, 1m, 5m, 1h) or a whole number of seconds. Adds a leading time column (bucket start in Unix microseconds, UTC) and one row per time bucket and group, ordered by time then groups. At most 1500 buckets per query; exemplars ignores step."`
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match, ANDed together; matched against data-point attributes OR resource attributes, same as span_search filters. Dotted keys are handled correctly."`
@@ -286,7 +291,7 @@ func (s *Server) metricQuery(ctx context.Context, req *sdkmcp.CallToolRequest, a
 
 	tenant := args.Tenant
 	rows, cols, err := s.core.QueryMetricWith(tenant, args.MetricName, args.Aggregation, args.SinceMinutes, args.GroupBy, filters,
-		telemetry.MetricOpts{Value: telemetry.Range{Min: args.MinValue, Max: args.MaxValue}, Limit: args.Limit, Step: args.Step})
+		telemetry.MetricOpts{Value: telemetry.Range{Min: args.MinValue, Max: args.MaxValue}, Limit: args.Limit, Step: args.Step, Until: args.UntilMinutes})
 	if err != nil {
 		return errResult(err.Error())
 	}

@@ -71,7 +71,7 @@ func newHistogramCore(t *testing.T) *Core {
 
 func metricValues(t *testing.T, c *Core, metric, agg, groupBy string) map[string]float64 {
 	t.Helper()
-	rows, _, err := c.QueryMetric("acme", metric, agg, 60, groupBy, nil)
+	rows, _, err := c.QueryMetric("acme", metric, agg, 60, 0, groupBy, nil)
 	if err != nil {
 		t.Fatalf("%s %s: %v", metric, agg, err)
 	}
@@ -158,7 +158,7 @@ func TestExponentialHistogram(t *testing.T) {
 	if got := metricValues(t, c, "exp.duration", "count", "")[""]; got != 7 {
 		t.Errorf("count = %v, want 7", got)
 	}
-	if _, _, err := c.QueryMetric("acme", "exp.duration", "p95", 60, "", nil); !IsInvalidInput(err) {
+	if _, _, err := c.QueryMetric("acme", "exp.duration", "p95", 60, 0, "", nil); !IsInvalidInput(err) {
 		t.Errorf("p95 on an exponential histogram: err = %v, want invalid input", err)
 	}
 }
@@ -185,7 +185,7 @@ func TestHistogramOlderThanProbeWindow(t *testing.T) {
 	t.Cleanup(func() { engine.Close() })
 	c := NewCore(engine)
 
-	rows, _, err := c.QueryMetric("acme", "http.server.duration", "count", 180, "", nil)
+	rows, _, err := c.QueryMetric("acme", "http.server.duration", "count", 180, 0, "", nil)
 	if err != nil {
 		t.Fatalf("count over a 3h window: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestHistogramOlderThanProbeWindow(t *testing.T) {
 
 func TestHistogramOtherTenantSeesNothing(t *testing.T) {
 	c := newHistogramCore(t)
-	rows, _, err := c.QueryMetric("globex", "http.server.duration", "count", 60, "", nil)
+	rows, _, err := c.QueryMetric("globex", "http.server.duration", "count", 60, 0, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestBucketQuantile(t *testing.T) {
 // per group, with le null for the bucket above the last bound.
 func TestHistogramBuckets(t *testing.T) {
 	c := newHistogramCore(t)
-	rows, cols, err := c.QueryMetric("acme", "http.server.duration", "buckets", 60, "attr.http.route", nil)
+	rows, cols, err := c.QueryMetric("acme", "http.server.duration", "buckets", 60, 0, "attr.http.route", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestHistogramBuckets(t *testing.T) {
 	}
 
 	// Filtered to one group, as the dashboard does when a bar is clicked.
-	rows, _, err = c.QueryMetric("acme", "http.server.duration", "buckets", 60, "",
+	rows, _, err = c.QueryMetric("acme", "http.server.duration", "buckets", 60, 0, "",
 		[]AttrFilter{{Key: "http.route", Value: "/b"}})
 	if err != nil || len(rows) != 3 || toFloat(rows[0]["value"]) != 3 {
 		t.Errorf("filtered buckets = %v, %v", rows, err)
@@ -262,7 +262,7 @@ func TestHistogramBuckets(t *testing.T) {
 
 func TestBucketsOnNonHistogramIsInvalidInput(t *testing.T) {
 	c := newHistogramCore(t)
-	if _, _, err := c.QueryMetric("acme", "exp.duration", "buckets", 60, "", nil); !IsInvalidInput(err) {
+	if _, _, err := c.QueryMetric("acme", "exp.duration", "buckets", 60, 0, "", nil); !IsInvalidInput(err) {
 		t.Errorf("exponential histogram: err = %v, want invalid input", err)
 	}
 }
@@ -271,7 +271,7 @@ func TestBucketsOnNonHistogramIsInvalidInput(t *testing.T) {
 // unit through the same metric_query an agent uses.
 func TestMetricTypeAndUnitViaGroupBy(t *testing.T) {
 	c := newHistogramCore(t)
-	rows, _, err := c.QueryMetric("acme", "http.server.duration", "count", 60, "metric_type,metric_unit", nil)
+	rows, _, err := c.QueryMetric("acme", "http.server.duration", "count", 60, 0, "metric_type,metric_unit", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

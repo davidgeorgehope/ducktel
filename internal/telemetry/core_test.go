@@ -123,11 +123,11 @@ func TestTenantIsolation(t *testing.T) {
 	}
 
 	// Same via SearchSpans with no other filters.
-	rows, _, _ = c.SearchSpans("acme", "", nil, 0, 0)
+	rows, _, _ = c.SearchSpans("acme", "", nil, 0, 0, 0)
 	if n := countRows(rows); n != 3 {
 		t.Errorf("acme search returned %d rows, want 3 (only acme's)", n)
 	}
-	rows, _, _ = c.SearchSpans("globex", "", nil, 0, 0)
+	rows, _, _ = c.SearchSpans("globex", "", nil, 0, 0, 0)
 	if n := countRows(rows); n != 1 {
 		t.Errorf("globex search returned %d rows, want 1", n)
 	}
@@ -136,7 +136,7 @@ func TestTenantIsolation(t *testing.T) {
 func TestMetricQueryIsTenantScoped(t *testing.T) {
 	c := newTestCore(t)
 
-	rows, _, err := c.QueryMetric("acme", "cpu.util", "count", 0, "", nil)
+	rows, _, err := c.QueryMetric("acme", "cpu.util", "count", 0, 0, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -174,7 +174,7 @@ func asFloat64(t *testing.T, v any) float64 {
 func TestSpanSearchDottedAttributeKey(t *testing.T) {
 	c := newTestCore(t)
 
-	rows, _, err := c.SearchSpans("acme", "", []AttrFilter{{Key: "custom.key", Value: "x"}}, 0, 0)
+	rows, _, err := c.SearchSpans("acme", "", []AttrFilter{{Key: "custom.key", Value: "x"}}, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestSpanSearchDottedAttributeKey(t *testing.T) {
 func TestSpanSearchFindsResourceAttributes(t *testing.T) {
 	c := newTestCore(t)
 
-	rows, _, err := c.SearchSpans("acme", "", []AttrFilter{{Key: "service.name", Value: "worker"}}, 0, 0)
+	rows, _, err := c.SearchSpans("acme", "", []AttrFilter{{Key: "service.name", Value: "worker"}}, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestSpanSearchFindsResourceAttributes(t *testing.T) {
 	}
 
 	// And a key that lives in span attributes still works.
-	rows, _, _ = c.SearchSpans("acme", "", []AttrFilter{{Key: "job", Value: "sync"}}, 0, 0)
+	rows, _, _ = c.SearchSpans("acme", "", []AttrFilter{{Key: "job", Value: "sync"}}, 0, 0, 0)
 	if n := countRows(rows); n != 1 {
 		t.Errorf("filter on span attribute matched %d rows, want 1", n)
 	}
@@ -210,7 +210,7 @@ func TestSpanSearchFindsResourceAttributes(t *testing.T) {
 func TestSpanSearchMultipleFiltersAreAnded(t *testing.T) {
 	c := newTestCore(t)
 
-	rows, _, _ := c.SearchSpans("acme", "", []AttrFilter{{Key: "http.method", Value: "GET"}}, 0, 0)
+	rows, _, _ := c.SearchSpans("acme", "", []AttrFilter{{Key: "http.method", Value: "GET"}}, 0, 0, 0)
 	// Only the first acme span has http.method=GET.
 	if n := countRows(rows); n != 1 {
 		t.Errorf("http.method=GET matched %d acme spans, want 1", n)
@@ -220,7 +220,7 @@ func TestSpanSearchMultipleFiltersAreAnded(t *testing.T) {
 func TestSpanSearchServiceFilter(t *testing.T) {
 	c := newTestCore(t)
 
-	rows, _, _ := c.SearchSpans("acme", "worker", nil, 0, 0)
+	rows, _, _ := c.SearchSpans("acme", "worker", nil, 0, 0, 0)
 	if n := countRows(rows); n != 1 {
 		t.Errorf("service_name=worker matched %d, want 1", n)
 	}
@@ -229,7 +229,7 @@ func TestSpanSearchServiceFilter(t *testing.T) {
 func TestSpanSearchEmptyKeyRejected(t *testing.T) {
 	c := newTestCore(t)
 
-	_, _, err := c.SearchSpans("acme", "", []AttrFilter{{Key: "", Value: "x"}}, 0, 0)
+	_, _, err := c.SearchSpans("acme", "", []AttrFilter{{Key: "", Value: "x"}}, 0, 0, 0)
 	if err == nil {
 		t.Error("empty filter key should error")
 	}
@@ -239,7 +239,7 @@ func TestSpanSearchEmptyKeyRejected(t *testing.T) {
 func TestSpanSearchLimitIsCapped(t *testing.T) {
 	c := newTestCore(t)
 
-	rows, _, err := c.SearchSpans("acme", "", nil, 0, 100000)
+	rows, _, err := c.SearchSpans("acme", "", nil, 0, 0, 100000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestSpanSearchDefaultWindowExcludesOldData(t *testing.T) {
 	c := NewCore(engine)
 
 	// Default window is 60 minutes, so 48h-old data must not appear.
-	rows, _, _ := c.SearchSpans("acme", "", nil, 0, 0)
+	rows, _, _ := c.SearchSpans("acme", "", nil, 0, 0, 0)
 	if n := countRows(rows); n != 0 {
 		t.Errorf("default window included 48h-old data: %d rows", n)
 	}
@@ -284,7 +284,7 @@ func TestMetricQueryAggregations(t *testing.T) {
 	c := newTestCore(t)
 
 	for _, agg := range []string{"avg", "sum", "min", "max", "count", "p50", "p95", "p99"} {
-		rows, _, err := c.QueryMetric("acme", "cpu.util", agg, 0, "", nil)
+		rows, _, err := c.QueryMetric("acme", "cpu.util", agg, 0, 0, "", nil)
 		if err != nil {
 			t.Errorf("aggregation %q errored: %v", agg, err)
 			continue
@@ -300,7 +300,7 @@ func TestMetricQueryRejectsUnknownAggregation(t *testing.T) {
 
 	// An injection-shaped aggregation must be rejected, not interpolated.
 	for _, agg := range []string{"median", "avg(value_double); DROP VIEW metrics; --", ""} {
-		_, _, err := c.QueryMetric("acme", "cpu.util", agg, 0, "", nil)
+		_, _, err := c.QueryMetric("acme", "cpu.util", agg, 0, 0, "", nil)
 		if err == nil {
 			t.Errorf("aggregation %q should be rejected", agg)
 		}
@@ -313,7 +313,7 @@ func TestMetricQueryRejectsUnknownAggregation(t *testing.T) {
 func TestMetricQueryGroupBy(t *testing.T) {
 	c := newTestCore(t)
 
-	rows, _, err := c.QueryMetric("acme", "cpu.util", "count", 0, "service_name", nil)
+	rows, _, err := c.QueryMetric("acme", "cpu.util", "count", 0, 0, "service_name", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestMetricQueryRejectsUngroupableColumn(t *testing.T) {
 	c := newTestCore(t)
 
 	for _, col := range []string{"nonexistent", "service_name; DROP VIEW metrics; --", "1"} {
-		_, _, err := c.QueryMetric("acme", "cpu.util", "count", 0, col, nil)
+		_, _, err := c.QueryMetric("acme", "cpu.util", "count", 0, 0, col, nil)
 		if err == nil {
 			t.Errorf("group_by %q should be rejected", col)
 		}
@@ -337,7 +337,7 @@ func TestMetricQueryRejectsUngroupableColumn(t *testing.T) {
 func TestMetricQueryRequiresName(t *testing.T) {
 	c := newTestCore(t)
 
-	_, _, err := c.QueryMetric("acme", "", "avg", 0, "", nil)
+	_, _, err := c.QueryMetric("acme", "", "avg", 0, 0, "", nil)
 	if err == nil {
 		t.Error("metric query without metric_name should error")
 	}
@@ -385,7 +385,7 @@ func newAttrMetricCore(t *testing.T) *Core {
 func TestMetricQueryGroupByAttrKey(t *testing.T) {
 	c := newAttrMetricCore(t)
 
-	rows, cols, err := c.QueryMetric("owner", "night.calls", "sum", 0, "attr.kind", nil)
+	rows, cols, err := c.QueryMetric("owner", "night.calls", "sum", 0, 0, "attr.kind", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestMetricQueryGroupByAttrKey(t *testing.T) {
 func TestMetricQueryGroupByAttributesPrefix(t *testing.T) {
 	c := newAttrMetricCore(t)
 
-	rows, _, err := c.QueryMetric("owner", "night.calls", "count", 0, "attributes.kind", nil)
+	rows, _, err := c.QueryMetric("owner", "night.calls", "count", 0, 0, "attributes.kind", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestMetricQueryGroupByAttributesPrefix(t *testing.T) {
 func TestMetricQueryGroupByMultipleAttrKeys(t *testing.T) {
 	c := newAttrMetricCore(t)
 
-	rows, cols, err := c.QueryMetric("owner", "night.calls", "count", 0, "attr.kind,attr.backend", nil)
+	rows, cols, err := c.QueryMetric("owner", "night.calls", "count", 0, 0, "attr.kind,attr.backend", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestMetricQueryMixedColumnAndAttrGroupBy(t *testing.T) {
 	c := newAttrMetricCore(t)
 
 	// A plain column and an attribute key in the same group_by.
-	rows, _, err := c.QueryMetric("owner", "night.calls", "count", 0, "service_name,attr.kind", nil)
+	rows, _, err := c.QueryMetric("owner", "night.calls", "count", 0, 0, "service_name,attr.kind", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestMetricQueryRejectsBadAttrKey(t *testing.T) {
 		"attr.kind service_name",
 		"attr.kind' OR '1'='1",
 	} {
-		_, _, err := c.QueryMetric("owner", "night.calls", "count", 0, key, nil)
+		_, _, err := c.QueryMetric("owner", "night.calls", "count", 0, 0, key, nil)
 		if err == nil {
 			t.Errorf("group_by %q should be rejected", key)
 			continue
@@ -468,7 +468,7 @@ func TestMetricQueryRejectsBadAttrKey(t *testing.T) {
 	}
 
 	// And the store must still be intact after the injection attempts.
-	rows, _, err := c.QueryMetric("owner", "night.calls", "count", 0, "", nil)
+	rows, _, err := c.QueryMetric("owner", "night.calls", "count", 0, 0, "", nil)
 	if err != nil {
 		t.Fatalf("store damaged after injection attempts: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestMetricQueryAttributeFilters(t *testing.T) {
 	c := newAttrMetricCore(t)
 
 	// Filter on a data-point attribute: only gen points.
-	rows, _, err := c.QueryMetric("owner", "night.calls", "count", 0, "", []AttrFilter{{Key: "kind", Value: "gen"}})
+	rows, _, err := c.QueryMetric("owner", "night.calls", "count", 0, 0, "", []AttrFilter{{Key: "kind", Value: "gen"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestMetricQueryAttributeFilters(t *testing.T) {
 	// Filter on a RESOURCE attribute must also match (same dual scope as
 	// span_search): only the local backend points... backend is a data-point
 	// attr here; use service.name for the resource-side check.
-	rows, _, err = c.QueryMetric("owner", "night.calls", "count", 0, "",
+	rows, _, err = c.QueryMetric("owner", "night.calls", "count", 0, 0, "",
 		[]AttrFilter{{Key: "service.name", Value: "night-pipeline"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -505,7 +505,7 @@ func TestMetricQueryAttributeFilters(t *testing.T) {
 	}
 
 	// Both filter types ANDed: gen AND alibaba -> the single alibaba gen point.
-	rows, _, err = c.QueryMetric("owner", "night.calls", "sum", 0, "",
+	rows, _, err = c.QueryMetric("owner", "night.calls", "sum", 0, 0, "",
 		[]AttrFilter{{Key: "kind", Value: "gen"}, {Key: "backend", Value: "alibaba"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -515,7 +515,7 @@ func TestMetricQueryAttributeFilters(t *testing.T) {
 	}
 
 	// Injection-shaped filter values stay data, like span_search's test.
-	rows, _, err = c.QueryMetric("owner", "night.calls", "count", 0, "",
+	rows, _, err = c.QueryMetric("owner", "night.calls", "count", 0, 0, "",
 		[]AttrFilter{{Key: "kind", Value: "gen' OR '1'='1"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -528,7 +528,7 @@ func TestMetricQueryAttributeFilters(t *testing.T) {
 func TestMetricQueryAttrGroupByAndFilterCombined(t *testing.T) {
 	c := newAttrMetricCore(t)
 
-	rows, _, err := c.QueryMetric("owner", "night.calls", "sum", 0, "attr.backend",
+	rows, _, err := c.QueryMetric("owner", "night.calls", "sum", 0, 0, "attr.backend",
 		[]AttrFilter{{Key: "kind", Value: "judge"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -596,14 +596,14 @@ func TestSearchLogsTenantIsolation(t *testing.T) {
 	c := newLogCore(t)
 
 	// acme sees its 3 in-window records; globex's and the 48h-old one stay out.
-	rows, _, err := c.SearchLogs("acme", "", "", "", "", nil, 0, 0)
+	rows, _, err := c.SearchLogs("acme", "", "", "", "", nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if n := len(rows); n != 3 {
 		t.Errorf("acme logs = %d rows, want 3 (globex or old leaked?)", n)
 	}
-	rows, _, _ = c.SearchLogs("globex", "", "", "", "", nil, 0, 0)
+	rows, _, _ = c.SearchLogs("globex", "", "", "", "", nil, 0, 0, 0)
 	if n := len(rows); n != 1 {
 		t.Errorf("globex logs = %d rows, want 1", n)
 	}
@@ -612,7 +612,7 @@ func TestSearchLogsTenantIsolation(t *testing.T) {
 func TestSearchLogsNewestFirst(t *testing.T) {
 	c := newLogCore(t)
 
-	rows, _, err := c.SearchLogs("acme", "", "", "", "", nil, 0, 0)
+	rows, _, err := c.SearchLogs("acme", "", "", "", "", nil, 0, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +625,7 @@ func TestSearchLogsSeverityCaseInsensitive(t *testing.T) {
 	c := newLogCore(t)
 
 	for _, sev := range []string{"error", "ERROR", "Error"} {
-		rows, _, err := c.SearchLogs("acme", "", "", sev, "", nil, 0, 0)
+		rows, _, err := c.SearchLogs("acme", "", "", sev, "", nil, 0, 0, 0)
 		if err != nil {
 			t.Fatalf("severity %q: %v", sev, err)
 		}
@@ -639,7 +639,7 @@ func TestSearchLogsBodySearchCaseInsensitive(t *testing.T) {
 	c := newLogCore(t)
 
 	for _, q := range []string{"refused", "REFUSED", "connection"} {
-		rows, _, err := c.SearchLogs("acme", "", "", "", q, nil, 0, 0)
+		rows, _, err := c.SearchLogs("acme", "", "", "", q, nil, 0, 0, 0)
 		if err != nil {
 			t.Fatalf("search %q: %v", q, err)
 		}
@@ -652,7 +652,7 @@ func TestSearchLogsBodySearchCaseInsensitive(t *testing.T) {
 func TestSearchLogsServiceAndCombinedFilters(t *testing.T) {
 	c := newLogCore(t)
 
-	rows, _, err := c.SearchLogs("acme", "", "worker", "", "", nil, 0, 0)
+	rows, _, err := c.SearchLogs("acme", "", "worker", "", "", nil, 0, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +661,7 @@ func TestSearchLogsServiceAndCombinedFilters(t *testing.T) {
 	}
 
 	// severity AND service together: the api ERROR, not the worker WARN.
-	rows, _, _ = c.SearchLogs("acme", "", "api", "ERROR", "", nil, 0, 0)
+	rows, _, _ = c.SearchLogs("acme", "", "api", "ERROR", "", nil, 0, 0, 0)
 	if n := len(rows); n != 1 {
 		t.Errorf("api+ERROR matched %d rows, want 1", n)
 	}
@@ -674,7 +674,7 @@ func TestSearchLogsAttributeFilters(t *testing.T) {
 	c := newLogCore(t)
 
 	// Record-level attribute.
-	rows, _, err := c.SearchLogs("acme", "", "", "", "", []AttrFilter{{Key: "http.status_code", Value: "500"}}, 0, 0)
+	rows, _, err := c.SearchLogs("acme", "", "", "", "", []AttrFilter{{Key: "http.status_code", Value: "500"}}, 0, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,19 +683,19 @@ func TestSearchLogsAttributeFilters(t *testing.T) {
 	}
 
 	// Resource-level attribute through the same filter (dual scope).
-	rows, _, _ = c.SearchLogs("acme", "", "", "", "", []AttrFilter{{Key: "service.name", Value: "worker"}}, 0, 0)
+	rows, _, _ = c.SearchLogs("acme", "", "", "", "", []AttrFilter{{Key: "service.name", Value: "worker"}}, 0, 0, 0)
 	if n := len(rows); n != 1 {
 		t.Errorf("resource-attr filter matched %d rows, want 1", n)
 	}
 
 	// Injection-shaped value stays data.
-	rows, _, _ = c.SearchLogs("acme", "", "", "", "", []AttrFilter{{Key: "http.status_code", Value: "500' OR '1'='1"}}, 0, 0)
+	rows, _, _ = c.SearchLogs("acme", "", "", "", "", []AttrFilter{{Key: "http.status_code", Value: "500' OR '1'='1"}}, 0, 0, 0)
 	if n := len(rows); n != 0 {
 		t.Errorf("injection filter matched %d rows, want 0", n)
 	}
 
 	// Empty key is rejected.
-	_, _, err = c.SearchLogs("acme", "", "", "", "", []AttrFilter{{Key: "", Value: "x"}}, 0, 0)
+	_, _, err = c.SearchLogs("acme", "", "", "", "", []AttrFilter{{Key: "", Value: "x"}}, 0, 0, 0)
 	if err == nil {
 		t.Error("empty filter key should error")
 	}
@@ -704,11 +704,11 @@ func TestSearchLogsAttributeFilters(t *testing.T) {
 func TestSearchLogsWiderWindowIncludesOld(t *testing.T) {
 	c := newLogCore(t)
 
-	rows, _, _ := c.SearchLogs("acme", "", "", "", "ancient", nil, 0, 0)
+	rows, _, _ := c.SearchLogs("acme", "", "", "", "ancient", nil, 0, 0, 0)
 	if n := len(rows); n != 0 {
 		t.Errorf("48h-old log leaked into the default window: %d rows", n)
 	}
-	rows, _, err := c.SearchLogs("acme", "", "", "", "ancient", nil, 7*24*60, 0)
+	rows, _, err := c.SearchLogs("acme", "", "", "", "ancient", nil, 7*24*60, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -720,7 +720,7 @@ func TestSearchLogsWiderWindowIncludesOld(t *testing.T) {
 func TestSearchLogsLimitIsCapped(t *testing.T) {
 	c := newLogCore(t)
 
-	rows, _, err := c.SearchLogs("acme", "", "", "", "", nil, 0, 100000)
+	rows, _, err := c.SearchLogs("acme", "", "", "", "", nil, 0, 0, 100000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -732,7 +732,7 @@ func TestSearchLogsLimitIsCapped(t *testing.T) {
 func TestSearchLogsRequiresTenant(t *testing.T) {
 	c := newLogCore(t)
 
-	if _, _, err := c.SearchLogs("", "", "", "", "", nil, 0, 0); err == nil {
+	if _, _, err := c.SearchLogs("", "", "", "", "", nil, 0, 0, 0); err == nil {
 		t.Error("missing tenant should error")
 	}
 }
@@ -742,7 +742,7 @@ func TestSearchLogsRequiresTenant(t *testing.T) {
 func TestSearchLogsByTraceID(t *testing.T) {
 	c := newLogCore(t)
 
-	rows, _, err := c.SearchLogs("acme", "trace-1", "", "", "", nil, 0, 0)
+	rows, _, err := c.SearchLogs("acme", "trace-1", "", "", "", nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -751,14 +751,14 @@ func TestSearchLogsByTraceID(t *testing.T) {
 	}
 
 	// Combined with another filter.
-	rows, _, _ = c.SearchLogs("acme", "trace-1", "", "ERROR", "", nil, 0, 0)
+	rows, _, _ = c.SearchLogs("acme", "trace-1", "", "ERROR", "", nil, 0, 0, 0)
 	if n := len(rows); n != 1 {
 		t.Errorf("trace-1 + ERROR = %d records, want 1", n)
 	}
 
 	// Tenant isolation holds through the trace path: globex's trace must not
 	// be readable as acme's.
-	rows, _, _ = c.SearchLogs("acme", "trace-globex-1", "", "", "", nil, 0, 0)
+	rows, _, _ = c.SearchLogs("acme", "trace-globex-1", "", "", "", nil, 0, 0, 0)
 	if n := len(rows); n != 0 {
 		t.Errorf("acme read globex's trace logs: %d records", n)
 	}
@@ -770,7 +770,7 @@ func TestSearchLogsByTraceID(t *testing.T) {
 func TestSearchLogsTraceIDHasNoDefaultWindow(t *testing.T) {
 	c := newLogCore(t)
 
-	rows, _, err := c.SearchLogs("acme", "trace-old", "", "", "", nil, 0, 0)
+	rows, _, err := c.SearchLogs("acme", "trace-old", "", "", "", nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -779,7 +779,7 @@ func TestSearchLogsTraceIDHasNoDefaultWindow(t *testing.T) {
 	}
 
 	// An explicit window still bounds it.
-	rows, _, _ = c.SearchLogs("acme", "trace-old", "", "", "", nil, 60, 0)
+	rows, _, _ = c.SearchLogs("acme", "trace-old", "", "", "", nil, 60, 0, 0)
 	if n := len(rows); n != 0 {
 		t.Errorf("explicit 60m window returned %d records, want 0", n)
 	}
@@ -798,7 +798,7 @@ func TestFiltersCannotInjectSQL(t *testing.T) {
 		{Key: `a" AND json_extract_string(resource_attributes,'$."tenant.id"')!='acme' AND 1=1 --`, Value: "z"},
 	}
 	for _, f := range payloads {
-		rows, _, err := c.SearchSpans("acme", "", []AttrFilter{f}, 0, 0)
+		rows, _, err := c.SearchSpans("acme", "", []AttrFilter{f}, 0, 0, 0)
 		if err != nil {
 			continue // rejecting outright is also fine
 		}
@@ -809,7 +809,7 @@ func TestFiltersCannotInjectSQL(t *testing.T) {
 	}
 
 	// And the store must still be intact.
-	rows, _, _ := c.SearchSpans("acme", "", nil, 0, 0)
+	rows, _, _ := c.SearchSpans("acme", "", nil, 0, 0, 0)
 	if n := countRows(rows); n != 3 {
 		t.Errorf("store damaged: acme now has %d spans, want 3", n)
 	}
