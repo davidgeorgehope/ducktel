@@ -367,8 +367,18 @@ function fillFields(fields, params) {
   for (const { param, elementId, default: def } of fields) document.getElementById(elementId).value = params.get(param) || def;
 }
 
+// showTraceResults switches the traces top pane back from a slow-request
+// list to the span search table.
+function showTraceResults() {
+  document.getElementById("slow-results").classList.add("hidden");
+  document.getElementById("traces-table").classList.remove("hidden");
+}
+
 async function runTraceSearch(keepTraceId) {
   if (!requireTenant()) return;
+  // A pending slow-request fetch belongs to a view we are leaving.
+  ticket("slow");
+  showTraceResults();
   const params = new URLSearchParams();
   params.set("tenant", state.tenant);
   formParams(params, TRACES_FIELDS);
@@ -413,17 +423,162 @@ async function runTraceSearch(keepTraceId) {
   });
 }
 
+// runSlowestSearch asks /api/slow for the slowest requests matching the
+// traces form. It renders the rows into the same pane as the span search, so
+// the form's service, duration and attribute filters mean the same thing.
+async function runSlowestSearch() {
+  if (!requireTenant()) return;
+  // The span table and any pending span search are replaced by this view.
+  ticket("traces");
+  const t = ticket("slow");
+
+  const base = new URLSearchParams({
+    tenant: state.tenant,
+    since_minutes: document.getElementById("f-since").value || "60",
+  });
+  const extra = { limit: "20" };
+  const service = document.getElementById("f-service").value.trim();
+  if (service) extra.service_name = service;
+  const minMs = document.getElementById("f-min-ms").value.trim();
+  const maxMs = document.getElementById("f-max-ms").value.trim();
+  if (minMs) extra.min_value = minMs;
+  if (maxMs) extra.max_value = maxMs;
+  const params = slowParams(base, collectAttrFilters(), extra);
+
+  let rows;
+  try {
+    rows = await api("/api/slow?" + params.toString());
+  } catch (e) {
+    if (current("slow", t)) toast(e.message, true);
+    return;
+  }
+  if (!current("slow", t)) return;
+
+  // This is a new result set, so an older waterfall no longer belongs to it.
+  ticket("waterfall");
+  document.getElementById("waterfall").classList.add("hidden");
+  const box = document.getElementById("slow-results");
+  box.innerHTML = "";
+  box.appendChild(slowTable(rows || [], params.get("since_minutes")));
+  document.getElementById("traces-table").classList.add("hidden");
+  box.classList.remove("hidden");
+}
+
+// fmtMs formats a millisecond value from the API without inventing decimals
+// it did not have.
+function fmtMs(v) {
+  const n = Number(v);
+  return (Number.isFinite(n) ? Math.round(n * 100) / 100 : 0) + " ms";
+}
+
+// traceSummaryMarkup renders the compact trace summary above the waterfall.
+// Every number comes from /api/traces/{id}/summary; only the bar widths are
+// scaled here, because a bar has to be a percentage of the pane.
+function traceSummaryMarkup(s) {
+  if (!s) return "";
+  const parts = [];
+  const root = s.root;
+  if (root && (root.service_name || root.span_name)) {
+    parts.push(`${escapeHtml(root.service_name)} — ${escapeHtml(root.span_name)}`);
+  }
+  parts.push((Number(s.duration_ms) || 0).toFixed(1) + " ms");
+  const untraced = Number(s.untraced_ms) || 0;
+  if (untraced > 0) parts.push("untraced " + fmtMs(untraced));
+  const spanCount = Number(s.span_count) || 0;
+  parts.push(spanCount + " span" + (spanCount === 1 ? "" : "s") + (s.truncated ? " (truncated)" : ""));
+  const errorCount = Number(s.error_count) || 0;
+  if (errorCount > 0) parts.push(errorCount + " error" + (errorCount === 1 ? "" : "s"));
+  const bySeverity = (s.logs && s.logs.by_severity) || {};
+  const severities = Object.entries(bySeverity)
+    .map(([sev, n]) => `${escapeHtml(sev)} ${escapeHtml(String(n))}`)
+    .join(" · ");
+  if (severities) parts.push("logs: " + severities);
+  if (s.root_missing) parts.push("root missing");
+
+  const groups = Array.isArray(s.groups) ? s.groups : [];
+  let html = `<div class="trace-summary">
+    <div class="ts-line">${parts.join(" · ")}</div>`;
+
+  if (groups.length) {
+    const duration = Number(s.duration_ms) || 0;
+    const more = Number(s.groups_more) || 0;
+    html += `<div class="ts-heading">where the time went${more > 0 ? ` · ${more} more group${more === 1 ? "" : "s"}` : ""}</div>
+      <table class="data-table ts-groups">
+        <thead><tr><th>Span</th><th>Count</th><th>Self</th><th>Total</th><th>Max</th><th>Errors</th></tr></thead>
+        <tbody>`;
+    html += groups.map((g) => {
+      const self = Number(g.self_ms) || 0;
+      let pct = duration > 0 ? (self / duration) * 100 : 0;
+      if (!Number.isFinite(pct)) pct = 0;
+      pct = Math.min(Math.max(pct, 0), 100);
+      return `<tr class="ts-group" data-svc="${escapeHtml(g.service_name)}" data-name="${escapeHtml(g.span_name)}">
+        <td class="ts-span-cell">
+          <div class="ts-span">${escapeHtml(g.service_name)} — ${escapeHtml(g.span_name)}</div>
+          <div class="ts-bar-track"><div class="ts-bar" style="width:${pct.toFixed(1)}%"></div></div>
+        </td>
+        <td>${escapeHtml(String(Number(g.count) || 0))}×</td>
+        <td class="ts-self">${escapeHtml(fmtMs(g.self_ms))}</td>
+        <td>${escapeHtml(fmtMs(g.total_ms))}</td>
+        <td>${escapeHtml(fmtMs(g.max_ms))}</td>
+        <td>${escapeHtml(String(Number(g.errors) || 0))}</td>
+      </tr>`;
+    }).join("");
+    html += `</tbody></table>`;
+  }
+
+  const errors = Array.isArray(s.errors) ? s.errors : [];
+  if (errors.length) {
+    html += `<div class="ts-heading">errors</div><div class="ts-errors">` +
+      errors.map((e) => `<div class="ts-error">${escapeHtml(e.service_name)} — ${escapeHtml(e.span_name)}: ${escapeHtml(e.status_message || "")}</div>`).join("") +
+      `</div>`;
+  }
+
+  const problems = (s.logs && Array.isArray(s.logs.problems)) ? s.logs.problems : [];
+  if (problems.length) {
+    html += `<div class="wf-log-heading">log problems</div><div class="wf-logs">${problems.map(logLineMarkup).join("")}</div>`;
+  }
+
+  return html + `</div>`;
+}
+
+// bindSummaryGroups wires group rows to the waterfall rows they describe: the
+// summary says where the time went, the highlight says which rows that is.
+function bindSummaryGroups(wf) {
+  wf.querySelectorAll(".ts-group").forEach((groupRow) => {
+    groupRow.addEventListener("click", () => {
+      const svc = groupRow.dataset.svc || "";
+      const name = groupRow.dataset.name || "";
+      const wasActive = groupRow.classList.contains("active-group");
+      wf.querySelectorAll(".ts-group.active-group").forEach((r) => r.classList.remove("active-group"));
+      wf.querySelectorAll(".wf-row.group-highlight").forEach((r) => r.classList.remove("group-highlight"));
+      if (wasActive) return;
+      groupRow.classList.add("active-group");
+      let first = null;
+      wf.querySelectorAll(".wf-row").forEach((r) => {
+        if (r.dataset.svc === svc && r.dataset.name === name) {
+          r.classList.add("group-highlight");
+          if (!first) first = r;
+        }
+      });
+      if (first) first.scrollIntoView({ block: "nearest" });
+    });
+  });
+}
+
 async function loadWaterfall(traceId) {
   const t = ticket("waterfall");
   const tenant = encodeURIComponent(state.tenant);
 
-  // Spans and the trace's log records are independent; fetch both up front.
-  // The log fetch is best-effort: a waterfall without its logs is still
-  // useful, so a failure there must not kill the whole view.
+  // Spans, the trace's log records and its summary are independent; fetch
+  // all three up front. The log and summary fetches are best-effort: a
+  // waterfall without them is still useful, so their failures must not kill
+  // the whole view.
   const spansP = api("/api/traces/" + encodeURIComponent(traceId) + "?tenant=" + tenant);
   const logsP = api("/api/logs?tenant=" + tenant + "&trace_id=" + encodeURIComponent(traceId) + "&limit=1000")
     .then((r) => r.rows)
     .catch(() => []);
+  const summaryP = api("/api/traces/" + encodeURIComponent(traceId) + "/summary?tenant=" + tenant)
+    .catch(() => null);
 
   let resp;
   try {
@@ -435,6 +590,8 @@ async function loadWaterfall(traceId) {
   }
   if (!current("waterfall", t)) return;
   const logs = await logsP;
+  if (!current("waterfall", t)) return;
+  const summary = await summaryP;
   if (!current("waterfall", t)) return;
 
   // Record trace_id in the hash so this exact waterfall is itself a
@@ -492,7 +649,7 @@ async function loadWaterfall(traceId) {
       ? `<div class="wf-logs" style="padding-left:${depth * 14 + 14}px">${spanLogs.map(logLineMarkup).join("")}</div>`
       : "";
     return `
-      <div class="wf-row">
+      <div class="wf-row" data-svc="${escapeHtml(s.service_name)}" data-name="${escapeHtml(s.span_name)}">
         <div class="wf-label" style="padding-left:${depth * 14}px" title="${escapeHtml(s.service_name)} — ${escapeHtml(s.span_name)}">
           ${escapeHtml(s.service_name)} — ${escapeHtml(s.span_name)}
         </div>
@@ -512,7 +669,9 @@ async function loadWaterfall(traceId) {
   const logCount = logs.length
     ? ` — ${logs.length} log record${logs.length === 1 ? "" : "s"}`
     : "";
-  wf.innerHTML = `<h3>Waterfall — ${escapeHtml(traceId)}${logCount}</h3>` + rows.join("") + traceLevelBlock;
+  wf.innerHTML = `<h3>Waterfall — ${escapeHtml(traceId)}${logCount}</h3>` +
+    traceSummaryMarkup(summary) + rows.join("") + traceLevelBlock;
+  bindSummaryGroups(wf);
   // The pane keeps its own scroll across loads; a freshly selected trace
   // should always start at its top.
   wf.scrollTop = 0;
@@ -613,6 +772,16 @@ function metricParams(base, aggregation, filters, extra) {
   const p = new URLSearchParams();
   for (const k of ["tenant", "metric_name", "since_minutes"]) if (base.has(k)) p.set(k, base.get(k));
   p.set("aggregation", aggregation);
+  (filters || []).forEach((f) => p.append("filter", f));
+  for (const [k, v] of Object.entries(extra || {})) if (v !== null && v !== undefined && v !== "") p.set(k, v);
+  return p;
+}
+
+// slowParams is the /api/slow counterpart of metricParams: the same base
+// window, the same filter pairs, and the endpoint's own extra parameters.
+function slowParams(base, filters, extra) {
+  const p = new URLSearchParams();
+  for (const k of ["tenant", "metric_name", "since_minutes"]) if (base.has(k)) p.set(k, base.get(k));
   (filters || []).forEach((f) => p.append("filter", f));
   for (const [k, v] of Object.entries(extra || {})) if (v !== null && v !== undefined && v !== "") p.set(k, v);
   return p;
@@ -823,28 +992,30 @@ async function renderDistribution(label, filters, baseParams) {
 
 // --- from a bucket to the requests in it ---
 //
-// aggregation=exemplars on the same metric_query, narrowed to the bucket's
-// bounds: the concrete requests the SDK attached to those observations. Each
-// leads to its trace (waterfall + logs). "All spans in this range" is
-// span_search with min_ms/max_ms, for when the exemplars are too few.
+// /api/slow on the same metric, narrowed to the bucket's bounds: the concrete
+// requests the SDK attached to those observations, each already carrying its
+// brief trace summary. Each leads to its trace (waterfall + logs). "All spans
+// in this range" is span_search with min_ms/max_ms, for when the results are
+// too few.
 async function showBucketRequests(lo, le, filters, baseParams, unit) {
   const t = ticket("bucket");
   const box = document.getElementById("bucket-req");
   const extra = { limit: "20" };
   if (lo !== null) extra.min_value = lo;
   if (le !== null) extra.max_value = le;
-  const p = metricParams(baseParams, "exemplars", filters, extra);
-  let resp;
+  const p = slowParams(baseParams, filters, extra);
+  let rows;
   try {
-    resp = await api("/api/metrics?" + p.toString());
+    rows = await api("/api/slow?" + p.toString());
   } catch (e) {
     if (current("bucket", t)) toast(e.message, true);
     return;
   }
   if (!current("bucket", t)) return;
+  rows = rows || [];
   const range = `${lo === null ? "" : fmtValue(lo, unit)} – ${le === null ? "∞" : fmtValue(le, unit)}`;
   box.innerHTML = `<div class="dist-head"><b>requests ${range}</b> ·
-    ${resp.rows.length} exemplar${resp.rows.length === 1 ? "" : "s"}</div>`;
+    ${rows.length} request${rows.length === 1 ? "" : "s"}</div>`;
 
   // Same bounds as a span duration filter, when the unit converts to ms.
   const toMs = { ms: 1, s: 1000, us: 0.001 }[unit];
@@ -860,11 +1031,52 @@ async function showBucketRequests(lo, le, filters, baseParams, unit) {
     box.querySelector(".dist-head").insertAdjacentHTML("beforeend",
       ` · <a href="#traces?${escapeHtml(sp.toString())}">all spans in this range →</a>`);
   }
-  if (resp.rows.length === 0) {
+  if (rows.length === 0) {
     box.insertAdjacentHTML("beforeend", `<div class="empty">no exemplars in this bucket — the sender attached none, or they had no trace</div>`);
     return;
   }
-  box.appendChild(exemplarTable(resp, unit, baseParams.get("since_minutes")));
+  box.appendChild(slowTable(rows, baseParams.get("since_minutes")));
+}
+
+// slowTable renders /api/slow rows: the measurement and the brief trace
+// summary the API already attached, so no follow-up query is needed.
+function slowTable(rows, since) {
+  const table = document.createElement("table");
+  table.className = "data-table";
+  table.innerHTML = `<thead><tr><th>Time</th><th>Value</th><th>Request</th><th>Spans</th>
+    <th>Untraced</th><th>Top group</th><th>Errors</th><th>Log</th><th>Trace</th></tr></thead><tbody></tbody>`;
+  const tbody = table.querySelector("tbody");
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">no slow requests matched</td></tr>`;
+    return table;
+  }
+  rows.forEach((r) => {
+    const trace = r.trace || {};
+    const root = trace.root;
+    const groups = Array.isArray(trace.groups) ? trace.groups : [];
+    const g = groups[0];
+    const problems = (trace.logs && Array.isArray(trace.logs.problems)) ? trace.logs.problems : [];
+    const p = problems[0];
+    const request = root && root.span_name ? root.span_name : "-";
+    const untraced = Number(trace.untraced_ms) || 0;
+    const top = g ? `${Number(g.count) || 0}× ${g.span_name} · self ${fmtMs(g.self_ms)}` : "-";
+    const logText = p ? `${p.severity_text || ""} ${p.body || ""}`.trim() : "";
+    const tr = document.createElement("tr");
+    tr.className = "clickable";
+    tr.innerHTML = `
+      <td>${escapeHtml(fmtTime(r.timestamp))}</td>
+      <td>${escapeHtml(fmtValue(r.value, r.unit))}</td>
+      <td>${escapeHtml(request)}</td>
+      <td>${escapeHtml(String(Number(trace.span_count) || 0))}</td>
+      <td>${escapeHtml(untraced > 0 ? fmtMs(untraced) : "-")}</td>
+      <td>${escapeHtml(top)}</td>
+      <td>${escapeHtml(String(Number(trace.error_count) || 0))}</td>
+      <td class="ts-log" title="${escapeHtml(logText)}">${p ? `<span class="${severityClass(p.severity_text)}">${escapeHtml(p.severity_text || "")}</span> ${escapeHtml(p.body || "")}` : "-"}</td>
+      <td>${traceCell(r.trace_id)}</td>`;
+    tr.addEventListener("click", () => viewTrace(r.trace_id, since));
+    tbody.appendChild(tr);
+  });
+  return table;
 }
 
 // exemplarTable renders aggregation=exemplars rows; a row opens its trace.
@@ -1090,6 +1302,7 @@ function init() {
     e.preventDefault();
     runTraceSearch();
   });
+  document.getElementById("f-slowest").addEventListener("click", runSlowestSearch);
   document.getElementById("logs-form").addEventListener("submit", (e) => {
     e.preventDefault();
     runLogSearch();

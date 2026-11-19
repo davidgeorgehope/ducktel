@@ -45,6 +45,7 @@
       <div id="f-attr-filters" class="attr-filters"></div>
       <button type="button" id="f-add-filter">+ attribute filter</button>
       <button type="submit">Search</button>
+      <button type="button" id="f-slowest" class="secondary">Slowest requests</button>
     </form>
 
     <div class="split">
@@ -53,6 +54,7 @@
           <thead><tr><th>Start</th><th>Service</th><th>Span</th><th>Duration</th><th>Status</th><th>Trace</th></tr></thead>
           <tbody></tbody>
         </table>
+        <div id="slow-results" class="hidden"></div>
       </div>
 
       <div id="waterfall" class="waterfall hidden"></div>

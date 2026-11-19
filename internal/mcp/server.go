@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -40,10 +41,13 @@ func NewServer(engine *query.Engine, flushURL, flushToken string) *Server {
 func (s *Server) Register(srv *sdkmcp.Server) {
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "trace_lookup",
-		Description: "Retrieve every span belonging to one trace, ordered by start time. " +
-			"Use this to reconstruct the full call tree of a single request: it returns all " +
-			"spans sharing the given trace id, with parent/child relationships, timing, status " +
-			"and attributes. Requires the tenant the trace belongs to.",
+		Description: "Look up one trace. By default (detail=summary) this returns a compact, already-aggregated summary: " +
+			"the root span, span count, duration, services, repeated span groups with total_ms and self_ms " +
+			"(time not spent in child spans, so groups add up), untraced_ms (root time no child span covers, " +
+			"i.e. uninstrumented code), the slowest spans, error spans, and WARN-and-above log records. " +
+			"Use this first to understand a request without spending context on every span. " +
+			"detail=spans returns every span with attributes, ordered by start time, which can be large: " +
+			"use it only when the summary is not enough. Requires the tenant the trace belongs to.",
 	}, s.traceLookup)
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
@@ -64,6 +68,18 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 			"trace_id/span_id can be joined to spans to see a failure's log line next " +
 			"to its trace.",
 	}, s.logSearch)
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "slow_requests",
+		Description: "The slowest requests in one call, each with a brief trace summary " +
+			"(root, span count, untraced_ms, top repeated span groups with self_ms, the 3 slowest spans, " +
+			"errors, first WARN-or-above log). " +
+			"This is the first call for \"why is X slow\": with metric_name it follows that " +
+			"metric's exemplars (min_value/max_value are in the metric's unit, for example one " +
+			"histogram bucket), otherwise it returns the slowest root spans (min_value/max_value " +
+			"in milliseconds). Follow a trace_id with trace_lookup for its full summary, or " +
+			"trace_lookup(detail=spans) for every span.",
+	}, s.slowRequests)
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "metric_query",
@@ -129,15 +145,28 @@ func (s *Server) flushBuffer(ctx context.Context, req *sdkmcp.CallToolRequest, a
 type traceLookupArgs struct {
 	TraceID string `json:"trace_id" jsonschema:"the trace id to retrieve, as 32 lowercase hex characters"`
 	Tenant  string `json:"tenant" jsonschema:"the tenant this trace belongs to; only data for this tenant is returned"`
-	Limit   int    `json:"limit,omitempty" jsonschema:"maximum spans to return, default 1000"`
+	Detail  string `json:"detail,omitempty" jsonschema:"summary (default) returns a compact aggregated summary; spans returns every span with attributes, ordered by start time, which can be large"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"maximum spans to return for detail=spans; default 1000"`
 }
 
 func (s *Server) traceLookup(ctx context.Context, req *sdkmcp.CallToolRequest, args traceLookupArgs) (*sdkmcp.CallToolResult, any, error) {
-	rows, cols, err := s.core.LookupTrace(args.TraceID, args.Tenant, args.Limit)
-	if err != nil {
-		return errResult(err.Error())
+	tenant := args.Tenant
+	switch args.Detail {
+	case "", "summary":
+		summary, err := s.core.SummarizeTrace(args.TraceID, tenant)
+		if err != nil {
+			return errResult(err.Error())
+		}
+		return jsonResult(summary, s.traceLink(tenant, args.TraceID))
+	case "spans":
+		rows, cols, err := s.core.LookupTrace(args.TraceID, tenant, args.Limit)
+		if err != nil {
+			return errResult(err.Error())
+		}
+		return withLink(rows, cols, s.traceLink(tenant, args.TraceID))
+	default:
+		return errResult(fmt.Sprintf("detail %q is not supported; use \"summary\" (the default) for the compact summary, or \"spans\" for every span with attributes", args.Detail))
 	}
-	return withLink(rows, cols, s.traceLink(args.Tenant, args.TraceID))
 }
 
 // --- span_search ---
@@ -198,6 +227,42 @@ func (s *Server) logSearch(ctx context.Context, req *sdkmcp.CallToolRequest, arg
 	return withLink(rows, cols, s.logLink(args.Tenant, args))
 }
 
+// --- slow_requests ---
+
+type slowRequestsArgs struct {
+	Tenant       string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
+	MetricName   string       `json:"metric_name,omitempty" jsonschema:"when set, follow this metric's exemplars. Omit to use the slowest root spans instead."`
+	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
+	SpanName     string       `json:"span_name,omitempty" jsonschema:"spans source only: exact span_name to match"`
+	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together)"`
+	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to look, in minutes. Default 60."`
+	MinValue     *float64     `json:"min_value,omitempty" jsonschema:"with metric_name: keep exemplars at least this value in the metric's unit; without it: keep spans lasting at least this many milliseconds"`
+	MaxValue     *float64     `json:"max_value,omitempty" jsonschema:"with metric_name: keep exemplars at most this value in the metric's unit; without it: keep spans lasting at most this many milliseconds"`
+	Limit        int          `json:"limit,omitempty" jsonschema:"maximum requests to return, default 5, cap 20"`
+}
+
+func (s *Server) slowRequests(ctx context.Context, req *sdkmcp.CallToolRequest, args slowRequestsArgs) (*sdkmcp.CallToolResult, any, error) {
+	filters := make([]telemetry.AttrFilter, len(args.Filters))
+	for i, f := range args.Filters {
+		filters[i] = telemetry.AttrFilter{Key: f.Key, Value: f.Value}
+	}
+
+	tenant := args.Tenant
+	rows, err := s.core.SlowRequests(tenant, telemetry.SlowOpts{
+		MetricName:  args.MetricName,
+		ServiceName: args.ServiceName,
+		SpanName:    args.SpanName,
+		Filters:     filters,
+		Since:       args.SinceMinutes,
+		Value:       telemetry.Range{Min: args.MinValue, Max: args.MaxValue},
+		Limit:       args.Limit,
+	})
+	if err != nil {
+		return errResult(err.Error())
+	}
+	return jsonResult(rows, s.slowLink(tenant, args))
+}
+
 // --- metric_query ---
 
 type metricQueryArgs struct {
@@ -241,6 +306,19 @@ func withLink(rows []map[string]any, cols []string, link string) (*sdkmcp.CallTo
 	res, _, err := rowsResult(rows, cols)
 	if err != nil {
 		return res, nil, err
+	}
+	return linked(res, link)
+}
+
+// jsonResult is withLink for a JSON-marshalable object (a summary or a list of
+// structs), rather than engine rows with a separate column order.
+func jsonResult(v any, link string) (*sdkmcp.CallToolResult, any, error) {
+	out, err := json.Marshal(v)
+	if err != nil {
+		return errResult(fmt.Sprintf("encoding results: %v", err))
+	}
+	res := &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: string(out)}},
 	}
 	return linked(res, link)
 }

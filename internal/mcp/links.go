@@ -93,6 +93,37 @@ func (s *Server) logLink(tenant string, a logSearchArgs) string {
 	return s.link("logs", p)
 }
 
+// slowLink opens the same question the slow_requests tool asked: the metric's
+// exemplars when metric_name was set, otherwise the span search sorted by
+// duration via the dashboard's min_ms/max_ms.
+func (s *Server) slowLink(tenant string, a slowRequestsArgs) string {
+	if a.MetricName != "" {
+		filters := append([]attrFilter{}, a.Filters...)
+		if a.ServiceName != "" {
+			filters = append(filters, attrFilter{Key: "service.name", Value: a.ServiceName})
+		}
+		return s.metricLink(tenant, metricQueryArgs{
+			Tenant:       tenant,
+			MetricName:   a.MetricName,
+			Aggregation:  "exemplars",
+			SinceMinutes: a.SinceMinutes,
+			Filters:      filters,
+			MinValue:     a.MinValue,
+			MaxValue:     a.MaxValue,
+			Limit:        a.Limit,
+		})
+	}
+	return s.spanLink(tenant, spanSearchArgs{
+		Tenant:       tenant,
+		ServiceName:  a.ServiceName,
+		SinceMinutes: a.SinceMinutes,
+		Limit:        a.Limit,
+		MinMs:        a.MinValue,
+		MaxMs:        a.MaxValue,
+		Filters:      a.Filters,
+	})
+}
+
 func (s *Server) metricLink(tenant string, a metricQueryArgs) string {
 	p := url.Values{}
 	p.Set("tenant", tenant)

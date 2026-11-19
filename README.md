@@ -270,15 +270,18 @@ Register it with an MCP client, e.g. Claude Code:
 claude mcp add ducktel -- ducktel mcp --data-dir /data
 ```
 
-Five generic, domain-agnostic tools:
+Six generic, domain-agnostic tools:
 
 | Tool | Purpose |
 |------|---------|
-| `trace_lookup(trace_id, tenant)` | every span of one trace, ordered by start time |
+| `trace_lookup(trace_id, tenant, detail, limit)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, error spans, WARN-and-above logs; `detail=spans` returns every span with attributes, ordered by start time, which can be large |
 | `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms)` | spans matching attribute key/value filters, optionally by duration |
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
 | `metric_query(metric_name, aggregation, since_minutes, group_by, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99 — `group_by` accepts columns or `attr.<key>` data-point attributes; `filters` match attributes or resource attributes. Histograms are aggregated over observations (count, sum, avg, min, max, percentiles from buckets, `buckets` for the distribution; cumulative series become increments). `exemplars` returns the concrete requests senders attached to the points (`trace_id`, `span_id`, value), slowest first, narrowed by `min_value`/`max_value`. On a gauge, `count` counts exported points, not events |
+| `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, untraced time, top repeated span groups with their self time, the 3 slowest spans, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
 | `flush_buffer()` | make just-received telemetry queryable now (only advertised when `--flush-url` is set) |
+
+**Start with `slow_requests` for "why is X slow".** It returns the slowest requests already carrying a brief trace summary, so one call answers the first question. Follow a `trace_id` with `trace_lookup` for the full summary, and use `trace_lookup(detail=spans)` only when every span with attributes is really needed.
 
 **From a number to a request.** A histogram bucket leads to the requests in it:
 `metric_query(aggregation="exemplars", min_value=lo, max_value=le)` gives trace ids
@@ -292,6 +295,14 @@ this is a click on a distribution bar, then on a request.
 result ends with a `dashboard_url:` line that opens the same query in the
 dashboard, so an agent can show a person where it found something. The dashboard's
 deep links use the tools' own parameter names, so the link is the query.
+
+**Trace summaries and slow requests over REST.** The dashboard's `/api` routes
+wrap the same core functions:
+
+- `GET /api/traces/{trace_id}/summary?tenant=` returns the compact summary object.
+- `GET /api/slow?tenant=&metric_name=&service_name=&span_name=&filter=k:v&since_minutes=&min_value=&max_value=&limit=` returns the `slow_requests` array.
+
+The parameters mean the same as in the MCP tools.
 
 **`tenant` is required on every query tool** — it's in the JSON schema, so a client cannot omit it — and every query hard-filters on the `tenant.id` resource attribute. A caller can narrow its scope but never widen it.
 
