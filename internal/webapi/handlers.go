@@ -41,6 +41,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/traces/{trace_id}", auth(h.handleLookupTrace))
 	mux.Handle("GET /api/traces/{trace_id}/summary", auth(h.handleTraceSummary))
 	mux.Handle("GET /api/slow", auth(h.handleSlowRequests))
+	mux.Handle("GET /api/compare", auth(h.handleCompareSpans))
 	mux.Handle("GET /api/logs", auth(h.handleSearchLogs))
 	mux.Handle("GET /api/metrics", auth(h.handleQueryMetric))
 	mux.Handle("GET /api/tenants", auth(h.handleListTenants))
@@ -91,17 +92,23 @@ func writeErr(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), status)
 }
 
-// queryFilters parses repeated ?filter=key:value pairs, the form used by the
-// span search, log search, metric and slow-request endpoints.
+// queryFilters parses repeated ?filter=key:value pairs (equal matches) and
+// ?filter_not=key:value pairs (exclusions), the form used by the span search,
+// log search, metric, slow-request and compare endpoints.
 func queryFilters(w http.ResponseWriter, r *http.Request) ([]telemetry.AttrFilter, bool) {
 	var filters []telemetry.AttrFilter
-	for _, raw := range r.URL.Query()["filter"] {
-		key, value, ok := strings.Cut(raw, ":")
-		if !ok {
-			http.Error(w, fmt.Sprintf("filter %q must be key:value", raw), http.StatusBadRequest)
-			return nil, false
+	for _, p := range []struct{ name, op string }{
+		{"filter", ""},
+		{"filter_not", "!="},
+	} {
+		for _, raw := range r.URL.Query()[p.name] {
+			key, value, ok := strings.Cut(raw, ":")
+			if !ok {
+				http.Error(w, fmt.Sprintf("%s %q must be key:value", p.name, raw), http.StatusBadRequest)
+				return nil, false
+			}
+			filters = append(filters, telemetry.AttrFilter{Key: key, Value: value, Op: p.op})
 		}
-		filters = append(filters, telemetry.AttrFilter{Key: key, Value: value})
 	}
 	return filters, true
 }
@@ -158,7 +165,7 @@ func (h *Handlers) handleSearchSpans(w http.ResponseWriter, r *http.Request) {
 
 	rows, cols, err := h.core.SearchSpansIn(
 		q.Get("tenant"), q.Get("service_name"), filters,
-		queryInt(r, "since_minutes", 0), queryInt(r, "limit", 0), dur,
+		queryInt(r, "since_minutes", 0), queryInt(r, "until_minutes", 0), queryInt(r, "limit", 0), dur,
 	)
 	if err != nil {
 		writeErr(w, err)
@@ -177,7 +184,7 @@ func (h *Handlers) handleSearchLogs(w http.ResponseWriter, r *http.Request) {
 
 	rows, cols, err := h.core.SearchLogs(
 		q.Get("tenant"), q.Get("trace_id"), q.Get("service_name"), q.Get("severity"), q.Get("search"), filters,
-		queryInt(r, "since_minutes", 0), queryInt(r, "limit", 0),
+		queryInt(r, "since_minutes", 0), queryInt(r, "until_minutes", 0), queryInt(r, "limit", 0),
 	)
 	if err != nil {
 		writeErr(w, err)
@@ -230,6 +237,7 @@ func (h *Handlers) handleSlowRequests(w http.ResponseWriter, r *http.Request) {
 		SpanName:    q.Get("span_name"),
 		Filters:     filters,
 		Since:       queryInt(r, "since_minutes", 0),
+		Until:       queryInt(r, "until_minutes", 0),
 		Value:       val,
 		Limit:       queryInt(r, "limit", 0),
 	})
@@ -240,15 +248,48 @@ func (h *Handlers) handleSlowRequests(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, rows)
 }
 
+// handleCompareSpans is the REST form of the compare_spans MCP tool: the
+// same scope and slow range, the same SpanComparison body.
+func (h *Handlers) handleCompareSpans(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	filters, ok := queryFilters(w, r)
+	if !ok {
+		return
+	}
+
+	slow, ok := queryRange(w, r, "min_ms", "max_ms")
+	if !ok {
+		return
+	}
+
+	cmp, err := h.core.CompareSpans(q.Get("tenant"), telemetry.CompareOpts{
+		ServiceName: q.Get("service_name"),
+		SpanName:    q.Get("span_name"),
+		SpanKind:    q.Get("span_kind"),
+		Filters:     filters,
+		Since:       queryInt(r, "since_minutes", 0),
+		Until:       queryInt(r, "until_minutes", 0),
+		Slow:        slow,
+		Limit:       queryInt(r, "limit", 0),
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, cmp)
+}
+
 // metricParamsHelp is the 400 body for /api/metrics without its required
 // parameters.
 const metricParamsHelp = "metric_name and aggregation are required. Parameters: " +
 	"metric_name (required; see /api/metric-names), " +
 	"aggregation (required: avg, sum, min, max, count, p50, p95, p99, exemplars; buckets for histograms), " +
 	"tenant, since_minutes (default 60), " +
+	"until_minutes (optional; where the window ends, default 0 = now, must be less than since_minutes), " +
 	"group_by (comma-separated columns, attr.<key> data-point attributes, or resource.<key> resource attributes), " +
 	"step (optional time series: 30s, 1m, 5m, 1h or whole seconds; adds a time column), " +
-	"filter=key:value (repeatable), " +
+	"filter=key:value (repeatable), filter_not=key:value (repeatable exclusion), " +
 	"min_value, max_value, limit (exemplars only)"
 
 func (h *Handlers) handleQueryMetric(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +314,7 @@ func (h *Handlers) handleQueryMetric(w http.ResponseWriter, r *http.Request) {
 	rows, cols, err := h.core.QueryMetricWith(
 		q.Get("tenant"), q.Get("metric_name"), q.Get("aggregation"),
 		queryInt(r, "since_minutes", 0), q.Get("group_by"), filters,
-		telemetry.MetricOpts{Value: val, Limit: queryInt(r, "limit", 0), Step: q.Get("step")},
+		telemetry.MetricOpts{Value: val, Limit: queryInt(r, "limit", 0), Step: q.Get("step"), Until: queryInt(r, "until_minutes", 0)},
 	)
 	if err != nil {
 		writeErr(w, err)

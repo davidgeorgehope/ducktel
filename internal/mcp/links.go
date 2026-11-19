@@ -54,7 +54,11 @@ func setFloat(p url.Values, k string, v *float64) {
 
 func addFilters(p url.Values, fs []attrFilter) {
 	for _, f := range fs {
-		p.Add("filter", fmt.Sprintf("%s:%s", f.Key, f.Value))
+		param := "filter"
+		if f.Op == "!=" {
+			param = "filter_not"
+		}
+		p.Add(param, fmt.Sprintf("%s:%s", f.Key, f.Value))
 	}
 }
 
@@ -90,6 +94,7 @@ func (s *Server) logLink(tenant string, a logSearchArgs) string {
 	setIf(p, "search", a.Search)
 	setInt(p, "since_minutes", a.SinceMinutes)
 	setInt(p, "limit", a.Limit)
+	addFilters(p, a.Filters)
 	return s.link("logs", p)
 }
 
@@ -122,6 +127,23 @@ func (s *Server) slowLink(tenant string, a slowRequestsArgs) string {
 		MaxMs:        a.MaxValue,
 		Filters:      a.Filters,
 	})
+}
+
+// compareLink opens the comparison view for the same scope and duration
+// range the compare_spans tool used.
+func (s *Server) compareLink(tenant string, a compareSpansArgs) string {
+	p := url.Values{}
+	p.Set("tenant", tenant)
+	setIf(p, "service_name", a.ServiceName)
+	setIf(p, "span_name", a.SpanName)
+	setIf(p, "span_kind", a.SpanKind)
+	setInt(p, "since_minutes", a.SinceMinutes)
+	setInt(p, "until_minutes", a.UntilMinutes)
+	setFloat(p, "min_ms", a.MinMs)
+	setFloat(p, "max_ms", a.MaxMs)
+	setInt(p, "limit", a.Limit)
+	addFilters(p, a.Filters)
+	return s.link("compare", p)
 }
 
 func (s *Server) metricLink(tenant string, a metricQueryArgs) string {

@@ -31,10 +31,43 @@ func NewCore(engine *query.Engine) *Core {
 	return &Core{engine: engine, tenantAttr: "tenant.id"}
 }
 
-// AttrFilter is one key/value attribute match, ANDed with any others.
+// AttrFilter is one key/value attribute match, ANDed with any others. Op is
+// "" or "=" for an exact match, and "!=" to exclude records whose key has
+// that value.
 type AttrFilter struct {
 	Key   string
 	Value string
+	Op    string
+}
+
+// attrFilterCond builds the SQL and parameters for one attribute filter. Both
+// the record's own attributes and its resource attributes are checked, so a
+// caller does not need to know which one holds the key. Equal filters keep the
+// original SQL exactly; callers that already passed no op see no change.
+func attrFilterCond(f AttrFilter) (string, []any, error) {
+	if f.Key == "" {
+		return "", nil, invalidInput("attribute filter key must not be empty")
+	}
+	key := jsonPath(f.Key)
+	switch f.Op {
+	case "", "=":
+		return "(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)",
+			[]any{key, f.Value, key, f.Value}, nil
+	case "!=":
+		// A missing key coalesces to '', so it is kept for a non-empty
+		// exclusion value. With an empty value the caller means "present and
+		// non-empty somewhere", which needs OR rather than AND: the plain
+		// expression would require the key in both scopes.
+		op := "AND"
+		if f.Value == "" {
+			op = "OR"
+		}
+		return "(coalesce(json_extract_string(attributes, ?), '') <> ? " + op +
+				" coalesce(json_extract_string(resource_attributes, ?), '') <> ?)",
+			[]any{key, f.Value, key, f.Value}, nil
+	default:
+		return "", nil, invalidInput("attribute filter op %q is not supported; use = (default) or !=", f.Op)
+	}
 }
 
 // errInvalidInput classifies an error as a caller input problem (missing or
@@ -123,8 +156,61 @@ func (c *Core) LookupTrace(traceID, tenant string, limit int) ([]map[string]any,
 
 // SearchSpans finds spans matching attribute filters within a time range,
 // scoped to tenant.
-func (c *Core) SearchSpans(tenant, serviceName string, filters []AttrFilter, sinceMinutes, limit int) ([]map[string]any, []string, error) {
-	return c.SearchSpansIn(tenant, serviceName, filters, sinceMinutes, limit, Range{})
+func (c *Core) SearchSpans(tenant, serviceName string, filters []AttrFilter, sinceMinutes, untilMinutes, limit int) ([]map[string]any, []string, error) {
+	return c.SearchSpansIn(tenant, serviceName, filters, sinceMinutes, untilMinutes, limit, Range{})
+}
+
+// Window is a query's time range, in minutes before now:
+// [now - Since, now - Until). Since 0 or less means the default 60 minutes;
+// Until 0 means now, so the common case has no end bound at all.
+type Window struct {
+	Since int
+	Until int
+}
+
+// bounds resolves the window against now. end is the zero time when the
+// window ends at now: callers add no end predicate in that case, which keeps
+// their SQL and parameters exactly as they were before Until existed.
+func (w Window) bounds(now time.Time) (start, end time.Time) {
+	since := w.Since
+	if since <= 0 {
+		since = 60
+	}
+	start = now.Add(-time.Duration(since) * time.Minute)
+	if w.Until > 0 {
+		end = now.Add(-time.Duration(w.Until) * time.Minute)
+	}
+	return start, end
+}
+
+// validate rejects a window that cannot produce results: a negative end, or
+// an end at or before the start.
+func (w Window) validate() error {
+	if w.Until < 0 {
+		return invalidInput("until_minutes must not be negative")
+	}
+	since := w.Since
+	if since <= 0 {
+		since = 60
+	}
+	if w.Until > 0 && w.Until >= since {
+		return invalidInput("until_minutes (%d) must be less than since_minutes (%d)", w.Until, since)
+	}
+	return nil
+}
+
+// length is how much time the window covers, used to bound a step query's
+// bucket count.
+func (w Window) length() time.Duration {
+	since := w.Since
+	if since <= 0 {
+		since = 60
+	}
+	until := w.Until
+	if until < 0 {
+		until = 0
+	}
+	return time.Duration(since-until) * time.Minute
 }
 
 // Range bounds a numeric value, both ends inclusive. A nil end is open.
@@ -155,7 +241,7 @@ func (r Range) validate(what string) error {
 
 // SearchSpansIn is SearchSpans restricted to spans whose duration_ms falls in
 // d. This is how a histogram bucket leads to the requests that landed in it.
-func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, sinceMinutes, limit int, d Range) ([]map[string]any, []string, error) {
+func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, sinceMinutes, untilMinutes, limit int, d Range) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {
 		return nil, nil, err
 	}
@@ -166,11 +252,11 @@ func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, s
 	if limit > 1000 {
 		limit = 1000
 	}
-	since := sinceMinutes
-	if since <= 0 {
-		since = 60
+	win := Window{Since: sinceMinutes, Until: untilMinutes}
+	if err := win.validate(); err != nil {
+		return nil, nil, err
 	}
-	cutoffTime := time.Now().Add(-time.Duration(since) * time.Minute)
+	cutoffTime, endTime := win.bounds(time.Now())
 	cutoff := cutoffTime.UnixMicro()
 
 	fc, fp, err := c.spanConds(tenant, serviceName, filters, d)
@@ -179,6 +265,10 @@ func (c *Core) SearchSpansIn(tenant, serviceName string, filters []AttrFilter, s
 	}
 	conds := append([]string{"start_time >= ?"}, fc...)
 	params := append([]any{cutoff}, fp...)
+	if !endTime.IsZero() {
+		conds = append(conds, "start_time < ?")
+		params = append(params, endTime.UnixMicro())
+	}
 
 	params = append(params, limit)
 	q := `SELECT trace_id, span_id, service_name, span_name, span_kind,
@@ -209,17 +299,17 @@ func (c *Core) spanConds(tenant, serviceName string, filters []AttrFilter, d Ran
 		params = append(params, serviceName)
 	}
 	for _, f := range filters {
-		if f.Key == "" {
-			return nil, nil, invalidInput("attribute filter key must not be empty")
-		}
 		// Search span attributes AND resource attributes: a caller should not
 		// need to know which one a key lives in. `service.name`, for example,
 		// arrives as a resource attribute (and is additionally promoted to the
 		// service_name column) but is absent from span attributes — filtering
 		// only attributes silently matches nothing for the most common key.
-		conds = append(conds,
-			"(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)")
-		params = append(params, jsonPath(f.Key), f.Value, jsonPath(f.Key), f.Value)
+		cond, p, err := attrFilterCond(f)
+		if err != nil {
+			return nil, nil, err
+		}
+		conds = append(conds, cond)
+		params = append(params, p...)
 	}
 	dc, dp := d.conds("duration_ms")
 	conds = append(conds, dc...)
@@ -238,9 +328,9 @@ func (c *Core) spanConds(tenant, serviceName string, filters []AttrFilter, d Ran
 // traceID, when non-empty, restricts to records carrying that trace id. A
 // trace id is a precise key, so — symmetric with LookupTrace — it defaults
 // to the whole history rather than the 60-minute window; pass an explicit
-// sinceMinutes to bound it anyway. This is what lets a trace's logs be
-// found however old the trace is.
-func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string, filters []AttrFilter, sinceMinutes, limit int) ([]map[string]any, []string, error) {
+// sinceMinutes to bound it anyway. An untilMinutes bound still applies there.
+// This is what lets a trace's logs be found however old the trace is.
+func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string, filters []AttrFilter, sinceMinutes, untilMinutes, limit int) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {
 		return nil, nil, err
 	}
@@ -251,6 +341,12 @@ func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string,
 	if limit > 1000 {
 		limit = 1000
 	}
+
+	win := Window{Since: sinceMinutes, Until: untilMinutes}
+	if err := win.validate(); err != nil {
+		return nil, nil, err
+	}
+	now := time.Now()
 
 	conds := []string{c.tenantPredicate()}
 	params := []any{tenant}
@@ -263,9 +359,13 @@ func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string,
 	}
 	var cutoffTime time.Time
 	if since > 0 {
-		cutoffTime = time.Now().Add(-time.Duration(since) * time.Minute)
+		cutoffTime = now.Add(-time.Duration(since) * time.Minute)
 		conds = append(conds, "timestamp >= ?")
 		params = append(params, cutoffTime.UnixMicro())
+	}
+	if win.Until > 0 {
+		conds = append(conds, "timestamp < ?")
+		params = append(params, now.Add(-time.Duration(win.Until)*time.Minute).UnixMicro())
 	}
 
 	if traceID != "" {
@@ -285,15 +385,15 @@ func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string,
 		params = append(params, "%"+search+"%")
 	}
 	for _, f := range filters {
-		if f.Key == "" {
-			return nil, nil, invalidInput("attribute filter key must not be empty")
-		}
 		// Dual-scope like SearchSpans: the caller should not need to know
 		// whether a key lives in the record's own attributes or its resource
 		// attributes.
-		conds = append(conds,
-			"(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)")
-		params = append(params, jsonPath(f.Key), f.Value, jsonPath(f.Key), f.Value)
+		cond, p, err := attrFilterCond(f)
+		if err != nil {
+			return nil, nil, err
+		}
+		conds = append(conds, cond)
+		params = append(params, p...)
 	}
 
 	params = append(params, limit)
@@ -454,12 +554,14 @@ func metricTimeExpr(step time.Duration) string {
 // p50/p95/p99 interpolated from merged buckets, and buckets (one row per
 // bucket: le, value) — the last two for explicit-bucket histograms only. Cumulative series are turned into increments first; see
 // histogram.go.
-func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes int, groupBy string, filters []AttrFilter) ([]map[string]any, []string, error) {
-	return c.QueryMetricWith(tenant, metricName, aggregation, sinceMinutes, groupBy, filters, MetricOpts{})
+func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes, untilMinutes int, groupBy string, filters []AttrFilter) ([]map[string]any, []string, error) {
+	return c.QueryMetricWith(tenant, metricName, aggregation, sinceMinutes, groupBy, filters, MetricOpts{Until: untilMinutes})
 }
 
 // MetricOpts are the optional parameters beyond QueryMetric's signature.
 type MetricOpts struct {
+	// Until ends the window this many minutes before now; 0 means now.
+	Until int
 	// Value keeps exemplars whose value is in range, e.g. one histogram
 	// bucket's bounds.
 	Value Range
@@ -488,11 +590,11 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 		return nil, nil, invalidInput("metric_name is required")
 	}
 
-	since := sinceMinutes
-	if since <= 0 {
-		since = 60
+	win := Window{Since: sinceMinutes, Until: opts.Until}
+	if err := win.validate(); err != nil {
+		return nil, nil, err
 	}
-	cutoffTime := time.Now().Add(-time.Duration(since) * time.Minute)
+	cutoffTime, endTime := win.bounds(time.Now())
 	cutoff := cutoffTime.UnixMicro()
 
 	step, err := parseMetricStep(opts.Step)
@@ -500,7 +602,7 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 		return nil, nil, err
 	}
 	if step > 0 {
-		if err := validateMetricBuckets(time.Duration(since)*time.Minute, step); err != nil {
+		if err := validateMetricBuckets(win.length(), step); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -525,17 +627,21 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	}
 	conds := []string{"metric_name = ?", "timestamp >= ?", c.tenantPredicate()}
 	params := []any{metricName, cutoff, tenant}
+	if !endTime.IsZero() {
+		conds = append(conds, "timestamp < ?")
+		params = append(params, endTime.UnixMicro())
+	}
 
 	for _, f := range filters {
-		if f.Key == "" {
-			return nil, nil, invalidInput("attribute filter key must not be empty")
-		}
 		// Same dual-scope match as span_search: a caller should not need to
 		// know whether a key lives in data-point attributes or resource
 		// attributes.
-		conds = append(conds,
-			"(json_extract_string(attributes, ?) = ? OR json_extract_string(resource_attributes, ?) = ?)")
-		params = append(params, jsonPath(f.Key), f.Value, jsonPath(f.Key), f.Value)
+		cond, p, err := attrFilterCond(f)
+		if err != nil {
+			return nil, nil, err
+		}
+		conds = append(conds, cond)
+		params = append(params, p...)
 	}
 
 	if strings.EqualFold(aggregation, "exemplars") {
@@ -570,7 +676,7 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	if len(typeRows) == 1 {
 		if mt, _ := typeRows[0]["metric_type"].(string); mt == typeHistogram || mt == typeExpHistogram {
 			hconds := strings.Join(append(conds, "metric_type = ?"), " AND ")
-			return c.queryHistogram(mt, aggregation, groupExprs, groupAliases, hconds, append(params, mt), cutoffTime)
+			return c.queryHistogram(mt, aggregation, groupExprs, groupAliases, hconds, append(params, mt), cutoffTime, endTime)
 		}
 	}
 

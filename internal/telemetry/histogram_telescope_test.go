@@ -37,7 +37,7 @@ func histStepValues(t *testing.T, c *Core, metric, agg, groupBy string) map[hist
 
 func histGroupValues(t *testing.T, c *Core, metric, agg, groupBy string) map[string]float64 {
 	t.Helper()
-	rows, _, err := c.QueryMetric("acme", metric, agg, 60, groupBy, nil)
+	rows, _, err := c.QueryMetric("acme", metric, agg, 60, 0, groupBy, nil)
 	if err != nil {
 		t.Fatalf("%s %s: %v", metric, agg, err)
 	}

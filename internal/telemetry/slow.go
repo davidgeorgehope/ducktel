@@ -24,6 +24,7 @@ type SlowOpts struct {
 	SpanName    string // spans source only: exact span_name
 	Filters     []AttrFilter
 	Since       int   // minutes, default 60
+	Until       int   // minutes before now where the window ends; default 0 (now)
 	Value       Range // metric: exemplar value; spans: duration_ms
 	Limit       int   // default 5, cap 20
 }
@@ -46,11 +47,11 @@ func (c *Core) SlowRequests(tenant string, o SlowOpts) ([]SlowRequest, error) {
 		limit = 20
 	}
 
-	since := o.Since
-	if since <= 0 {
-		since = 60
+	win := Window{Since: o.Since, Until: o.Until}
+	if err := win.validate(); err != nil {
+		return nil, err
 	}
-	cutoffTime := time.Now().Add(-time.Duration(since) * time.Minute)
+	cutoffTime, endTime := win.bounds(time.Now())
 
 	out := make([]SlowRequest, 0, limit)
 	ids := make([]string, 0, limit)
@@ -66,8 +67,8 @@ func (c *Core) SlowRequests(tenant string, o SlowOpts) ([]SlowRequest, error) {
 			filters = append(filters, AttrFilter{Key: "service.name", Value: o.ServiceName})
 		}
 
-		rows, _, err := c.QueryMetricWith(tenant, o.MetricName, "exemplars", since, "", filters,
-			MetricOpts{Value: o.Value, Limit: limit})
+		rows, _, err := c.QueryMetricWith(tenant, o.MetricName, "exemplars", o.Since, "", filters,
+			MetricOpts{Value: o.Value, Limit: limit, Until: o.Until})
 		if err != nil {
 			return nil, err
 		}
@@ -99,6 +100,10 @@ func (c *Core) SlowRequests(tenant string, o SlowOpts) ([]SlowRequest, error) {
 		}
 		conds = append([]string{"parent_span_id = ''", "start_time >= ?"}, conds...)
 		params = append([]any{cutoffTime.UnixMicro()}, params...)
+		if !endTime.IsZero() {
+			conds = append(conds, "start_time < ?")
+			params = append(params, endTime.UnixMicro())
+		}
 		if o.SpanName != "" {
 			conds = append(conds, "span_name = ?")
 			params = append(params, o.SpanName)

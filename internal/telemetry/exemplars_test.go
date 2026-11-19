@@ -131,7 +131,7 @@ func TestExemplarsGroupedAndFiltered(t *testing.T) {
 func TestSpansByDuration(t *testing.T) {
 	c := newCorrelationCore(t)
 	count := func(r Range) []string {
-		rows, _, err := c.SearchSpansIn("acme", "", nil, 0, 0, r)
+		rows, _, err := c.SearchSpansIn("acme", "", nil, 0, 0, 0, r)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -146,7 +146,7 @@ func TestSpansByDuration(t *testing.T) {
 	if got := count(Range{}); len(got) != 5 {
 		t.Fatalf("no range: got %v", got)
 	}
-	if _, _, err := c.SearchSpansIn("acme", "", nil, 0, 0, Range{Min: ptr(2), Max: ptr(1)}); !IsInvalidInput(err) {
+	if _, _, err := c.SearchSpansIn("acme", "", nil, 0, 0, 0, Range{Min: ptr(2), Max: ptr(1)}); !IsInvalidInput(err) {
 		t.Fatalf("min above max: want invalid input, got %v", err)
 	}
 }
@@ -158,17 +158,17 @@ func TestNoMatchingPointsIsEmpty(t *testing.T) {
 	c := newCorrelationCore(t)
 	none := []AttrFilter{{Key: "http.route", Value: "/nowhere"}}
 	for _, agg := range []string{"buckets", "exemplars"} {
-		rows, _, err := c.QueryMetric("acme", "http.server.duration", agg, 60, "", none)
+		rows, _, err := c.QueryMetric("acme", "http.server.duration", agg, 60, 0, "", none)
 		if err != nil || len(rows) != 0 {
 			t.Fatalf("%s: rows %v err %v", agg, rows, err)
 		}
 	}
 	// count keeps its one-row answer for an empty window.
-	rows, _, err := c.QueryMetric("acme", "http.server.duration", "count", 60, "", none)
+	rows, _, err := c.QueryMetric("acme", "http.server.duration", "count", 60, 0, "", none)
 	if err != nil || len(rows) != 1 || toFloat(rows[0]["value"]) != 0 {
 		t.Fatalf("count: rows %v err %v", rows, err)
 	}
-	if _, _, err := c.QueryMetric("acme", "http.server.duration", "nope", 60, "", none); !IsInvalidInput(err) {
+	if _, _, err := c.QueryMetric("acme", "http.server.duration", "nope", 60, 0, "", none); !IsInvalidInput(err) {
 		t.Fatalf("unknown aggregation: %v", err)
 	}
 }
