@@ -37,7 +37,9 @@ jobs:
 
       # An explicit timeout, well under Go's 10m default: a deadlock (e.g. a
       # non-reentrant mutex locked twice) does not fail fast — it blocks until
-      # the timeout, so the default would buy ten minutes of silence. The whole
-      # suite runs in ~1.5s, so 2m is generous and still fails quickly.
+      # the timeout, so the default would buy ten minutes of silence. The
+      # writer package (compaction on real parquet files) takes 35-60s under
+      # -race on a hosted runner and over 2m on a slow one, so 5m leaves room
+      # and still fails well before the default.
       - name: Test
-        run: go test -race -count=1 -timeout 2m ./...
+        run: go test -race -count=1 -timeout 5m ./...
