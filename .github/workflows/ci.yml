@@ -43,3 +43,11 @@ jobs:
       # and still fails well before the default.
       - name: Test
         run: go test -race -count=1 -timeout 5m ./...
+
+      # The dashboard is plain ES modules with no build step. Its unit tests use
+      # node's built-in test runner; the runner image ships node, so there is
+      # no setup step and no npm install.
+      - name: Dashboard tests
+        run: |
+          for f in web/dashboard/*.js; do node --check "$f"; done
+          node --test web/dashboard/*.test.mjs
