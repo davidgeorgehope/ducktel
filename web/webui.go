@@ -10,7 +10,11 @@ import (
 	"io/fs"
 )
 
-//go:embed dashboard/*
+// The embed pattern names each shipped asset type explicitly so the JS test
+// file (investigate.test.mjs) is not baked into the binary. webui_test.go
+// proves both that the assets are present and that no .test.mjs file ships.
+//
+//go:embed dashboard/*.html dashboard/*.css dashboard/*.js
 var files embed.FS
 
 // FS returns the embedded dashboard assets rooted at "dashboard", so a caller

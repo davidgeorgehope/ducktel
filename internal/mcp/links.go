@@ -129,7 +129,7 @@ func (s *Server) slowLink(tenant string, a slowRequestsArgs) string {
 	})
 }
 
-// compareLink opens the comparison view for the same scope and duration
+// compareLink opens the investigate view for the same scope and duration
 // range the compare_spans tool used.
 func (s *Server) compareLink(tenant string, a compareSpansArgs) string {
 	p := url.Values{}
@@ -143,7 +143,7 @@ func (s *Server) compareLink(tenant string, a compareSpansArgs) string {
 	setFloat(p, "max_ms", a.MaxMs)
 	setInt(p, "limit", a.Limit)
 	addFilters(p, a.Filters)
-	return s.link("compare", p)
+	return s.link("investigate", p)
 }
 
 func (s *Server) metricLink(tenant string, a metricQueryArgs) string {
