@@ -3,6 +3,7 @@ package telemetry
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -347,19 +348,24 @@ func validAttrKey(key string) bool {
 // A plain column name must be on the knownColumns allowlist; a data-point
 // attribute key is written attr.<key> (or attributes.<key>) and extracts
 // json_extract_string(attributes, '$."<key>"'), aliased back to the key so
-// the result rows carry e.g. "attr.kind". The attribute form is how
-// metric_query reaches data-point attributes like kind/backend/status, which
-// live in the metrics.attributes JSON column rather than as first-class
-// columns.
+// the result rows carry e.g. "attr.kind". The resource form resource.<key>
+// (or resource_attributes.<key>) extracts from resource_attributes instead,
+// which is where host.name, k8s.pod.name and service.name live. Both forms
+// share validAttrKey and jsonPath so a key cannot escape its string literal.
 func metricGroupExpr(key string) (expr, alias string, ok bool) {
-	for _, prefix := range []string{"attr.", "attributes."} {
-		if rest, found := strings.CutPrefix(key, prefix); found {
+	for _, p := range []struct{ prefix, column string }{
+		{"attr.", "attributes"},
+		{"attributes.", "attributes"},
+		{"resource.", "resource_attributes"},
+		{"resource_attributes.", "resource_attributes"},
+	} {
+		if rest, found := strings.CutPrefix(key, p.prefix); found {
 			if !validAttrKey(rest) {
 				return "", "", false
 			}
 			// Safe to embed: rest passed validAttrKey, so it contains no quote
 			// characters and jsonPath's own escaping is a no-op here.
-			return fmt.Sprintf("json_extract_string(attributes, '%s')", jsonPath(rest)), key, true
+			return fmt.Sprintf("json_extract_string(%s, '%s')", p.column, jsonPath(rest)), key, true
 		}
 	}
 	col, ok := quoteIdent(key)
@@ -369,11 +375,71 @@ func metricGroupExpr(key string) (expr, alias string, ok bool) {
 	return col, col, true
 }
 
+// maxMetricBuckets bounds how many time buckets one step query may produce.
+// A step is a dashboard panel's resolution, not a way to fetch every raw
+// point through the grouped path; refusing an over-fine step keeps the
+// response bounded and tells the caller what to use instead.
+const maxMetricBuckets = 1500
+
+// parseMetricStep parses the optional step parameter. A bare integer means
+// seconds (so step=60 works like step=1m), anything else is a Go duration.
+// A zero step means no time bucketing; below one second is rejected because
+// a smaller bucket is finer than the stored microsecond timestamps are useful
+// for and would always exceed the bucket guard.
+func parseMetricStep(step string) (time.Duration, error) {
+	s := strings.TrimSpace(step)
+	if s == "" {
+		return 0, nil
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		if n < 1 {
+			return 0, invalidInput("step %q is too small; the minimum is 1s", step)
+		}
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, invalidInput("step %q is not a duration; use e.g. 30s, 1m, 5m, 1h, or a whole number of seconds", step)
+	}
+	if d < time.Second {
+		return 0, invalidInput("step %q is too small; the minimum is 1s", step)
+	}
+	return d, nil
+}
+
+// validateMetricBuckets returns an invalid-input error when a step over the
+// requested window would produce more than maxMetricBuckets buckets. The
+// error names the smallest allowed step so a caller can retry without
+// guessing.
+func validateMetricBuckets(since, step time.Duration) error {
+	buckets := (since + step - 1) / step
+	if buckets <= maxMetricBuckets {
+		return nil
+	}
+	minStep := (since + maxMetricBuckets - 1) / maxMetricBuckets
+	if minStep < time.Second {
+		minStep = time.Second
+	}
+	return invalidInput(
+		"step %s makes %d buckets over a %s window; at most %d buckets are allowed, so the smallest allowed step is %s",
+		step, buckets, since, maxMetricBuckets, minStep)
+}
+
+// metricTimeExpr is the bucket start as Unix microseconds, the same unit the
+// timestamp columns of every other result use. Integer division by the step
+// (rather than a calendar function) keeps buckets aligned to the Unix epoch,
+// so a 1m step falls on minute boundaries and a 1h step on hour boundaries.
+func metricTimeExpr(step time.Duration) string {
+	us := step.Microseconds()
+	return fmt.Sprintf("CAST((timestamp // %d) * %d AS BIGINT)", us, us)
+}
+
 // QueryMetric aggregates a metric over a time range, optionally grouped by
 // columns and/or data-point attribute keys, scoped to tenant.
 //
 // groupBy is comma-separated; each key is either a plain column (the
-// knownColumns allowlist) or attr.<key> / attributes.<key> for a data-point
+// knownColumns allowlist), attr.<key> / attributes.<key> for a data-point
+// attribute, or resource.<key> / resource_attributes.<key> for a resource
 // attribute. filters match on data-point attributes OR resource attributes,
 // exactly like span_search.
 //
@@ -392,19 +458,28 @@ func (c *Core) QueryMetric(tenant, metricName, aggregation string, sinceMinutes 
 	return c.QueryMetricWith(tenant, metricName, aggregation, sinceMinutes, groupBy, filters, MetricOpts{})
 }
 
-// MetricOpts are the parameters only aggregation=exemplars uses.
+// MetricOpts are the optional parameters beyond QueryMetric's signature.
 type MetricOpts struct {
 	// Value keeps exemplars whose value is in range, e.g. one histogram
 	// bucket's bounds.
 	Value Range
 	// Limit caps the exemplar rows; default 20, cap 200.
 	Limit int
+	// Step, when set, returns a time series: one row per (time bucket,
+	// group) instead of one row per group. See QueryMetricWith.
+	Step string
 }
 
-// QueryMetricWith is QueryMetric plus the exemplar options. aggregation
-// "exemplars" returns the exemplars the senders attached to the metric's
+// QueryMetricWith is QueryMetric plus the optional metric options (step and
+// the exemplar range/limit). aggregation "exemplars" returns the exemplars
+// the senders attached to the metric's
 // points: concrete requests (trace_id, span_id) with their measured value,
 // slowest first. It works on every metric type that carries exemplars.
+//
+// A non-empty opts.Step adds a leading "time" column (bucket start, Unix
+// microseconds, aligned to the Unix epoch) and one row per time bucket and
+// group, ordered by time then the group keys. With step, exemplars ignores
+// the step and returns its usual flat list.
 func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinutes int, groupBy string, filters []AttrFilter, opts MetricOpts) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {
 		return nil, nil, err
@@ -420,6 +495,16 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	cutoffTime := time.Now().Add(-time.Duration(since) * time.Minute)
 	cutoff := cutoffTime.UnixMicro()
 
+	step, err := parseMetricStep(opts.Step)
+	if err != nil {
+		return nil, nil, err
+	}
+	if step > 0 {
+		if err := validateMetricBuckets(time.Duration(since)*time.Minute, step); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	selectCols := []string{}
 	var groupExprs, groupAliases []string
 	groupKeys := metricGroupKeys(groupBy)
@@ -427,7 +512,7 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 		expr, alias, ok := metricGroupExpr(key)
 		if !ok {
 			return nil, nil, invalidInput(
-				"group_by %q is not a groupable column; allowed columns: %s — or attr.<key> / attributes.<key> for a data-point attribute (key charset %s)",
+				"group_by %q is not a groupable column; allowed columns: %s; attr.<key> / attributes.<key> for a data-point attribute; resource.<key> / resource_attributes.<key> for a resource attribute (key charset %s)",
 				key, knownColumnsList(), attrKeyCharset)
 		}
 		groupExprs = append(groupExprs, expr)
@@ -454,7 +539,19 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	}
 
 	if strings.EqualFold(aggregation, "exemplars") {
+		// Exemplars are individual requests, not an aggregate over time, so a
+		// step would have nothing to aggregate. The parameter is accepted and
+		// validated but does not change the result shape.
 		return c.queryExemplars(groupExprs, groupAliases, strings.Join(conds, " AND "), params, cutoffTime, opts)
+	}
+
+	// The time bucket is an extra leading group expression, added after the
+	// exemplar branch so that path keeps its flat result shape.
+	if step > 0 {
+		expr := metricTimeExpr(step)
+		groupExprs = append([]string{expr}, groupExprs...)
+		groupAliases = append([]string{"time"}, groupAliases...)
+		selectCols = append([]string{fmt.Sprintf(`%s AS "time"`, expr)}, selectCols...)
 	}
 
 	// A histogram keeps its data in count/sum/bucket_counts, not value_double;
@@ -486,15 +583,21 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	q := "SELECT " + strings.Join(selectCols, ", ") + ` FROM metrics
 	      WHERE ` + strings.Join(conds, " AND ")
 
-	if len(groupKeys) > 0 {
+	if len(groupExprs) > 0 {
 		// Positional GROUP BY/ORDER BY: the group expressions are the first
 		// selectCols, in order, so this refers to them without repeating
 		// their (embedded) expressions.
-		positions := make([]string, len(groupKeys))
+		positions := make([]string, len(groupExprs))
 		for i := range positions {
 			positions[i] = fmt.Sprintf("%d", i+1)
 		}
-		q += " GROUP BY " + strings.Join(positions, ", ") + " ORDER BY 1"
+		order := " ORDER BY 1"
+		if step > 0 {
+			// A time series needs time first, then every group, so rows of one
+			// bucket stay together in a stable order.
+			order = " ORDER BY " + strings.Join(positions, ", ")
+		}
+		q += " GROUP BY " + strings.Join(positions, ", ") + order
 	}
 
 	return c.engine.QuerySince(cutoffTime, q, params...)

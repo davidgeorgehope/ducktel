@@ -270,7 +270,8 @@ type metricQueryArgs struct {
 	MetricName   string       `json:"metric_name" jsonschema:"the metric name to aggregate, e.g. process.cpu.utilization"`
 	Aggregation  string       `json:"aggregation" jsonschema:"one of: avg, sum, min, max, count, p50, p95, p99, buckets (histograms only), exemplars"`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to aggregate, in minutes. Default 60."`
-	GroupBy      string       `json:"group_by,omitempty" jsonschema:"optional comma-separated grouping keys: a column name (service_name, metric_type, ...) or a data-point attribute as attr.<key> / attributes.<key>, e.g. attr.kind groups by the metric point's attributes JSON key 'kind'. Result rows carry the key as their column name."`
+	GroupBy      string       `json:"group_by,omitempty" jsonschema:"optional comma-separated grouping keys: a column name (service_name, metric_type, ...), a data-point attribute as attr.<key> / attributes.<key>, or a resource attribute as resource.<key> / resource_attributes.<key>, e.g. resource.host.name groups by the resource attributes JSON key 'host.name'. Result rows carry the key as their column name."`
+	Step         string       `json:"step,omitempty" jsonschema:"optional time-series step as a duration (30s, 1m, 5m, 1h) or a whole number of seconds. Adds a leading time column (bucket start in Unix microseconds, UTC) and one row per time bucket and group, ordered by time then groups. At most 1500 buckets per query; exemplars ignores step."`
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match, ANDed together; matched against data-point attributes OR resource attributes, same as span_search filters. Dotted keys are handled correctly."`
 	MinValue     *float64     `json:"min_value,omitempty" jsonschema:"exemplars only: keep exemplars whose value is at least this (inclusive)"`
 	MaxValue     *float64     `json:"max_value,omitempty" jsonschema:"exemplars only: keep exemplars whose value is at most this (inclusive); with min_value, e.g. one bucket's bounds"`
@@ -285,7 +286,7 @@ func (s *Server) metricQuery(ctx context.Context, req *sdkmcp.CallToolRequest, a
 
 	tenant := args.Tenant
 	rows, cols, err := s.core.QueryMetricWith(tenant, args.MetricName, args.Aggregation, args.SinceMinutes, args.GroupBy, filters,
-		telemetry.MetricOpts{Value: telemetry.Range{Min: args.MinValue, Max: args.MaxValue}, Limit: args.Limit})
+		telemetry.MetricOpts{Value: telemetry.Range{Min: args.MinValue, Max: args.MaxValue}, Limit: args.Limit, Step: args.Step})
 	if err != nil {
 		return errResult(err.Error())
 	}

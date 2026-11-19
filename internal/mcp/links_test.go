@@ -74,11 +74,12 @@ func TestDashboardLinkMetric(t *testing.T) {
 	run := linkedServer(t)
 	view, q := dashboardLink(t, run("metric_query", map[string]any{
 		"tenant": "acme", "metric_name": "x", "aggregation": "exemplars", "group_by": "attr.route",
+		"step":      "1m",
 		"filters":   []map[string]any{{"key": "service.name", "value": "api"}},
 		"min_value": 250, "max_value": 500, "limit": 5,
 	}))
 	if view != "metrics" || q.Get("metric_name") != "x" || q.Get("aggregation") != "exemplars" ||
-		q.Get("group_by") != "attr.route" || q.Get("filter") != "service.name:api" ||
+		q.Get("group_by") != "attr.route" || q.Get("step") != "1m" || q.Get("filter") != "service.name:api" ||
 		q.Get("min_value") != "250" || q.Get("max_value") != "500" || q.Get("limit") != "5" {
 		t.Fatalf("metric link %q %v", view, q)
 	}
