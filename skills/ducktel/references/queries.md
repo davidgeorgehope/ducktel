@@ -142,7 +142,7 @@ FROM traces GROUP BY 1 ORDER BY 1 DESC LIMIT 60
 
 ## Agent Diagnostic Workflow
 
-Systematic investigation pattern for LLM agents:
+These CLI steps are one way through an incident. The MCP tools for the same questions are in [llms.txt](../../../llms.txt).
 
 ```bash
 # Step 1: What services exist?

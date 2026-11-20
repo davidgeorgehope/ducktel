@@ -1,0 +1,64 @@
+# ducktel
+
+> One binary that stores OpenTelemetry on disk and answers agent queries. OTLP/HTTP in, Parquet files out, DuckDB over those files.
+
+You query it with MCP or with the CLI. The server does not interpret attribute keys for you.
+
+Every MCP query tool requires `tenant`. The server keeps only rows whose `tenant.id` resource attribute equals that value. You cannot widen a query by omitting `tenant`.
+
+Time windows on `span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` default to the last 60 minutes (`since_minutes`). `until_minutes` ends the window that many minutes before now. The default is 0, which means now. `until_minutes` must be less than `since_minutes`. `log_search` with `trace_id` and no `since_minutes` searches the whole history. `trace_lookup` and `flush_buffer` have no time window.
+
+Rows still in the receiver's memory buffer are not in the Parquet files yet. They are invisible to every query until a flush. The default flush interval is 30 seconds. If the MCP server was started with `--flush-url`, call `flush_buffer` and repeat the query.
+
+## MCP tools
+
+Registered by `Register` in `internal/mcp/server.go`. Six tools are always registered. `flush_buffer` is registered only when a flush URL is set.
+
+- [trace_lookup](skills/ducktel/SKILL.md): one trace. Requires `trace_id` and `tenant`. `detail=summary` (the default) returns a compact summary. `detail=spans` returns every span and can be large. Attributes are included unless `include_attributes` is false. `limit` applies to `detail=spans` (default 1000).
+- [span_search](skills/ducktel/SKILL.md): spans in a time window. Optional `service_name`, `filters`, `min_ms`, `max_ms`, and `limit` (default 100, cap 1000). Attributes are omitted unless `include_attributes` is true. A filter is `{key, value, op}`. `op` is `=` (default) or `!=`.
+- [compare_spans](skills/ducktel/SKILL.md): why the slow spans differ from the rest of the same scope. The slow group defaults to spans slower than that scope's p95. Set `min_ms` and `max_ms` to choose the group yourself. Optional `service_name`, `span_name`, `span_kind`, and `filters`. `span_kind` defaults to `server` when `span_name` is omitted. `limit` defaults to 15 and caps at 50.
+- [log_search](skills/ducktel/SKILL.md): log records, newest first. Optional `trace_id`, `service_name`, `severity`, `search` (body substring), `filters`, and `limit` (default 100, cap 1000).
+- [slow_requests](skills/ducktel/SKILL.md): the slowest requests, each with a short trace summary. Pass `metric_name` to follow that metric's exemplars. Omit it to use the slowest root spans. `limit` defaults to 5 and caps at 20.
+- [metric_query](skills/ducktel/SKILL.md): one metric over a window. Requires `metric_name` and `aggregation`. Aggregations are `avg`, `sum`, `min`, `max`, `count`, `p50`, `p95`, `p99`, `buckets`, and `exemplars`. Histograms are aggregated from their observations. A histogram result is not 0 just because the type is histogram. `buckets`, `p50`, `p95`, and `p99` need an explicit-bucket histogram. An exponential histogram supports `count`, `sum`, `avg`, `min`, and `max`. `group_by` takes a column (`service.name` means `service_name`), `attr.<key>`, or `resource.<key>`. `step` (`30s`, `1m`, `5m`, `1h`, or a number of seconds) adds a `time` column. At most 1500 buckets. `exemplars` ignores `step`. On a gauge or a sum, `count` counts exported points, not events.
+- [flush_buffer](skills/ducktel/SKILL.md): asks the receiver to write its buffer. No arguments. Absent from the tool list when no flush URL is configured.
+
+Row results are compact JSON, with no extra whitespace.
+
+For "why is this slow", call `slow_requests` first. Call `compare_spans` when you want the attribute values that show up more often on the slow spans. Call `metric_query` for a rate, a percentile, or a histogram. Follow a `trace_id` with `trace_lookup`, then `log_search`.
+
+stdio, no token:
+
+```bash
+ducktel mcp --data-dir /data
+```
+
+HTTP. The read token is required. It is not the OTLP ingest token.
+
+```bash
+ducktel mcp --http --host 0.0.0.0 --port 4319 --data-dir /data \
+  --auth-token "$DUCKTEL_MCP_TOKEN" \
+  --flush-url http://localhost:4318/flush
+```
+
+Add `--dashboard` to serve the read-only UI at `/dashboard` and the JSON routes under `/api`. Those routes call the same query core as the tools. `DUCKTEL_AUTH_TOKEN` is the ingest (write) token. `DUCKTEL_MCP_TOKEN` is the query (read) token. Use different values.
+
+## CLI
+
+Global flags: `--data-dir` (default `./data`) and `--format json|table|csv` (default `json`).
+
+- `ducktel query "<sql>"` runs DuckDB SQL on the `traces`, `logs`, and `metrics` views. It is not sandboxed. It will run DDL.
+- `ducktel traces`, `ducktel logs`, and `ducktel metrics` are filtered shortcuts. `--since 0` means no time filter. `traces --limit` defaults to 20. `logs` and `metrics` default to 50.
+- `ducktel schema [traces|logs|metrics]` prints columns.
+- `ducktel services` lists service names seen in traces.
+- `ducktel saved` stores and runs SQL you want to repeat. Nothing runs it on a schedule.
+- `ducktel testdata` sends synthetic OTLP to a receiver.
+- `ducktel serve` is the receiver, not a query command. Default listen address is `localhost:4318`.
+
+Column types and the histogram storage columns are in [skills/ducktel/references/schema.md](skills/ducktel/references/schema.md). SQL examples are in [skills/ducktel/references/queries.md](skills/ducktel/references/queries.md).
+
+## Repo map
+
+- [AGENTS.md](AGENTS.md): build, test, layout, and contributor conventions.
+- [README.md](README.md): operations, auth, flush, and the dashboard.
+- [skills/ducktel/SKILL.md](skills/ducktel/SKILL.md): full tool and CLI reference.
+- [PLAN.md](PLAN.md): what is not built yet.

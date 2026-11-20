@@ -4,27 +4,36 @@
 
 ```
 cmd/ducktel/
-  main.go           # Cobra root command, global flags (--data-dir, --format)
-  serve.go          # OTLP HTTP receiver command
-  query.go          # Raw SQL query command
-  traces.go         # Filtered trace queries
-  logs.go           # Filtered log queries
-  metrics.go        # Filtered metric queries
-  schema.go         # Schema introspection
-  services.go       # Distinct service listing
+  main.go           # cobra root, global flags (--data-dir, --format)
+  serve.go          # OTLP/HTTP receiver
+  query.go          # raw SQL
+  traces.go         # filtered trace queries
+  logs.go           # filtered log queries
+  metrics.go        # filtered metric queries
+  schema.go         # schema introspection
+  services.go       # distinct service names
+  savedquery.go     # saved SQL
+  testharness.go    # synthetic OTLP
+  mcp.go            # MCP server, optional dashboard
 
 internal/
-  receiver/
-    receiver.go     # OTLP/HTTP server, protobuf/JSON parsing, OTLP→internal conversion
-  writer/
-    writer.go       # Buffered Parquet writer with periodic flush
-    schema.go       # TraceSpan, LogRecord, MetricPoint struct definitions
-  query/
-    engine.go       # Embedded DuckDB, view creation, SQL execution
-  cli/
-    format.go       # JSON/table/CSV output formatting
+  receiver/         # OTLP/HTTP parse and convert
+  writer/           # buffer, Parquet, retention, compaction (compaction.go)
+  query/            # embedded DuckDB and the traces/logs/metrics views
+  telemetry/        # query behavior shared by MCP and /api
+  mcp/              # tool registration (server.go Register) and argument types
+  webapi/           # /api route handlers
+  httpauth/         # bearer checks
+  savedquery/       # saved query JSON file
+  cli/              # json, table, and csv formatting
+  testharness/      # synthetic topology
 
-integration_test.go # End-to-end tests (receiver → writer → query)
+web/
+  webui.go          # embeds web/dashboard
+  dashboard/        # static HTML, CSS, and JS, no build step
+
+integration_test.go # receiver, writer, and query
+auth_test.go        # bearer auth
 ```
 
 ## Key Interfaces
@@ -72,9 +81,9 @@ Integration tests (`integration_test.go`) spin up a real receiver and writer, se
 3. `convertSpans`/`convertLogs`/`convertMetrics` transforms OTLP proto → internal Go structs
 4. Structs passed to **Writer** (`internal/writer`) via `Consumer` interface
 5. Writer buffers in memory, flushes to date-partitioned Parquet files on interval or buffer full
-6. **Query Engine** (`internal/query`) creates DuckDB views over Parquet globs
+6. **Query engine** (`internal/query`) creates DuckDB views with `read_parquet` over the selected Parquet files
 7. SQL queries execute against views, results returned as `[]map[string]interface{}`
-8. **CLI formatter** (`internal/cli`) renders results as JSON/table/CSV
+8. **CLI formatter** (`internal/cli`) renders CLI results as json, table, or csv. MCP (`internal/mcp`) and the dashboard API (`internal/webapi`) do not use that formatter. They call `internal/telemetry`.
 
 ## Adding a New Signal Field
 
@@ -97,4 +106,4 @@ The receiver accepts both:
 
 ## Parquet File Naming
 
-Files are written to `{dataDir}/{signal}/YYYY-MM-DD/HH-MM.parquet` where the timestamp is the flush time (not the data time). Multiple flushes in the same minute append a counter suffix.
+A flush writes `{dataDir}/{signal}/YYYY-MM-DD/HH-MM.parquet`. The clock in the name is the flush time, not the data time. A second flush in the same minute adds a counter suffix. Compaction then writes `HH.parquet` for a closed hour of today or yesterday (UTC), and `day.parquet` for a day strictly before yesterday. See `internal/writer/compaction.go`.

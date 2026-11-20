@@ -1,14 +1,14 @@
 # ducktel 🦆
 
-**Observability for AI agents.** Single binary. OTLP in. SQL out.
+**Observability for AI agents.** Single binary. OTLP in. SQL and MCP out.
 
 Observability tools were built for humans. Dashboards to stare at. Alert rules to click through. Flame graphs to squint at. That made sense when humans were the ones debugging production.
 
 But agents are becoming the ones who deploy code, respond to incidents, and manage infrastructure. And the "AI for observability" tools on the market have it backwards — they're building AI teammates for human SREs. Copilots. Chatbots. Natural language wrappers around dashboards that still assume a human is driving.
 
-**That's the wrong abstraction.** The agent doesn't need a teammate. It needs a tool. Something it can shell out to, get structured data back, and reason about autonomously. No browser. No UI. No human in the loop.
+**That's the wrong abstraction.** The agent doesn't need a teammate. It needs a tool. It can call the CLI or the MCP tools, get structured data back, and reason about it. An optional dashboard can show the same query to a person. It is off unless you pass `--dashboard`.
 
-ducktel is that tool. It receives OpenTelemetry data, stores it as Parquet files, and exposes everything through SQL — the one query language every LLM already knows.
+ducktel is that tool. It receives OpenTelemetry, stores Parquet, and answers through SQL and through MCP.
 
 ```bash
 # Start collecting telemetry
@@ -32,10 +32,10 @@ This helps humans. It doesn't help agents.
 
 An agent operating autonomously — deploying, scaling, remediating — needs something fundamentally different:
 
-1. **Telemetry in** — standard OTLP, no vendor lock-in
-2. **SQL out** — structured results it can reason about programmatically
-3. **A CLI** — something it can shell out to, not a browser it can't open
-4. **Saved queries** — a checklist it runs on its own schedule, not alert rules a human configures
+1. **Telemetry in.** Standard OTLP/HTTP.
+2. **SQL and MCP out.** Structured results the agent can reason about.
+3. **A CLI.** Something the agent can shell out to.
+4. **Saved queries.** A checklist the agent runs on its own schedule. ducktel does not run it for you.
 
 ducktel is the observability backend built for that agent. Not a smarter dashboard. Not an AI teammate. A tool.
 
@@ -44,12 +44,12 @@ ducktel is the observability backend built for that agent. Not a smarter dashboa
 ```
 Your App (OTel SDK)  →  ducktel serve  →  Parquet files on disk
                                                     ↓
-                         LLM Agent     ←  ducktel query (SQL → JSON)
+                         LLM Agent     ←  ducktel query, or ducktel mcp
 ```
 
-1. **Receive** — OTLP/HTTP receiver accepts traces, logs, and metrics on port 4318
-2. **Store** — data is buffered and flushed to date-partitioned Parquet files
-3. **Query** — embedded DuckDB reads Parquet in-place, returns JSON to the agent
+1. **Receive.** The OTLP/HTTP receiver accepts traces, logs, and metrics on port 4318.
+2. **Store.** Records are buffered, then flushed to date-partitioned Parquet files.
+3. **Query.** Embedded DuckDB reads those files. The CLI, the MCP tools, and the optional dashboard all use that.
 
 No database to manage. No cluster to configure. Just a binary and a directory of files.
 
@@ -134,7 +134,7 @@ ducktel query "
 " --format json
 ```
 
-Every step returns structured JSON. The agent reasons about each result and decides what to query next. No dashboards, no context-switching, no clicking — just systematic investigation.
+Every step returns structured JSON. The agent reads each result and chooses the next query.
 
 ### Monitor continuously with saved queries
 
@@ -206,14 +206,14 @@ ducktel query "SELECT ..." [--format json|table|csv] [--data-dir ./data]
 
 ### `ducktel services`
 
-List all services that have reported telemetry.
+List service names seen in traces. Logs-only and metrics-only names are not included.
 
 ### `ducktel traces`
 
 Browse traces with filters.
 
 ```bash
-ducktel traces [--service name] [--since 1h] [--status error] [--limit 50]
+ducktel traces [--service name] [--since 1h] [--status error] [--limit 20]
 ```
 
 ### `ducktel logs`
@@ -270,20 +270,23 @@ Register it with an MCP client, e.g. Claude Code:
 claude mcp add ducktel -- ducktel mcp --data-dir /data
 ```
 
-Six generic, domain-agnostic tools:
+Seven tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other six are always registered.
 
 | Tool | Purpose |
 |------|---------|
-| `trace_lookup(trace_id, tenant, detail, limit)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, error spans, WARN-and-above logs; `detail=spans` returns every span with attributes, ordered by start time, which can be large |
-| `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms)` | spans matching attribute key/value filters, optionally by duration |
+| `trace_lookup(trace_id, tenant, detail, limit, include_attributes)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, error spans, WARN-and-above logs; `detail=spans` returns every span, ordered by start time, with attributes unless `include_attributes` is false. The result can be large |
+| `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms, include_attributes)` | spans matching attribute key/value filters, optionally by duration. Attributes are omitted unless `include_attributes` is true |
+| `compare_spans(service_name, span_name, span_kind, filters, since_minutes, tenant, min_ms, max_ms, limit)` | why the slow spans differ. Compares a duration range (default, slower than the scope's p95) with the other spans in that scope, and returns the attribute values whose share differs most. `span_kind` defaults to `server` when `span_name` is omitted. Default 15 rows, cap 50 |
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
 | `metric_query(metric_name, aggregation, since_minutes, group_by, step, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99 — `group_by` accepts columns (the OTel key `service.name` names the `service_name` column), `attr.<key>` data-point attributes and `resource.<key>` resource attributes such as `resource.host.name`; `step` (30s, 1m, 5m, 1h) returns a time series with a leading `time` column; `filters` match attributes or resource attributes. Histograms are aggregated over observations (count, sum, avg, min, max, percentiles from buckets, `buckets` for the distribution; cumulative series become increments). `exemplars` returns the concrete requests senders attached to the points (`trace_id`, `span_id`, value), slowest first, narrowed by `min_value`/`max_value`. On a gauge, `count` counts exported points, not events |
 | `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, untraced time, top repeated span groups with their self time, the 3 slowest spans, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
 | `flush_buffer()` | make just-received telemetry queryable now (only advertised when `--flush-url` is set) |
 
+`span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` also take `until_minutes` (default 0, meaning now). It must be less than `since_minutes`. `trace_lookup` and `flush_buffer` have no time window.
+
 **Time series and resource grouping.** `step` turns `metric_query` into a dashboard time series: one row per (time bucket, group), with a leading `time` column holding the bucket start in Unix microseconds (UTC), ordered by time then groups. `resource.<key>` groups by an OpenTelemetry resource attribute, so questions like CPU per host work: `metric_query(metric_name="system.cpu.utilization", aggregation="avg", group_by="resource.host.name", step="1m", since_minutes=360)`. At most 1500 buckets are allowed per query; `exemplars` ignores `step`.
 
-**Start with `slow_requests` for "why is X slow".** It returns the slowest requests already carrying a brief trace summary, so one call answers the first question. Follow a `trace_id` with `trace_lookup` for the full summary, and use `trace_lookup(detail=spans)` only when every span with attributes is really needed.
+**Start with `slow_requests` for "why is X slow".** It returns the slowest requests already carrying a brief trace summary, so one call answers the first question. Use `compare_spans` when you want the attribute values that are more common on those slow spans than on the rest. Follow a `trace_id` with `trace_lookup` for the full summary, and use `trace_lookup(detail=spans)` only when every span is really needed. Set `include_attributes` to false on that call to drop the attributes JSON.
 
 **From a number to a request.** A histogram bucket leads to the requests in it:
 `metric_query(aggregation="exemplars", min_value=lo, max_value=le)` gives trace ids
@@ -322,7 +325,7 @@ ducktel mcp --http --port 4319 --auth-token "$READ_TOKEN" --dashboard
 ```
 
 - **Off by default.** Without `--dashboard` nothing below is mounted.
-- **Read-only views.** Traces (search plus waterfall), logs and metrics, per tenant. The JSON API under `/api/*` (`traces`, `traces/{trace_id}`, `logs`, `metrics`, `tenants`, `services`, `metric-names`) is a thin GET wrapper over the same query core the MCP tools use.
+- **Read-only views.** Traces (search plus waterfall), logs and metrics, per tenant. The JSON API is a thin wrapper over the same query core the MCP tools use. Routes, from `internal/webapi/handlers.go`: `GET /api/traces`, `GET /api/traces/{trace_id}`, `GET /api/traces/{trace_id}/summary`, `GET /api/slow`, `GET /api/compare`, `GET /api/logs`, `GET /api/metrics`, `GET /api/tenants`, `GET /api/services`, `GET /api/metric-names`, `GET /api/config`, and `POST /api/flush`.
 - **Same token, same tenant rule.** Every `/api/*` route requires the MCP read token; every query is filtered by `tenant.id`, exactly like the MCP tools.
 - **No new dependencies.** Plain HTML/CSS/JS embedded in the binary; no build step, no CDN.
 - **Flush button, only with `--flush-url`.** `POST /api/flush` makes the last `--flush-interval` of buffered telemetry queryable now. It is the same request the `flush_buffer` tool sends, with the same read token; it writes no telemetry and changes no stored data. Without `--flush-url` the button is hidden and the route returns 404.
@@ -392,11 +395,11 @@ data/
       08-30.parquet
 ```
 
-Date-partitioned Parquet files. DuckDB reads them via glob at query time. Nothing is dropped — all OTLP fields are preserved. Your data is never trapped in a proprietary format.
+Date-partitioned Parquet files. At query time the engine passes the selected files to DuckDB with `read_parquet`. It does not glob the directory. Nothing is dropped. All OTLP fields are preserved. Your data is never trapped in a proprietary format.
 
-Retention is off by default (files accumulate forever) so upgrading an existing deployment never starts deleting data without an explicit opt-in. For any long-lived or container deployment, prefer `--retention 30d` so on-disk growth stays bounded. When enabled it is day-granular: an hourly background sweep deletes whole `YYYY-MM-DD` directories older than the window — no partial-day deletion. A date-shaped directory older than the cutoff is removed in full; anything else under a signal directory is left alone.
+Retention is off by default (files accumulate forever) so upgrading an existing deployment never starts deleting data without an explicit opt-in. For any long-lived or container deployment, prefer `--retention 30d` so on-disk growth stays bounded. A maintenance pass runs at startup and then every 10 minutes. It does not follow `--flush-interval`. When `--retention` is set, that pass deletes whole `YYYY-MM-DD` directories older than the window. Deletion is day-granular. A date-shaped directory older than the cutoff is removed in full. Anything else under a signal directory is left alone.
 
-Compaction runs automatically, every hour and once at startup: each past day's per-flush files merge into a single `day.parquet` per signal (chronological order preserved, so timestamp filters prune well), replacing dozens of tiny files with one. The current and previous UTC day are never touched, so a merge cannot race the writer around midnight. The merge is crash-safe: an existing `day.parquet` means a previous merge completed, and any leftover per-flush files are deleted rather than merged (merging would double rows).
+Compaction runs on that same pass, including when `--retention` is off. Today and yesterday (UTC), each hour that started at least 2 hours ago merges from `HH-MM.parquet` into `HH.parquet`. Days strictly before yesterday merge into one `day.parquet` per signal, in name order, so a timestamp filter can skip row groups. If `HH.parquet` or `day.parquet` already exists, leftover source files are deleted rather than merged again.
 
 ## Container
 
@@ -499,7 +502,7 @@ There are two ways to bring AI into observability:
 
 **1. AI as teammate.** Put a chatbot inside Datadog. Add natural language queries to Grafana. Build a copilot that helps SREs navigate dashboards faster. This is what every "AI SRE" startup is doing. It makes existing tools incrementally better for humans.
 
-**2. AI as operator.** Give agents their own tools — purpose-built for programmatic access, structured output, and autonomous reasoning. No dashboards because there's no one to look at them. No alert UIs because the agent decides what matters. No visualization layer because the agent doesn't have eyes.
+**2. AI as operator.** Give agents their own tools, built for programmatic access and structured output. `ducktel mcp --dashboard` can show that same query to a person. There is no alert UI. The agent decides what matters.
 
 These are fundamentally different products for fundamentally different users. Option 1 optimizes for humans. Option 2 builds for agents.
 
@@ -517,9 +520,9 @@ That's ducktel. Single binary. No platform. No vendor. No lock-in.
 
 ## Status
 
-Early stage. The core ingest → store → query → saved queries loop works, plus bearer-token auth on the OTLP and MCP endpoints and an MCP server for agent consumers with mandatory per-tenant isolation. Built-in test harness for generating synthetic data. Contributions welcome.
+Ingest, Parquet storage, DuckDB query, and saved queries work. Bearer-token auth, the MCP server, histogram aggregation in `metric_query`, compaction, and the optional dashboard work too. `ducktel testdata` generates synthetic telemetry. Contributions welcome.
 
-Not implemented (see `PLAN.md`): OTLP/gRPC, an HTTP SQL query API, and a web UI. Querying is via the CLI and the MCP server.
+Not implemented yet (see [PLAN.md](PLAN.md)): an OTLP/gRPC receiver, and an HTTP route that runs raw SQL. Query with the CLI, the MCP tools, or the dashboard `/api` routes.
 
 ## License
 
