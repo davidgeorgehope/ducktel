@@ -390,6 +390,49 @@ func TestListAttributeKeysLimitIsPerSignal(t *testing.T) {
 	}
 }
 
+// TestListAttributeKeysDedupBeforeLimit: one key repeated across rows must
+// count once, or it fills the cap and the other key in that source disappears.
+func TestListAttributeKeysDedupBeforeLimit(t *testing.T) {
+	dir := t.TempDir()
+	w := writer.New(dir, time.Hour, 1000)
+	now := time.Now()
+	resource := tenantResource("api", "acme", `"zzz.late":"1"`)
+	var logs []writer.LogRecord
+	for i := 0; i < 8; i++ {
+		logs = append(logs, writer.LogRecord{
+			Timestamp: now.UnixMicro(), ServiceName: "api", SeverityText: "INFO", Body: "ok",
+			Attributes: `{"aaa.early":"1"}`, ResourceAttributes: resource,
+		})
+	}
+	w.AddLogs(logs)
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := query.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { engine.Close() })
+
+	rows, _, err := NewCore(engine).ListAttributeKeys("acme", "logs", "", 0, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasAttrKey(rows, "logs", "resource_attributes", "tenant.id") ||
+		!hasAttrKey(rows, "logs", "resource_attributes", "zzz.late") {
+		t.Errorf("repeated resource keys hid a later key: %v", rows)
+	}
+	n := 0
+	for _, r := range rows {
+		if r["source"] == "resource_attributes" && r["key"] == "tenant.id" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("tenant.id appears %d times, want 1: %v", n, rows)
+	}
+}
+
 func TestListAttributeKeysTracesOnly(t *testing.T) {
 	dir := t.TempDir()
 	w := writer.New(dir, time.Hour, 1000)

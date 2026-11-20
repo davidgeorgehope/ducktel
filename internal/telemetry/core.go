@@ -1169,8 +1169,13 @@ func (c *Core) attributeKeyQuery(signals []attributeSignal, tenant, serviceName 
 		// attributes sorts before resource_attributes, so one shared LIMIT
 		// would hide the groups that sort later.
 		for _, column := range []string{"attributes", "resource_attributes"} {
+			// Distinct before the limit. The same key on many rows would
+			// otherwise fill the cap and hide every later key, including
+			// tenant.id.
 			branches = append(branches, `SELECT * FROM (
-	`+attributeKeyBranch(s.view, cte, column)+`
+	SELECT DISTINCT signal, source, key FROM (
+		`+attributeKeyBranch(s.view, cte, column)+`
+	)
 	ORDER BY key
 	LIMIT ?)`)
 		}
