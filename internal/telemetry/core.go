@@ -3,6 +3,7 @@ package telemetry
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,108 @@ func canonicalStatusCode(value string) (stored string, recognized bool) {
 		return value, false
 	}
 	return stored, true
+}
+
+// spelling is one form a caller might type and the stored value to suggest.
+type spelling struct {
+	name      string
+	canonical string
+}
+
+// SpanFilterSpellingHint is recovery text for status_code and span_kind
+// filters whose values are not known spellings. The query bound the literal
+// and still ran. Empty when every such filter was recognized, so an empty
+// result then has some other cause.
+func SpanFilterSpellingHint(filters []AttrFilter) string {
+	var parts []string
+	for _, f := range filters {
+		switch f.Key {
+		case "status_code":
+			if _, ok := canonicalStatusCode(f.Value); ok {
+				continue
+			}
+			parts = append(parts, spellingSentence(f.Key, f.Value,
+				storedValues(statusCodeShort), nearSpelling(f.Value, spellingsOf(statusCodeShort))))
+		case "span_kind":
+			if _, ok := canonicalSpanKindFilter(f.Value); ok {
+				continue
+			}
+			parts = append(parts, spellingSentence(f.Key, f.Value,
+				storedValues(spanKindShort, "SPAN_KIND_UNSPECIFIED"),
+				nearSpelling(f.Value, spellingsOf(spanKindShort, "SPAN_KIND_UNSPECIFIED"))))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func storedValues(shorts map[string]string, extra ...string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, v := range shorts {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, v := range extra {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func spellingsOf(shorts map[string]string, extra ...string) []spelling {
+	var out []spelling
+	for name, canonical := range shorts {
+		out = append(out, spelling{name: name, canonical: canonical}, spelling{name: canonical, canonical: canonical})
+	}
+	for _, canonical := range extra {
+		out = append(out, spelling{name: canonical, canonical: canonical})
+	}
+	return out
+}
+
+func nearSpelling(value string, cands []spelling) string {
+	folded := strings.ToLower(strings.TrimSpace(value))
+	best := ""
+	bestD := 3
+	for _, c := range cands {
+		d := levenshtein(folded, strings.ToLower(c.name))
+		if d > 2 {
+			continue
+		}
+		if best == "" || d < bestD || (d == bestD && c.canonical < best) {
+			best = c.canonical
+			bestD = d
+		}
+	}
+	return best
+}
+
+func spellingSentence(key, value string, stored []string, suggestion string) string {
+	msg := fmt.Sprintf("%s %q is not a recognized spelling. Stored values are %s.", key, value, joinAnd(stored))
+	if suggestion != "" {
+		msg += " did you mean " + suggestion + "?"
+	}
+	return msg
+}
+
+func joinAnd(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
+	}
 }
 
 // spanFilterCond builds the condition for one span filter. A reserved span

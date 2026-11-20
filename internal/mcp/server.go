@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -169,7 +170,7 @@ func (s *Server) traceLookup(ctx context.Context, req *sdkmcp.CallToolRequest, a
 		if err != nil {
 			return errResult(err.Error())
 		}
-		return jsonResult(summary, s.traceLink(tenant, args.TraceID))
+		return s.jsonReply(summary, s.traceLink(tenant, args.TraceID), summary.SpanCount == 0, s.emptyRecovery(emptyQuery{tenant: tenant}))
 	case "spans":
 		rows, cols, err := s.core.LookupTrace(args.TraceID, tenant, args.Limit)
 		if err != nil {
@@ -178,7 +179,7 @@ func (s *Server) traceLookup(ctx context.Context, req *sdkmcp.CallToolRequest, a
 		if !askedFor(args.IncludeAttributes, true) {
 			rows, cols = omitColumn(rows, cols, "attributes")
 		}
-		return withLink(rows, cols, s.traceLink(tenant, args.TraceID))
+		return s.rowsReply(rows, cols, s.traceLink(tenant, args.TraceID), s.emptyRecovery(emptyQuery{tenant: tenant}))
 	default:
 		return errResult(fmt.Sprintf("detail %q is not supported; use \"summary\" (the default) for the compact summary, or \"spans\" for every span with attributes", args.Detail))
 	}
@@ -219,7 +220,9 @@ func (s *Server) spanSearch(ctx context.Context, req *sdkmcp.CallToolRequest, ar
 	if !askedFor(args.IncludeAttributes, false) {
 		rows, cols = omitColumn(rows, cols, "attributes")
 	}
-	return withLink(rows, cols, s.spanLink(tenant, args))
+	return s.rowsReply(rows, cols, s.spanLink(tenant, args), s.emptyRecovery(emptyQuery{
+		tenant: tenant, window: true, since: args.SinceMinutes, spanFilters: filters,
+	}))
 }
 
 // --- compare_spans ---
@@ -257,7 +260,9 @@ func (s *Server) compareSpans(ctx context.Context, req *sdkmcp.CallToolRequest, 
 	if err != nil {
 		return errResult(err.Error())
 	}
-	return jsonResult(cmp, s.compareLink(tenant, args))
+	return s.jsonReply(cmp, s.compareLink(tenant, args), cmp.SlowN == 0 && cmp.RestN == 0, s.emptyRecovery(emptyQuery{
+		tenant: tenant, window: true, since: args.SinceMinutes, spanFilters: filters,
+	}))
 }
 
 // --- log_search ---
@@ -284,7 +289,12 @@ func (s *Server) logSearch(ctx context.Context, req *sdkmcp.CallToolRequest, arg
 	if err != nil {
 		return errResult(err.Error())
 	}
-	return withLink(rows, cols, s.logLink(args.Tenant, args))
+	return s.rowsReply(rows, cols, s.logLink(args.Tenant, args), s.emptyRecovery(emptyQuery{
+		tenant:       args.Tenant,
+		window:       true,
+		since:        args.SinceMinutes,
+		wholeHistory: args.TraceID != "" && args.SinceMinutes <= 0,
+	}))
 }
 
 // --- slow_requests ---
@@ -322,7 +332,11 @@ func (s *Server) slowRequests(ctx context.Context, req *sdkmcp.CallToolRequest, 
 	if err != nil {
 		return errResult(err.Error())
 	}
-	return jsonResult(rows, s.slowLink(tenant, args))
+	q := emptyQuery{tenant: tenant, window: true, since: args.SinceMinutes}
+	if args.MetricName == "" {
+		q.spanFilters = filters
+	}
+	return s.jsonReply(rows, s.slowLink(tenant, args), len(rows) == 0, s.emptyRecovery(q))
 }
 
 // --- metric_query ---
@@ -353,7 +367,9 @@ func (s *Server) metricQuery(ctx context.Context, req *sdkmcp.CallToolRequest, a
 	if err != nil {
 		return errResult(err.Error())
 	}
-	return withLink(rows, cols, s.metricLink(tenant, args))
+	return s.rowsReply(rows, cols, s.metricLink(tenant, args), s.emptyRecovery(emptyQuery{
+		tenant: tenant, window: true, since: args.SinceMinutes,
+	}))
 }
 
 // --- shared helpers ---
@@ -365,24 +381,66 @@ func errResult(msg string) (*sdkmcp.CallToolResult, any, error) {
 	}, nil, nil
 }
 
-// withLink is rowsResult plus the dashboard link, when links are on.
-func withLink(rows []map[string]any, cols []string, link string) (*sdkmcp.CallToolResult, any, error) {
+// emptyQuery is what an empty result needs in order to say only the clauses
+// that apply to this call. spanFilters is set when those filters were matched
+// against span columns.
+type emptyQuery struct {
+	tenant       string
+	window       bool
+	since        int
+	wholeHistory bool
+	spanFilters  []telemetry.AttrFilter
+}
+
+// emptyRecovery is the text for an empty result. flush_buffer is named only
+// when this server can call it. The telemetry package does not know the tool.
+func (s *Server) emptyRecovery(q emptyQuery) string {
+	parts := []string{
+		"Queries only return data whose resource attribute tenant.id equals the tenant argument.",
+	}
+	if q.window && q.since <= 0 && !q.wholeHistory {
+		parts = append(parts, "The query used the default window of the last 60 minutes, and since_minutes widens it.")
+	}
+	if s.flusher.Enabled() {
+		parts = append(parts, "Telemetry still in the receiver buffer is invisible until flush. Call flush_buffer and repeat the query.")
+	} else {
+		parts = append(parts, "Telemetry still in the receiver buffer is invisible until the receiver flushes it.")
+	}
+	if hint := telemetry.SpanFilterSpellingHint(q.spanFilters); hint != "" {
+		parts = append(parts, hint)
+	}
+	return strings.Join(parts, " ")
+}
+
+// appendRecovery adds the hint as its own content block. It is not folded
+// into the JSON, so a client that reads only the first block sees the same
+// payload. Dashboard links are appended after this.
+func appendRecovery(res *sdkmcp.CallToolResult, hint string) {
+	res.Content = append(res.Content, &sdkmcp.TextContent{Text: hint})
+}
+
+func (s *Server) rowsReply(rows []map[string]any, cols []string, link, hint string) (*sdkmcp.CallToolResult, any, error) {
 	res, _, err := rowsResult(rows, cols)
 	if err != nil {
 		return res, nil, err
 	}
+	if len(rows) == 0 {
+		appendRecovery(res, hint)
+	}
 	return linked(res, link)
 }
 
-// jsonResult is withLink for a JSON-marshalable object (a summary or a list of
-// structs), rather than engine rows with a separate column order.
-func jsonResult(v any, link string) (*sdkmcp.CallToolResult, any, error) {
+// jsonReply is rowsReply for a JSON object (a summary or a list of structs).
+func (s *Server) jsonReply(v any, link string, empty bool, hint string) (*sdkmcp.CallToolResult, any, error) {
 	out, err := json.Marshal(v)
 	if err != nil {
 		return errResult(fmt.Sprintf("encoding results: %v", err))
 	}
 	res := &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: string(out)}},
+	}
+	if empty {
+		appendRecovery(res, hint)
 	}
 	return linked(res, link)
 }
