@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -311,5 +312,41 @@ func TestExemplarsIgnoreStep(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0]["trace_id"] != "trace-1" {
 		t.Fatalf("rows = %v, want the single exemplar", rows)
+	}
+}
+
+// group_by accepts the OTel key service.name as the service_name column, the
+// spelling filters already take; the result column stays service_name, and
+// any other bare dotted key is still rejected.
+func TestGroupByServiceNameAlias(t *testing.T) {
+	base := stepBase()
+	point := func(service string, ts time.Time, v float64) writer.MetricPoint {
+		p := gaugePoint("cpu", ts, v, `{"service.name":"`+service+`","tenant.id":"acme"}`)
+		p.ServiceName = service
+		return p
+	}
+	c := newStepCore(t, []writer.MetricPoint{
+		point("web", base, 10),
+		point("api", base, 30),
+		point("web", base.Add(time.Minute), 20),
+	})
+
+	want, wantCols, err := c.QueryMetricWith("acme", "cpu", "avg", 60, "service_name", nil, MetricOpts{})
+	if err != nil {
+		t.Fatalf("group_by service_name: %v", err)
+	}
+	if len(want) != 2 {
+		t.Fatalf("group_by service_name: %d rows, want 2: %v", len(want), want)
+	}
+	got, gotCols, err := c.QueryMetricWith("acme", "cpu", "avg", 60, "service.name", nil, MetricOpts{})
+	if err != nil {
+		t.Fatalf("group_by service.name: %v", err)
+	}
+	if !reflect.DeepEqual(gotCols, wantCols) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("group_by service.name = %v %v, want the service_name answer %v %v", gotCols, got, wantCols, want)
+	}
+
+	if _, _, err := c.QueryMetricWith("acme", "cpu", "avg", 60, "host.name", nil, MetricOpts{}); err == nil {
+		t.Fatal("group_by host.name: want an error (not a promoted key; resource.host.name is the way)")
 	}
 }
