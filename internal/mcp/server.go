@@ -215,7 +215,7 @@ type listAttributeKeysArgs struct {
 	Signal       string `json:"signal,omitempty" jsonschema:"traces, logs, or metrics. Omit to read all three views."`
 	ServiceName  string `json:"service_name,omitempty" jsonschema:"restrict the sample to one service name"`
 	SinceMinutes int    `json:"since_minutes,omitempty" jsonschema:"how far back to sample, in minutes. Default 60."`
-	Limit        int    `json:"limit,omitempty" jsonschema:"maximum keys to return per signal, default 200, cap 1000. Omitting signal still returns keys from traces, logs, and metrics, each capped separately."`
+	Limit        int    `json:"limit,omitempty" jsonschema:"maximum keys per signal and source, default 200, cap 1000. Omitting signal still returns traces, logs, and metrics, and each source is capped on its own."`
 }
 
 func (s *Server) listAttributeKeys(ctx context.Context, req *sdkmcp.CallToolRequest, args listAttributeKeysArgs) (*sdkmcp.CallToolResult, any, error) {

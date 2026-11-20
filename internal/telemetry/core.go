@@ -1003,7 +1003,8 @@ type cachedResult struct {
 // by key. A zero since reads full history through engine.Query. Any other
 // since is the window start passed to QuerySince, so older day files stay
 // closed. Results are shared between callers and must be treated read-only.
-// Errors are not cached.
+// Errors are not cached, and neither are empty results: a list taken before
+// the first flush must not keep returning nothing after the files appear.
 func (c *Core) discover(key string, since time.Time, q string, args ...any) ([]map[string]any, []string, error) {
 	c.cacheMu.Lock()
 	if r, ok := c.cache[key]; ok && time.Since(r.at) < discoveryTTL {
@@ -1022,8 +1023,8 @@ func (c *Core) discover(key string, since time.Time, q string, args ...any) ([]m
 	} else {
 		rows, cols, err = c.engine.QuerySince(since, q, args...)
 	}
-	if err != nil {
-		return nil, nil, err
+	if err != nil || len(rows) == 0 {
+		return rows, cols, err
 	}
 	c.cacheMu.Lock()
 	if c.cache == nil {
@@ -1125,8 +1126,8 @@ func attributeSignals(signal string) ([]attributeSignal, error) {
 // or "resource_attributes", and key is the raw JSON key. The scan covers
 // sinceMinutes (default 60) and at most attrKeySampleRows rows of each
 // signal. ListTenants, ListServices and ListMetricNames stay full history.
-// serviceName, when set, keeps one service. limit caps keys per signal, so
-// omitting signal cannot let one view fill the budget and hide the others.
+// serviceName, when set, keeps one service. limit caps keys per signal and
+// per source, so one view or the attributes column cannot hide the others.
 func (c *Core) ListAttributeKeys(tenant, signal, serviceName string, sinceMinutes, limit int) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {
 		return nil, nil, err
@@ -1150,7 +1151,7 @@ func (c *Core) attributeKeyQuery(signals []attributeSignal, tenant, serviceName 
 	sample := strconv.Itoa(attrKeySampleRows)
 	with := make([]string, 0, len(signals))
 	branches := make([]string, 0, len(signals)*2)
-	args := make([]any, 0, len(signals)*4)
+	args := make([]any, 0, len(signals)*6)
 	for _, s := range signals {
 		where := c.tenantPredicate() + " AND " + s.timeCol + " >= ?"
 		args = append(args, tenant, cutoff)
@@ -1164,18 +1165,18 @@ func (c *Core) attributeKeyQuery(signals []attributeSignal, tenant, serviceName 
 		SELECT attributes, resource_attributes FROM `+s.view+`
 		WHERE `+where+`
 	) USING SAMPLE reservoir(`+sample+` ROWS))`)
-		// Limit inside the signal. A single LIMIT after ORDER BY signal would
-		// spend the whole budget on logs, which sorts first, and omit traces
-		// and metrics when the caller asked for all three.
-		branches = append(branches, `SELECT * FROM (
-	`+attributeKeyBranch(s.view, cte, "attributes")+`
-	UNION
-	`+attributeKeyBranch(s.view, cte, "resource_attributes")+`
-	ORDER BY source, key
+		// Limit each source on its own. logs sorts before traces, and
+		// attributes sorts before resource_attributes, so one shared LIMIT
+		// would hide the groups that sort later.
+		for _, column := range []string{"attributes", "resource_attributes"} {
+			branches = append(branches, `SELECT * FROM (
+	`+attributeKeyBranch(s.view, cte, column)+`
+	ORDER BY key
 	LIMIT ?)`)
+		}
 	}
 	for range signals {
-		args = append(args, limit)
+		args = append(args, limit, limit)
 	}
 	q := "WITH " + strings.Join(with, ",\n") + "\n" +
 		strings.Join(branches, "\nUNION ALL\n") +

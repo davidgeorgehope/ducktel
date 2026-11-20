@@ -96,6 +96,24 @@ func TestDiscoveryIsCached(t *testing.T) {
 	}
 }
 
+// TestDiscoveryDoesNotCacheEmpty: an empty list is not a stable answer.
+// Closing the engine must make the next call fail, which it would not if the
+// empty result had been cached past a flush.
+func TestDiscoveryDoesNotCacheEmpty(t *testing.T) {
+	c := newTestCore(t)
+	rows, _, err := c.ListServices("nobody")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("nobody has services: %v", rows)
+	}
+	c.engine.Close()
+	if _, _, err := c.ListServices("nobody"); err == nil {
+		t.Error("empty discovery result was served after the engine closed")
+	}
+}
+
 func attrSpan(svc, traceID, spanID string, ts time.Time, attrs, resource string) writer.TraceSpan {
 	return writer.TraceSpan{
 		TraceID: traceID, SpanID: spanID, ServiceName: svc, SpanName: "op",
@@ -263,8 +281,12 @@ func TestListAttributeKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(limited) != 1 {
-		t.Errorf("limit 1 on traces returned %d rows, want 1", len(limited))
+	limitedSource := map[string]int{}
+	for _, r := range limited {
+		limitedSource[fmt.Sprint(r["source"])]++
+	}
+	if limitedSource["attributes"] != 1 || limitedSource["resource_attributes"] != 1 {
+		t.Errorf("limit 1 on traces = %v, want one key from each source", limited)
 	}
 	// logs sorts before metrics and traces. A single limit over that order
 	// would return only the log key and hide the other signals.
@@ -273,12 +295,20 @@ func TestListAttributeKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	perSignal := map[string]int{}
+	perSource := map[string]int{}
 	for _, r := range shared {
-		perSignal[fmt.Sprint(r["signal"])]++
+		signal := fmt.Sprint(r["signal"])
+		perSignal[signal]++
+		perSource[signal+"\x00"+fmt.Sprint(r["source"])]++
 	}
 	for _, signal := range []string{"traces", "logs", "metrics"} {
-		if perSignal[signal] != 1 {
-			t.Errorf("limit 1 with signal omitted has %d %s keys, want 1: %v", perSignal[signal], signal, shared)
+		if perSignal[signal] == 0 {
+			t.Errorf("limit 1 with signal omitted dropped %s: %v", signal, shared)
+		}
+	}
+	for group, n := range perSource {
+		if n > 1 {
+			t.Errorf("limit 1 returned %d keys for %s: %v", n, group, shared)
 		}
 	}
 
@@ -340,12 +370,17 @@ func TestListAttributeKeysLimitIsPerSignal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	perSignal := map[string]int{}
+	logAttrs := 0
 	for _, r := range rows {
-		perSignal[fmt.Sprint(r["signal"])]++
+		if r["signal"] == "logs" && r["source"] == "attributes" {
+			logAttrs++
+		}
 	}
-	if perSignal["logs"] != limit {
-		t.Errorf("logs returned %d keys, want the per-signal cap %d: %v", perSignal["logs"], limit, rows)
+	if logAttrs != limit {
+		t.Errorf("log attribute keys = %d, want the cap %d: %v", logAttrs, limit, rows)
+	}
+	if !hasAttrKey(rows, "logs", "resource_attributes", "tenant.id") {
+		t.Errorf("log resource key missing beside %d attribute keys: %v", logKeys, rows)
 	}
 	if !hasAttrKey(rows, "traces", "attributes", "span.only") {
 		t.Errorf("trace key missing beside %d log keys: %v", logKeys, rows)
