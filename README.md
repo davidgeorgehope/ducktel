@@ -270,10 +270,14 @@ Register it with an MCP client, e.g. Claude Code:
 claude mcp add ducktel -- ducktel mcp --data-dir /data
 ```
 
-Seven tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other six are always registered.
+Eleven tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other ten are always registered.
 
 | Tool | Purpose |
 |------|---------|
+| `list_tenants()` | tenant ids that have stored telemetry. Takes no arguments and returns only tenant ids |
+| `list_services(tenant, source)` | service names for one tenant. `source` omitted or `traces` reads spans; `logs` reads log records |
+| `list_metric_names(tenant)` | metric names stored for one tenant |
+| `list_attribute_keys(tenant, signal, service_name, since_minutes, limit)` | attribute keys seen in a sample of the window (default 60 minutes, at most 2000 rows per signal), not every key ever stored. Each row is `signal` (`traces`, `logs`, or `metrics`), `source` (`attributes` or `resource_attributes`), and `key`. A missing key is not proof it never existed |
 | `trace_lookup(trace_id, tenant, detail, limit, include_attributes)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, error spans, WARN-and-above logs; `detail=spans` returns every span, ordered by start time, with attributes unless `include_attributes` is false. The result can be large |
 | `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms, include_attributes)` | spans matching attribute key/value filters, optionally by duration. Attributes are omitted unless `include_attributes` is true |
 | `compare_spans(service_name, span_name, span_kind, filters, since_minutes, tenant, min_ms, max_ms, limit)` | why the slow spans differ. Compares a duration range (default, slower than the scope's p95) with the other spans in that scope, and returns the attribute values whose share differs most. `span_kind` defaults to `server` when `span_name` is omitted. Default 15 rows, cap 50 |
@@ -309,7 +313,7 @@ wrap the same core functions:
 
 The parameters mean the same as in the MCP tools.
 
-**`tenant` is required on every query tool** — it's in the JSON schema, so a client cannot omit it — and every query hard-filters on the `tenant.id` resource attribute. A caller can narrow its scope but never widen it.
+**`tenant` is required on every query tool and on `list_services`, `list_metric_names`, and `list_attribute_keys`** — it's in the JSON schema, so a client cannot omit it — and those tools hard-filter on the `tenant.id` resource attribute. A caller can narrow its scope but never widen it. `list_tenants` takes no tenant and returns only tenant ids.
 
 **The MCP token is a separate secret from the OTLP token.** `DUCKTEL_AUTH_TOKEN` grants write (OTLP ingest, held by senders); `DUCKTEL_MCP_TOKEN` grants read (MCP queries, and `POST /flush`, held by consumers). A compromised sender must not gain read access to every tenant, and a read token must not be able to forge telemetry — so use a different value for each. In HTTP mode, `--auth-token` is required; ducktel refuses to start without one rather than silently exposing every tenant's data.
 
