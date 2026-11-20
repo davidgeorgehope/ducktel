@@ -7,7 +7,7 @@ import (
 	"math"
 )
 
-// MarshalRows renders query results as indented JSON, preserving column order.
+// MarshalRows renders query results as compact JSON, preserving column order.
 //
 // ducktel's engine returns rows as maps, which lose column order, so the order
 // it separately reports is used to rebuild each row. Go's encoding/json sorts
@@ -19,15 +19,15 @@ func MarshalRows(rows []map[string]any, cols []string) (string, error) {
 	}
 
 	var buf bytes.Buffer
-	buf.WriteString("[\n")
+	buf.WriteByte('[')
 	for i, row := range rows {
 		if i > 0 {
-			buf.WriteString(",\n")
+			buf.WriteByte(',')
 		}
-		buf.WriteString("  {")
+		buf.WriteByte('{')
 		for j, c := range cols {
 			if j > 0 {
-				buf.WriteString(", ")
+				buf.WriteByte(',')
 			}
 			key, err := json.Marshal(c)
 			if err != nil {
@@ -40,12 +40,12 @@ func MarshalRows(rows []map[string]any, cols []string) (string, error) {
 				val = []byte("null")
 			}
 			buf.Write(key)
-			buf.WriteString(": ")
+			buf.WriteByte(':')
 			buf.Write(val)
 		}
-		buf.WriteString("}")
+		buf.WriteByte('}')
 	}
-	buf.WriteString("\n]")
+	buf.WriteByte(']')
 	return buf.String(), nil
 }
 

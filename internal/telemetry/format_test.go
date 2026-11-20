@@ -12,8 +12,11 @@ func TestMarshalRowsPreservesColumnOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, `"z": 1, "a": 2`) {
+	if !strings.Contains(out, `"z":1,"a":2`) {
 		t.Errorf("column order not preserved: %s", out)
+	}
+	if strings.Contains(out, "\n") || strings.Contains(out, " ") {
+		t.Errorf("row JSON should be compact, got %s", out)
 	}
 	var back []map[string]any
 	if err := json.Unmarshal([]byte(out), &back); err != nil {

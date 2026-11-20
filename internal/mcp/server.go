@@ -46,7 +46,8 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 			"(time not spent in child spans, so groups add up), untraced_ms (root time no child span covers, " +
 			"i.e. uninstrumented code), the slowest spans, error spans, and WARN-and-above log records. " +
 			"Use this first to understand a request without spending context on every span. " +
-			"detail=spans returns every span with attributes, ordered by start time, which can be large: " +
+			"detail=spans returns every span ordered by start time. Attributes are included unless " +
+			"include_attributes is false. The result can be large: " +
 			"use it only when the summary is not enough. Requires the tenant the trace belongs to.",
 	}, s.traceLookup)
 
@@ -55,7 +56,8 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 		Description: "Find spans matching attribute filters within a time range. " +
 			"Use this to locate spans by any attribute key/value pair — for example " +
 			"service.name, http.request.method, or any custom attribute. Returns matching " +
-			"spans with timing, status and attributes, capped at limit results. " +
+			"spans with timing and status, capped at limit results. " +
+			"Attributes are omitted unless include_attributes is true. " +
 			"min_ms/max_ms keep spans by duration, e.g. the requests of one histogram bucket.",
 	}, s.spanSearch)
 
@@ -152,10 +154,11 @@ func (s *Server) flushBuffer(ctx context.Context, req *sdkmcp.CallToolRequest, a
 // --- trace_lookup ---
 
 type traceLookupArgs struct {
-	TraceID string `json:"trace_id" jsonschema:"the trace id to retrieve, as 32 lowercase hex characters"`
-	Tenant  string `json:"tenant" jsonschema:"the tenant this trace belongs to; only data for this tenant is returned"`
-	Detail  string `json:"detail,omitempty" jsonschema:"summary (default) returns a compact aggregated summary; spans returns every span with attributes, ordered by start time, which can be large"`
-	Limit   int    `json:"limit,omitempty" jsonschema:"maximum spans to return for detail=spans; default 1000"`
+	TraceID           string `json:"trace_id" jsonschema:"the trace id to retrieve, as 32 lowercase hex characters"`
+	Tenant            string `json:"tenant" jsonschema:"the tenant this trace belongs to; only data for this tenant is returned"`
+	Detail            string `json:"detail,omitempty" jsonschema:"summary (default) returns a compact aggregated summary; spans returns every span ordered by start time, with attributes unless include_attributes is false"`
+	Limit             int    `json:"limit,omitempty" jsonschema:"maximum spans to return for detail=spans; default 1000"`
+	IncludeAttributes *bool  `json:"include_attributes,omitempty" jsonschema:"for detail=spans, set false to omit the attributes JSON on every span. Default true, the full span detail. Ignored for summary."`
 }
 
 func (s *Server) traceLookup(ctx context.Context, req *sdkmcp.CallToolRequest, args traceLookupArgs) (*sdkmcp.CallToolResult, any, error) {
@@ -172,6 +175,9 @@ func (s *Server) traceLookup(ctx context.Context, req *sdkmcp.CallToolRequest, a
 		if err != nil {
 			return errResult(err.Error())
 		}
+		if !askedFor(args.IncludeAttributes, true) {
+			rows, cols = omitColumn(rows, cols, "attributes")
+		}
 		return withLink(rows, cols, s.traceLink(tenant, args.TraceID))
 	default:
 		return errResult(fmt.Sprintf("detail %q is not supported; use \"summary\" (the default) for the compact summary, or \"spans\" for every span with attributes", args.Detail))
@@ -187,14 +193,15 @@ type attrFilter struct {
 }
 
 type spanSearchArgs struct {
-	Tenant       string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
-	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together); span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}. Omit to match all spans in the time range."`
-	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
-	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to search, in minutes. Default 60."`
-	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
-	Limit        int          `json:"limit,omitempty" jsonschema:"maximum spans to return, default 100. Cap 1000."`
-	MinMs        *float64     `json:"min_ms,omitempty" jsonschema:"only spans lasting at least this many milliseconds (inclusive)"`
-	MaxMs        *float64     `json:"max_ms,omitempty" jsonschema:"only spans lasting at most this many milliseconds (inclusive). With min_ms, e.g. one histogram bucket's bounds."`
+	Tenant            string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
+	Filters           []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together); span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}. Omit to match all spans in the time range."`
+	ServiceName       string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
+	SinceMinutes      int          `json:"since_minutes,omitempty" jsonschema:"how far back to search, in minutes. Default 60."`
+	UntilMinutes      int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
+	Limit             int          `json:"limit,omitempty" jsonschema:"maximum spans to return, default 100. Cap 1000."`
+	IncludeAttributes *bool        `json:"include_attributes,omitempty" jsonschema:"when true, each row includes the attributes JSON. Default false."`
+	MinMs             *float64     `json:"min_ms,omitempty" jsonschema:"only spans lasting at least this many milliseconds (inclusive)"`
+	MaxMs             *float64     `json:"max_ms,omitempty" jsonschema:"only spans lasting at most this many milliseconds (inclusive). With min_ms, e.g. one histogram bucket's bounds."`
 }
 
 func (s *Server) spanSearch(ctx context.Context, req *sdkmcp.CallToolRequest, args spanSearchArgs) (*sdkmcp.CallToolResult, any, error) {
@@ -208,6 +215,9 @@ func (s *Server) spanSearch(ctx context.Context, req *sdkmcp.CallToolRequest, ar
 		telemetry.Range{Min: args.MinMs, Max: args.MaxMs})
 	if err != nil {
 		return errResult(err.Error())
+	}
+	if !askedFor(args.IncludeAttributes, false) {
+		rows, cols = omitColumn(rows, cols, "attributes")
 	}
 	return withLink(rows, cols, s.spanLink(tenant, args))
 }
@@ -377,9 +387,27 @@ func jsonResult(v any, link string) (*sdkmcp.CallToolResult, any, error) {
 	return linked(res, link)
 }
 
+func askedFor(flag *bool, def bool) bool {
+	if flag == nil {
+		return def
+	}
+	return *flag
+}
+
+func omitColumn(rows []map[string]any, cols []string, name string) ([]map[string]any, []string) {
+	kept := make([]string, 0, len(cols))
+	for _, c := range cols {
+		if c != name {
+			kept = append(kept, c)
+		}
+	}
+	for _, row := range rows {
+		delete(row, name)
+	}
+	return rows, kept
+}
+
 func rowsResult(rows []map[string]any, cols []string) (*sdkmcp.CallToolResult, any, error) {
-	// Return the rows as JSON text: unambiguous, and the shape the caller
-	// expects from a query tool.
 	out, err := telemetry.MarshalRows(rows, cols)
 	if err != nil {
 		return errResult(fmt.Sprintf("encoding results: %v", err))
