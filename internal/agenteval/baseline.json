@@ -1,0 +1,54 @@
+{
+  "compare_spans service=api-gateway": {
+    "max_bytes": 1140,
+    "max_tokens": 285
+  },
+  "flush_buffer": {
+    "max_bytes": 82,
+    "max_tokens": 21
+  },
+  "list_attribute_keys": {
+    "max_bytes": 2720,
+    "max_tokens": 680
+  },
+  "list_metric_names": {
+    "max_bytes": 175,
+    "max_tokens": 44
+  },
+  "list_services": {
+    "max_bytes": 175,
+    "max_tokens": 44
+  },
+  "list_services source=logs": {
+    "max_bytes": 175,
+    "max_tokens": 44
+  },
+  "list_tenants": {
+    "max_bytes": 19,
+    "max_tokens": 5
+  },
+  "log_search severity=WARN": {
+    "max_bytes": 1600,
+    "max_tokens": 400
+  },
+  "metric_query http.server.request.error.count sum service_name": {
+    "max_bytes": 225,
+    "max_tokens": 57
+  },
+  "slow_requests limit=1": {
+    "max_bytes": 2261,
+    "max_tokens": 566
+  },
+  "span_search service=payment-service status=error": {
+    "max_bytes": 1396,
+    "max_tokens": 349
+  },
+  "span_search status=error": {
+    "max_bytes": 8379,
+    "max_tokens": 2095
+  },
+  "trace_lookup detail=summary": {
+    "max_bytes": 5605,
+    "max_tokens": 1402
+  }
+}
