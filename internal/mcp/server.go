@@ -427,7 +427,7 @@ func (s *Server) slowRequests(ctx context.Context, req *sdkmcp.CallToolRequest, 
 	if err != nil {
 		return errResult(err.Error())
 	}
-	q := emptyQuery{tenant: tenant, window: true, since: args.SinceMinutes}
+	q := emptyQuery{tenant: tenant, window: true, since: args.SinceMinutes, metric: args.MetricName != ""}
 	if args.MetricName == "" {
 		q.spanFilters = filters
 	}
@@ -462,9 +462,27 @@ func (s *Server) metricQuery(ctx context.Context, req *sdkmcp.CallToolRequest, a
 	if err != nil {
 		return errResult(err.Error())
 	}
-	return s.rowsReply(rows, cols, s.metricLink(tenant, args), s.emptyRecovery(emptyQuery{
-		tenant: tenant, window: true, since: args.SinceMinutes,
-	}))
+	hint := s.emptyRecovery(emptyQuery{
+		tenant: tenant, window: true, since: args.SinceMinutes, metric: true,
+	})
+	if noPoints(rows, cols) {
+		// An ungrouped avg/sum/min/max/pNN over no points is one row with a
+		// null value, not zero rows. A misspelled metric_name lands here, so
+		// it gets the same hint. count keeps its 0 and stays one block.
+		res, _, err := rowsResult(rows, cols)
+		if err != nil {
+			return res, nil, err
+		}
+		appendRecovery(res, hint)
+		return linked(res, s.metricLink(tenant, args))
+	}
+	return s.rowsReply(rows, cols, s.metricLink(tenant, args), hint)
+}
+
+// noPoints reports an ungrouped aggregate that matched nothing: a single
+// value column holding null.
+func noPoints(rows []map[string]any, cols []string) bool {
+	return len(rows) == 1 && len(cols) == 1 && cols[0] == "value" && rows[0]["value"] == nil
 }
 
 // --- shared helpers ---
@@ -485,6 +503,9 @@ type emptyQuery struct {
 	since        int
 	wholeHistory bool
 	spanFilters  []telemetry.AttrFilter
+	// metric is set when the call named a metric_name, which must match a
+	// stored name exactly.
+	metric bool
 }
 
 // emptyRecovery is the text for an empty result. flush_buffer is named only
@@ -504,6 +525,10 @@ func (s *Server) emptyRecovery(q emptyQuery) string {
 	if hint := telemetry.SpanFilterSpellingHint(q.spanFilters); hint != "" {
 		parts = append(parts, hint)
 	}
+	if q.metric {
+		parts = append(parts, "metric_name must match a stored name exactly; list_metric_names returns this tenant's names.")
+	}
+	parts = append(parts, "list_tenants returns the tenant ids that have data, and list_services returns a tenant's service names.")
 	return strings.Join(parts, " ")
 }
 
