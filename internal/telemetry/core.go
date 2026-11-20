@@ -49,6 +49,28 @@ var spanFilterColumns = map[string]string{
 	"span_kind":   "span_kind",
 }
 
+// statusCodeShort maps the status words a caller types onto the values stored
+// in traces.status_code. The optional status_code_ prefix is stripped by
+// canonicalStatusCode, so both "error" and "STATUS_CODE_ERROR" land here.
+var statusCodeShort = map[string]string{
+	"ok":    "STATUS_CODE_OK",
+	"error": "STATUS_CODE_ERROR",
+	"unset": "STATUS_CODE_UNSET",
+}
+
+// canonicalStatusCode maps a status_code filter value onto the stored column
+// value. recognized is false for an unknown spelling: the caller then binds
+// the original text, so the query still runs.
+func canonicalStatusCode(value string) (stored string, recognized bool) {
+	s := strings.ToLower(strings.TrimSpace(value))
+	s = strings.TrimPrefix(s, "status_code_")
+	stored, recognized = statusCodeShort[s]
+	if !recognized {
+		return value, false
+	}
+	return stored, true
+}
+
 // spanFilterCond builds the condition for one span filter. A reserved span
 // column name compares that column; everything else stays an attribute match,
 // so log, metric and exemplar filters are unaffected. The string columns are
@@ -58,11 +80,22 @@ func spanFilterCond(f AttrFilter) (string, []any, error) {
 	if !ok {
 		return attrFilterCond(f)
 	}
+	value := f.Value
+	switch f.Key {
+	case "status_code":
+		if stored, recognized := canonicalStatusCode(f.Value); recognized {
+			value = stored
+		}
+	case "span_kind":
+		if stored, recognized := canonicalSpanKindFilter(f.Value); recognized {
+			value = stored
+		}
+	}
 	switch f.Op {
 	case "", "=":
-		return col + " = ?", []any{f.Value}, nil
+		return col + " = ?", []any{value}, nil
 	case "!=":
-		return col + " <> ?", []any{f.Value}, nil
+		return col + " <> ?", []any{value}, nil
 	default:
 		return "", nil, invalidInput("attribute filter op %q is not supported; use = (default) or !=", f.Op)
 	}

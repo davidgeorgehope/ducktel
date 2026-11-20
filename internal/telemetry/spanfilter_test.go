@@ -70,6 +70,55 @@ func TestSpanSearchBySpanColumns(t *testing.T) {
 	}
 }
 
+func TestSpanSearchStatusAndKindSpellings(t *testing.T) {
+	c := newWindowCore(t, []writer.TraceSpan{
+		spanColumnSpan("trace-ok", "GET /ok", "SPAN_KIND_SERVER", "STATUS_CODE_OK", 10),
+		spanColumnSpan("trace-err", "GET /err", "SPAN_KIND_CLIENT", "STATUS_CODE_ERROR", 20),
+		spanColumnSpan("trace-unset", "GET /unset", "SPAN_KIND_INTERNAL", "STATUS_CODE_UNSET", 30),
+	}, nil, nil)
+
+	same := func(value string, filters []AttrFilter, want ...string) {
+		t.Helper()
+		rows, _, err := c.SearchSpans("acme", "", filters, 0, 0, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", value, err)
+		}
+		checkTraceSet(t, value, rows, want...)
+	}
+
+	for _, v := range []string{"error", "ERROR", "STATUS_CODE_ERROR", " Status_Code_Error "} {
+		same(v, []AttrFilter{{Key: "status_code", Value: v}}, "trace-err")
+	}
+	for _, v := range []string{"ok", "OK", "STATUS_CODE_OK"} {
+		same(v, []AttrFilter{{Key: "status_code", Value: v}}, "trace-ok")
+	}
+	for _, v := range []string{"unset", "UNSET", "status_code_unset"} {
+		same(v, []AttrFilter{{Key: "status_code", Value: v}}, "trace-unset")
+	}
+	same("!= error", []AttrFilter{{Key: "status_code", Op: "!=", Value: "error"}}, "trace-ok", "trace-unset")
+
+	rows, _, err := c.SearchSpans("acme", "", []AttrFilter{{Key: "status_code", Value: "nope"}}, 0, 0, 0)
+	if err != nil {
+		t.Fatalf("unrecognized status: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("unrecognized status returned %v, want no rows", rowTraceIDs(rows))
+	}
+
+	for _, v := range []string{"client", "SPAN_KIND_CLIENT", "Span_Kind_Client"} {
+		same(v, []AttrFilter{{Key: "span_kind", Value: v}}, "trace-err")
+	}
+	same("!= server", []AttrFilter{{Key: "span_kind", Op: "!=", Value: "server"}}, "trace-err", "trace-unset")
+
+	rows, _, err = c.SearchSpans("acme", "", []AttrFilter{{Key: "span_kind", Value: "any"}}, 0, 0, 0)
+	if err != nil {
+		t.Fatalf("span_kind any: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("span_kind any returned %v, want no rows", rowTraceIDs(rows))
+	}
+}
+
 func TestSpanColumnKeyStaysAnAttributeFilterForLogsAndMetrics(t *testing.T) {
 	now := time.Now()
 	c := newWindowCore(t, nil,
