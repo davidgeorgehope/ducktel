@@ -2,10 +2,10 @@
 name: ducktel
 description: >
   Work with ducktel — a lightweight, single-binary OpenTelemetry backend for LLM agent diagnostics.
-  Use when querying OTLP traces/logs/metrics via the ducktel CLI, writing DuckDB SQL against Parquet-stored
+  Use when querying OTLP traces, logs, or metrics via the ducktel CLI or its MCP tools, writing DuckDB SQL against Parquet-stored
   telemetry, diagnosing issues from OTel data, developing the ducktel Go codebase, or running the OTLP receiver.
-  TRIGGER when: code imports ducktel packages, user mentions ducktel CLI commands (serve, query, traces, logs,
-  metrics, schema, services), or user works with the ducktel project directory.
+  TRIGGER when: code imports ducktel packages, user mentions ducktel commands (serve, query, traces, logs,
+  metrics, schema, services, mcp), or user works with the ducktel project directory.
 ---
 
 # ducktel
@@ -25,6 +25,8 @@ ducktel query/traces/logs/metrics  (embedded DuckDB)
     ↓
 JSON / table / CSV output → LLM agents or humans
 ```
+
+`ducktel mcp` reads the same Parquet files through `internal/telemetry`. It does not go through the CLI formatter.
 
 ## CLI Reference
 
@@ -53,8 +55,10 @@ and `POST /flush` (see Authentication).
 
 Off by default — Parquet files accumulate indefinitely unless `--retention` is
 set. For any long-lived or container deployment, prefer `--retention 30d` so disk
-growth stays bounded. When set, an hourly background sweep deletes whole
-`traces|logs|metrics/YYYY-MM-DD` directories older than the window:
+growth stays bounded. A maintenance pass runs at startup and then every 10
+minutes. It does not follow `--flush-interval`. When `--retention` is set, that
+pass deletes whole `traces|logs|metrics/YYYY-MM-DD` directories older than the
+window:
 
 ```bash
 ducktel serve --retention 30d     # bare day count
@@ -63,18 +67,9 @@ ducktel serve --retention 720h    # or any Go duration
 
 - Day-granular, not per-record: a directory is either kept whole or removed
   whole. There is no partial-day pruning.
-- **Compaction runs on the same hourly/startup schedule, always** (it does not
-  need `--retention`): each past day's per-flush files merge into one
-  `day.parquet` per signal, chronological order preserved. The current and
-  previous UTC day are never touched, so a merge cannot race the writer. Crash-safe: an existing
-  `day.parquet` means the merge finished, so leftover per-flush files are
-  deleted rather than merged (merging would double rows). This is the
-  structural fix for the "every query opens every file" pathology — a
-  day becomes one file instead of ~2880.
+- **Compaction runs on that same pass, including when `--retention` is off.** Today and yesterday (UTC), each hour that started at least 2 hours ago merges into `HH.parquet`. Days strictly before yesterday merge into one `day.parquet` per signal, in name order. If that merged file already exists, leftover source files are deleted rather than merged again, because a second merge would double rows.
 - A directory name that doesn't parse as `YYYY-MM-DD` is left alone rather
   than guessed at.
-- Runs once immediately on startup (so a long-stopped process catches up on
-  backlog) and then hourly, independent of `--flush-interval`.
 - Deletions are logged individually (`retention: removed <path> (older than
   <window>)`), so what got pruned and when is always visible in the process
   log, not silent.
@@ -167,18 +162,19 @@ List distinct service names from traces.
 
 Serve telemetry queries over the Model Context Protocol, for agent consumers.
 
-Six generic, domain-agnostic tools. They know about spans, attributes, logs,
-metrics and time, and attach no meaning to any attribute key — domain
-interpretation is the caller's job.
+Seven tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other six are always registered.
 
 | Tool | Purpose |
 |------|---------|
 | `trace_lookup(trace_id, tenant, detail, limit)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, errors, WARN-and-above logs; `detail=spans` returns every span with attributes, ordered by start time, which can be large |
 | `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms)` | spans matching attribute key/value filters, optionally by duration |
+| `compare_spans(service_name, span_name, span_kind, filters, since_minutes, tenant, min_ms, max_ms, limit)` | why the slow spans differ. Compares a duration range (default, slower than the scope's p95) with the other spans in that scope, and returns the attribute values whose share differs most. `span_kind` defaults to `server` when `span_name` is omitted. Default 15 rows, cap 50 |
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
 | `metric_query(metric_name, aggregation, since_minutes, group_by, step, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99, buckets (histograms), exemplars; `group_by` accepts columns, `attr.<key>` and `resource.<key>`; `step` returns a time series |
 | `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, untraced time, top repeated span groups with their self time, the 3 slowest spans, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
 | `flush_buffer()` | make just-received telemetry queryable now (see Flush semantics) |
+
+A filter object is `{key, value, op}`. `op` is `=` (default) or `!=`. `!=` drops records where the key has that value, and keeps records that lack the key.
 
 **Time series and resource grouping.** `step` turns `metric_query` into a time
 series: one row per (time bucket, group), with a leading `time` column holding the
@@ -188,15 +184,17 @@ bucket start in Unix microseconds (UTC), ordered by time then groups.
 At most 1500 buckets are allowed per query; `exemplars` ignores `step`.
 
 **Start with `slow_requests` for "why is X slow".** One call returns the slowest
-requests, each already carrying a brief trace summary. Follow a `trace_id` with
-`trace_lookup` for the full summary, and use `trace_lookup(detail=spans)` only when
-every span with attributes is really needed.
+requests, each already carrying a brief trace summary. Use `compare_spans` when you
+want the attribute values that are more common on those slow spans than on the rest.
+Follow a `trace_id` with `trace_lookup` for the full summary, and use
+`trace_lookup(detail=spans)` only when every span with attributes is really needed.
 
 **Trace summaries and slow requests over REST.** The same queries are available on
 `/api`:
 
 - `GET /api/traces/{trace_id}/summary?tenant=` returns the compact summary object.
 - `GET /api/slow?tenant=&metric_name=&service_name=&span_name=&filter=k:v&since_minutes=&min_value=&max_value=&limit=` returns the `slow_requests` array.
+- `GET /api/compare?tenant=&service_name=&span_name=&span_kind=&filter=k:v&since_minutes=&min_ms=&max_ms=&limit=` returns the `compare_spans` result.
 
 **Tenant isolation is mandatory.** `tenant` is a *required* parameter on every query
 tool — it is in the JSON schema, so a client cannot omit it — and every query
@@ -207,8 +205,9 @@ but never widen it. `flush_buffer` takes no arguments and touches no data.
 quotes the key internally, because DuckDB treats `$.service.name` as field "service"
 then "name" and silently returns NULL. See the note under SQL Query Patterns.
 
-**Time windows default to 60 minutes.** Pass `since_minutes` for a wider range; a wide
-window scans every Parquet file in it, so it can be expensive.
+**Time windows default to 60 minutes.** Pass `since_minutes` for a wider range. A wide
+window scans every Parquet file in it, so it can be expensive. `until_minutes` ends the
+window that many minutes before now (default 0). It must be less than `since_minutes`.
 
 #### Two transports, two trust domains
 
@@ -298,7 +297,7 @@ For common query patterns, see [references/queries.md](references/queries.md).
 - **From a percentile to a request:** `metric_query(aggregation="exemplars")` returns the requests the SDK attached to the metric's points (`timestamp`, `value`, `trace_id`, `span_id`), highest value first, deduplicated; `min_value`/`max_value` (inclusive) narrow it to one bucket, `limit` defaults to 20 (cap 200). Follow a `trace_id` with `trace_lookup` and `log_search(trace_id=…)`. When exemplars are few, `span_search(min_ms=…, max_ms=…)` finds every span of that duration. For the direct question, `slow_requests` does the exemplar step and the trace summary in one call.
 - **Show where you found it:** when the server runs with `--dashboard-url`, each result ends with a `dashboard_url:` line. Give that link to the person you work with instead of describing the query.
 - **`count` on a gauge or sum counts exported points, not events.** A gauge re-exported every interval is counted once per export, and percentiles over it weight each export equally. To count events, use a counter (`sum`) or a histogram.
-- **`metric_query` grouping:** `group_by` is comma-separated; each key is a plain column (`service_name`, `metric_type`, …), a data-point attribute written `attr.<key>` / `attributes.<key>`, or a resource attribute written `resource.<key>` / `resource_attributes.<key>`. For example, `group_by: "attr.kind"` splits the aggregate by the metric point's `attributes` JSON key `kind`, while `group_by: "resource.host.name"` splits it by the resource attribute `host.name`; the result rows carry the key as their column name. Attribute keys are validated against `[A-Za-z0-9_.-]`. `filters` matches attribute key/value pairs against data-point attributes OR resource attributes, same as `span_search`. Add `step` (`30s`, `1m`, `5m`, `1h`) for one row per time bucket instead of one row per group.
+- **`metric_query` grouping:** `group_by` is comma-separated. Each key is a plain column (`service_name`, `metric_type`), a data-point attribute written `attr.<key>` or `attributes.<key>`, or a resource attribute written `resource.<key>` or `resource_attributes.<key>`. `service.name` is accepted and means the `service_name` column. For example, `group_by: "attr.kind"` splits the aggregate by the metric point's `attributes` JSON key `kind`, while `group_by: "resource.host.name"` splits it by the resource attribute `host.name`. The result rows carry the key as their column name. Attribute keys are validated against `[A-Za-z0-9_.-]`. `filters` matches attribute key/value pairs against data-point attributes or resource attributes, same as `span_search`. Add `step` (`30s`, `1m`, `5m`, `1h`, or a whole number of seconds) for one row per time bucket instead of one row per group.
 - **Filter values are bound, not interpolated.** The `traces`/`logs`/`metrics` commands pass filter values to DuckDB as parameters, so a service name or search term containing quotes is matched literally — it cannot alter the query. `--limit` is validated and capped at 10000.
 - **`query` and `saved run` execute raw SQL by design.** There is no sandbox on `ducktel query "<sql>"`; it runs whatever you give it, including DDL. That is intentional (it is the SQL escape hatch for agents), so treat its input as trusted.
 

@@ -49,7 +49,7 @@
 | metric_name | VARCHAR | Metric instrument name (e.g. `http.request.duration`) |
 | metric_description | VARCHAR | Human-readable description |
 | metric_unit | VARCHAR | Unit (e.g. `ms`, `By`, `1`) |
-| metric_type | VARCHAR | gauge, sum, histogram, summary. Only gauge/sum populate `value_double`; see the note below. |
+| metric_type | VARCHAR | gauge, sum, histogram, exponential_histogram, summary. Only gauge and sum populate `value_double`. See the note below. |
 | timestamp | BIGINT | Data point timestamp (Unix microseconds) |
 | start_timestamp | BIGINT | Cumulative start time (Unix microseconds) |
 | value_double | DOUBLE | Gauge/sum value (float) |
@@ -71,26 +71,25 @@
 | is_monotonic | BOOLEAN | Whether sum is monotonically increasing |
 | aggregation_temporality | VARCHAR | AGGREGATION_TEMPORALITY_DELTA or CUMULATIVE |
 
-### Which metric types are aggregatable
+### Which metric types `metric_query` aggregates
 
-`value_double` is the normalised numeric column, and `metric_query`'s aggregations
-(`avg`, `sum`, `min`, `max`, `count`, percentiles) read **only** it. The receiver
-populates it for `NumberDataPoint` types alone:
+`value_double` is populated for `gauge` and `sum` only, including integer sum points. `metric_query` reads `value_double` for those two types.
 
-| metric_type | populates `value_double`? | aggregatable via `metric_query` |
+`histogram` and `exponential_histogram` leave `value_double` empty. `metric_query` still aggregates them. It reads `count`, `sum`, `min`, `max`, and, for an explicit-bucket histogram, `bucket_counts`. The most recent point's `metric_type` selects this path. A `count` of 0 means the window had no increment. `avg` on an empty window is null. Neither result means the histogram was ignored.
+
+| metric_type | columns `metric_query` reads | aggregations |
 |---|---|---|
-| `gauge` | yes | **yes** |
-| `sum` | yes (int points are normalised in) | **yes** |
-| `histogram` | **no** — lands in `sum`/`min`/`max`/`count`/`bucket_counts` | **no — returns 0, not an error** |
-| `summary` | no — lands in `count`/`sum`/quantile columns | no |
+| `gauge` | `value_double` | `avg`, `sum`, `min`, `max`, `count`, `p50`, `p95`, `p99` |
+| `sum` | `value_double` | `avg`, `sum`, `min`, `max`, `count`, `p50`, `p95`, `p99` |
+| `histogram` | `count`, `sum`, `min`, `max`, `bucket_counts` | `count`, `sum`, `avg` (sum/count), `min`, `max`, `p50`, `p95`, `p99`, `buckets` |
+| `exponential_histogram` | `count`, `sum`, `min`, `max` | `count`, `sum`, `avg`, `min`, `max`. `p50`, `p95`, `p99`, and `buckets` return an error, because those need explicit bucket boundaries. |
+| `summary` | `value_double`, which stays empty | `count` counts exported points. `avg`, `sum`, `min`, `max`, and percentiles do not see `count`, `sum`, or `quantile_values`. Read those columns with `ducktel query`. |
 
-A histogram is stored faithfully and readable with raw SQL (`ducktel query`), but
-it is invisible to `metric_query`. **If you want a value aggregatable, send it as
-a `gauge` or `sum`, never a histogram** — e.g. an un-pre-aggregated per-event
-duration belongs in a gauge, which is also the more faithful OTLP shape for a
-single sample. The failure mode is silent: `avg(value_double)` over
-histogram-only rows returns `0`, so it looks like "no data arrived" rather than
-"wrong point type".
+On a gauge or a sum, `count` counts exported points, not events. A gauge written on every interval is counted once per export.
+
+`buckets` returns one row per bucket, with `le` (inclusive upper bound, null past the last bound) and `value` (observations). It requires an explicit-bucket histogram. `p50`, `p95`, and `p99` on a histogram are interpolated from the merged buckets. Cumulative series are turned into increments inside the window before those aggregations run. The histogram path lives in `internal/telemetry/histogram.go`.
+
+`exemplars` returns the exemplars attached to the points (`timestamp`, `value`, `trace_id`, `span_id`), for any metric type that has them. It does not use the table above.
 
 ## Storage Layout
 
@@ -101,7 +100,9 @@ data/
   metrics/YYYY-MM-DD/HH-MM.parquet
 ```
 
-DuckDB views use glob patterns (`data/traces/**/*.parquet`) to auto-discover all files.
+A flush writes `HH-MM.parquet`. A second flush in the same minute adds a counter suffix. The clock in the name is the flush time, not the time on the rows.
+
+Compaction rewrites closed files. For today and yesterday (UTC), an hour that started at least 2 hours ago becomes `HH.parquet`. A day strictly before yesterday becomes one `day.parquet`. The views glob `data/traces/**/*.parquet` (and the same for `logs` and `metrics`), so all three names are visible.
 
 ## JSON Field Access (DuckDB)
 

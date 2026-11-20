@@ -2,9 +2,9 @@
 
 **The user of this tool is not a human. It's an LLM.**
 
-ducktel is a lightweight local OpenTelemetry backend. It receives OTLP traces, logs, and metrics over HTTP, stores them as partitioned Parquet files, and makes them queryable via embedded DuckDB through a CLI.
+ducktel is a lightweight local OpenTelemetry backend. It receives OTLP traces, logs, and metrics over HTTP, stores them as partitioned Parquet files, and makes them queryable via embedded DuckDB through the CLI and the MCP tools.
 
-Single binary. No external dependencies. No dashboards. No alerting infrastructure. No webhooks. No notification channels.
+Single binary. No alerting infrastructure. No webhooks. No notification channels. An optional dashboard stays off unless you pass `--dashboard`.
 
 An LLM agent shells out to `ducktel query`, gets structured JSON back, and reasons about the results. The agent *is* the dashboard. The agent *is* the alerting engine. The agent *is* the intelligence layer. Everything ducktel does is designed for that consumer — not for a human staring at a screen.
 
@@ -505,7 +505,7 @@ This isn't a prediction about the distant future. The pieces exist today. OpenTe
 
 ## Status
 
-Early stage. The core ingest → store → query loop works. Contributions welcome.
+Ingest, Parquet storage, DuckDB query, the MCP tools, and an optional dashboard are implemented. [README.md](README.md) is the current behavior. [PLAN.md](PLAN.md) is what is not built. Contributions welcome.
 
 ## License
 
