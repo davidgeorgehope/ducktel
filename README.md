@@ -300,9 +300,10 @@ and `trace_lookup` / `log_search(trace_id=…)` open one of them. In the dashboa
 this is a click on a distribution bar, then on a request.
 
 **Dashboard links in tool results.** With `--dashboard-url` (env
-`DUCKTEL_DASHBOARD_URL`, e.g. `https://otel.example.com/dashboard/`), every tool
+`DUCKTEL_DASHBOARD_URL`, e.g. `https://otel.example.com/dashboard/`), each query
 result ends with a `dashboard_url:` line that opens the same query in the
-dashboard, so an agent can show a person where it found something. The dashboard's
+dashboard, so an agent can show a person where it found something. Discovery
+lists do not add a link. The dashboard's
 deep links use the tools' own parameter names, so the link is the query.
 
 **Trace summaries and slow requests over REST.** The dashboard's `/api` routes
