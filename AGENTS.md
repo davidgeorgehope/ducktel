@@ -51,13 +51,13 @@ The dashboard has no build step and no npm install.
 
 Put a change to query results in `internal/telemetry`. Keep `internal/mcp` and `internal/webapi` as adapters. Both surfaces should keep calling the same core function.
 
-Tools stay generic. Do not teach a tool what a particular attribute key means. `tenant` is the exception. Every query tool requires it, and every query filters on the `tenant.id` resource attribute.
+Tools stay generic. Do not teach a tool what a particular attribute key means. `tenant` is the exception. Every query tool requires it, and every query filters on the `tenant.id` resource attribute. `list_tenants` takes no tenant and returns only tenant ids. `list_services`, `list_metric_names`, and `list_attribute_keys` require `tenant`.
 
 Timestamps stored in Parquet are Unix microseconds.
 
 One `ducktel serve` process owns a data directory. A second process for that directory exits instead of writing the same files.
 
-When you add, remove, or rename a tool, change `Register` in `internal/mcp/server.go`. Put the same names in `llms.txt`, `README.md`, and `skills/ducktel/SKILL.md`. `ducktel mcp --help` is shorter and can lag `Register`.
+When you add, remove, or rename a tool, change `Register` in `internal/mcp/server.go`. Put the same names in `llms.txt`, `README.md`, `skills/ducktel/SKILL.md`, and `ducktel mcp --help`.
 
 `flush_buffer` is registered only when a flush URL is configured. Document that condition with the tool. Do not describe it as always present, and do not drop it.
 

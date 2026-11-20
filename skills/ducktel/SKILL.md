@@ -211,7 +211,7 @@ arguments and touches no data.
 quotes the key internally, because DuckDB treats `$.service.name` as field "service"
 then "name" and silently returns NULL. See the note under SQL Query Patterns.
 
-**Time windows default to 60 minutes** on the tools that take one. `trace_lookup` and `flush_buffer` do not. Pass `since_minutes` for a wider range. A wide
+**Time windows default to 60 minutes** on the tools that take one, including `list_attribute_keys`. `trace_lookup`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` do not. `list_attribute_keys` does not take `until_minutes`. Pass `since_minutes` for a wider range. A wide
 window reads every selected Parquet file in it, so it can be expensive. `until_minutes` ends the
 window that many minutes before now (default 0). It must be less than `since_minutes`. On the CLI, `--since 0` means no time filter.
 
