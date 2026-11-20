@@ -621,6 +621,60 @@ func TestSearchLogsNewestFirst(t *testing.T) {
 	}
 }
 
+func TestSearchLogsSeveritySynonyms(t *testing.T) {
+	now := time.Now()
+	rec := func(sev, body string) writer.LogRecord {
+		return writer.LogRecord{
+			Timestamp: now.UnixMicro(), SeverityText: sev, Body: body,
+			Attributes: "{}", ServiceName: "api",
+			ResourceAttributes: `{"service.name":"api","tenant.id":"acme"}`,
+		}
+	}
+	c := newWindowCore(t, nil, []writer.LogRecord{
+		rec("WARN", "short"),
+		rec("WARNING", "long"),
+		rec("ERROR", "boom"),
+		rec("INFO", "ok"),
+		rec("INFORMATION", "wordy"),
+	}, nil)
+
+	bodies := func(sev string) map[string]bool {
+		t.Helper()
+		rows, _, err := c.SearchLogs("acme", "", "", sev, "", nil, 0, 0, 0)
+		if err != nil {
+			t.Fatalf("severity %q: %v", sev, err)
+		}
+		got := map[string]bool{}
+		for _, r := range rows {
+			got[r["body"].(string)] = true
+		}
+		return got
+	}
+
+	for _, sev := range []string{"warning", "Warning", "WARNING"} {
+		got := bodies(sev)
+		if len(got) != 2 || !got["short"] || !got["long"] {
+			t.Errorf("severity %q matched %v, want the WARN and WARNING rows", sev, got)
+		}
+	}
+	got := bodies("error")
+	if len(got) != 1 || !got["boom"] || got["short"] {
+		t.Errorf("severity error matched %v, want only the ERROR row", got)
+	}
+	got = bodies("err")
+	if len(got) != 1 || !got["boom"] {
+		t.Errorf("severity err matched %v, want the ERROR row", got)
+	}
+	got = bodies("WARN")
+	if len(got) != 1 || !got["short"] {
+		t.Errorf("severity WARN matched %v, want only the WARN row", got)
+	}
+	got = bodies("information")
+	if len(got) != 2 || !got["ok"] || !got["wordy"] {
+		t.Errorf("severity information matched %v, want INFO and INFORMATION", got)
+	}
+}
+
 func TestSearchLogsSeverityCaseInsensitive(t *testing.T) {
 	c := newLogCore(t)
 

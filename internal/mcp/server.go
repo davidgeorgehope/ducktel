@@ -266,7 +266,7 @@ type logSearchArgs struct {
 	Tenant       string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
 	TraceID      string       `json:"trace_id,omitempty" jsonschema:"restrict to the records of one trace id. A trace id is a precise key, so this searches the whole history unless since_minutes is given."`
 	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
-	Severity     string       `json:"severity,omitempty" jsonschema:"exact severity to match, case-insensitive: DEBUG, INFO, WARN, ERROR, FATAL. Matches the severity text senders set."`
+	Severity     string       `json:"severity,omitempty" jsonschema:"exact severity to match, case-insensitive: DEBUG, INFO, WARN, ERROR, FATAL. warning, err, and information also match WARN, ERROR, and INFO."`
 	Search       string       `json:"search,omitempty" jsonschema:"case-insensitive substring to find in the log body"`
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together), against record attributes OR resource attributes. Omit to match all records in the time range."`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to search, in minutes. Default 60 (whole history when trace_id is given)."`

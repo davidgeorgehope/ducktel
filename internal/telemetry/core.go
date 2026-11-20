@@ -381,6 +381,15 @@ func (c *Core) spanConds(tenant, serviceName string, filters []AttrFilter, d Ran
 	return conds, params, nil
 }
 
+// severitySynonyms maps words callers type onto the short severity_text
+// senders usually store. The lookup key is the lowercased input. The literal
+// uppercase is still matched, so the long form is not dropped.
+var severitySynonyms = map[string]string{
+	"warning":     "WARN",
+	"err":         "ERROR",
+	"information": "INFO",
+}
+
 // SearchLogs finds log records matching filters, scoped to tenant — the
 // log-signal counterpart of SearchSpans, with the same filter semantics: an
 // exact service name, a case-insensitive exact severity (matched against
@@ -440,8 +449,17 @@ func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string,
 		params = append(params, serviceName)
 	}
 	if severity != "" {
-		conds = append(conds, "UPPER(severity_text) = ?")
-		params = append(params, strings.ToUpper(severity))
+		upper := strings.ToUpper(severity)
+		// A synonym is OR-ed with the literal so severity=warning matches a
+		// row stored as WARN and a row stored as WARNING. severity=error is
+		// not a synonym, so it still matches only ERROR.
+		if canon, ok := severitySynonyms[strings.ToLower(severity)]; ok && canon != upper {
+			conds = append(conds, "(UPPER(severity_text) = ? OR UPPER(severity_text) = ?)")
+			params = append(params, upper, canon)
+		} else {
+			conds = append(conds, "UPPER(severity_text) = ?")
+			params = append(params, upper)
+		}
 	}
 	if search != "" {
 		conds = append(conds, "body ILIKE ?")
