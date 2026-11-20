@@ -1000,9 +1000,11 @@ type cachedResult struct {
 }
 
 // discover runs a bounded discovery query through a short-lived cache keyed
-// by key. Results are shared between callers and must be treated read-only.
+// by key. A zero since reads full history through engine.Query. Any other
+// since is the window start passed to QuerySince, so older day files stay
+// closed. Results are shared between callers and must be treated read-only.
 // Errors are not cached.
-func (c *Core) discover(key, q string, args ...any) ([]map[string]any, []string, error) {
+func (c *Core) discover(key string, since time.Time, q string, args ...any) ([]map[string]any, []string, error) {
 	c.cacheMu.Lock()
 	if r, ok := c.cache[key]; ok && time.Since(r.at) < discoveryTTL {
 		c.cacheMu.Unlock()
@@ -1010,7 +1012,16 @@ func (c *Core) discover(key, q string, args ...any) ([]map[string]any, []string,
 	}
 	c.cacheMu.Unlock()
 
-	rows, cols, err := c.engine.Query(q, args...)
+	var (
+		rows []map[string]any
+		cols []string
+		err  error
+	)
+	if since.IsZero() {
+		rows, cols, err = c.engine.Query(q, args...)
+	} else {
+		rows, cols, err = c.engine.QuerySince(since, q, args...)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1025,9 +1036,9 @@ func (c *Core) discover(key, q string, args ...any) ([]map[string]any, []string,
 
 // ListTenants returns the distinct tenant ids seen in any signal: traces,
 // logs or metrics. A tenant that only ships logs or metrics is still a tenant,
-// and a traces-only list hid it from the dashboard's picker. No MCP tool
-// needs this — an agent caller already knows its own tenant — but a
-// human-facing consumer needs a way to discover what exists.
+// and a traces-only list hid it from the dashboard's picker. The MCP
+// list_tenants tool returns these ids and no other column. It is the one
+// discovery tool that is not scoped to a tenant.
 func (c *Core) ListTenants() ([]map[string]any, []string, error) {
 	path := strings.ReplaceAll(jsonPath(c.tenantAttr), "'", "''")
 	var parts []string
@@ -1038,7 +1049,7 @@ func (c *Core) ListTenants() ([]map[string]any, []string, error) {
 	}
 	// UNION (not UNION ALL) also de-duplicates across signals.
 	q := strings.Join(parts, "\n	      UNION\n	      ") + "\n	      ORDER BY 1"
-	return c.discover("tenants", q)
+	return c.discover("tenants", time.Time{}, q)
 }
 
 // ListServices returns distinct service names within one tenant.
@@ -1047,7 +1058,7 @@ func (c *Core) ListServices(tenant string) ([]map[string]any, []string, error) {
 		return nil, nil, err
 	}
 	q := `SELECT DISTINCT service_name FROM traces WHERE ` + c.tenantPredicate() + ` ORDER BY 1`
-	return c.discover("services\x00"+tenant, q, tenant)
+	return c.discover("services\x00"+tenant, time.Time{}, q, tenant)
 }
 
 // ListLogServices returns distinct service names within one tenant as seen
@@ -1060,17 +1071,113 @@ func (c *Core) ListLogServices(tenant string) ([]map[string]any, []string, error
 		return nil, nil, err
 	}
 	q := `SELECT DISTINCT service_name FROM logs WHERE ` + c.tenantPredicate() + ` ORDER BY 1`
-	return c.discover("logservices\x00"+tenant, q, tenant)
+	return c.discover("logservices\x00"+tenant, time.Time{}, q, tenant)
 }
 
-// ListMetricNames returns distinct metric names within one tenant. Like
-// ListServices, no MCP tool needs this — an agent caller already knows the
-// metric name it wants — but a human-facing consumer has no way to guess an
-// exact metric_name string without seeing what's actually been ingested.
+// ListMetricNames returns distinct metric names within one tenant. The MCP
+// list_metric_names tool and the dashboard picker both need the exact
+// metric_name strings that have been ingested. A caller cannot guess them.
 func (c *Core) ListMetricNames(tenant string) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {
 		return nil, nil, err
 	}
 	q := `SELECT DISTINCT metric_name FROM metrics WHERE ` + c.tenantPredicate() + ` ORDER BY 1`
-	return c.discover("metricnames\x00"+tenant, q, tenant)
+	return c.discover("metricnames\x00"+tenant, time.Time{}, q, tenant)
+}
+
+// attrKeySampleRows caps the rows read from each signal. The reservoir is
+// taken after the tenant and time filters, so a wide window still costs a
+// fixed sample, and a missing key may still exist outside it.
+const attrKeySampleRows = 2000
+
+const (
+	attrKeyDefaultLimit = 200
+	attrKeyMaxLimit     = 1000
+)
+
+// attributeSignal is one view the key inventory can read. timeCol is that
+// view's event time, in unix microseconds. Both fields are fixed names, so
+// they are safe to interpolate. Caller values stay bound parameters.
+type attributeSignal struct {
+	view    string
+	timeCol string
+}
+
+func attributeSignals(signal string) ([]attributeSignal, error) {
+	all := []attributeSignal{
+		{view: "traces", timeCol: "start_time"},
+		{view: "logs", timeCol: "timestamp"},
+		{view: "metrics", timeCol: "timestamp"},
+	}
+	if signal == "" {
+		return all, nil
+	}
+	for _, s := range all {
+		if s.view == signal {
+			return []attributeSignal{s}, nil
+		}
+	}
+	return nil, invalidInput("signal %q is not supported; use \"traces\", \"logs\", or \"metrics\", or omit it for all three", signal)
+}
+
+// ListAttributeKeys returns one row per distinct signal, source and key for
+// tenant. signal "" reads traces, logs and metrics. source is "attributes"
+// or "resource_attributes", and key is the raw JSON key. The scan covers
+// sinceMinutes (default 60) and at most attrKeySampleRows rows of each
+// signal. ListTenants, ListServices and ListMetricNames stay full history.
+// serviceName, when set, keeps one service.
+func (c *Core) ListAttributeKeys(tenant, signal, serviceName string, sinceMinutes, limit int) ([]map[string]any, []string, error) {
+	if err := validateTenant(tenant); err != nil {
+		return nil, nil, err
+	}
+	signals, err := attributeSignals(signal)
+	if err != nil {
+		return nil, nil, err
+	}
+	if limit <= 0 {
+		limit = attrKeyDefaultLimit
+	} else if limit > attrKeyMaxLimit {
+		limit = attrKeyMaxLimit
+	}
+	start, _ := Window{Since: sinceMinutes}.bounds(time.Now())
+	q, args := c.attributeKeyQuery(signals, tenant, serviceName, start.UnixMicro(), limit)
+	key := fmt.Sprintf("attrkeys\x00%s\x00%s\x00%s\x00%d\x00%d", tenant, signal, serviceName, sinceMinutes, limit)
+	return c.discover(key, start, q, args...)
+}
+
+func (c *Core) attributeKeyQuery(signals []attributeSignal, tenant, serviceName string, cutoff int64, limit int) (string, []any) {
+	sample := strconv.Itoa(attrKeySampleRows)
+	with := make([]string, 0, len(signals))
+	branches := make([]string, 0, len(signals)*2)
+	args := make([]any, 0, len(signals)*3+1)
+	for _, s := range signals {
+		where := c.tenantPredicate() + " AND " + s.timeCol + " >= ?"
+		args = append(args, tenant, cutoff)
+		if serviceName != "" {
+			where += " AND service_name = ?"
+			args = append(args, serviceName)
+		}
+		cte := s.view + "_sample"
+		with = append(with, cte+` AS (
+	SELECT attributes, resource_attributes FROM (
+		SELECT attributes, resource_attributes FROM `+s.view+`
+		WHERE `+where+`
+	) USING SAMPLE reservoir(`+sample+` ROWS))`)
+		branches = append(branches,
+			attributeKeyBranch(s.view, cte, "attributes"),
+			attributeKeyBranch(s.view, cte, "resource_attributes"))
+	}
+	q := "WITH " + strings.Join(with, ",\n") + "\n" +
+		strings.Join(branches, "\nUNION\n") +
+		"\nORDER BY signal, source, key\nLIMIT ?"
+	args = append(args, limit)
+	return q, args
+}
+
+// attributeKeyBranch unnests one JSON column of an already-sampled signal.
+// json_valid matches compare.go: one bad cell contributes no keys instead of
+// failing the inventory.
+func attributeKeyBranch(signal, cte, column string) string {
+	return `SELECT '` + signal + `' AS signal, '` + column + `' AS source, k AS key
+	FROM ` + cte + `, unnest(CASE WHEN json_valid(` + column + `) THEN json_keys(` + column + `) ELSE CAST([] AS VARCHAR[]) END) AS t(k)`
 }
