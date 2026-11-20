@@ -162,11 +162,15 @@ List distinct service names from traces.
 
 Serve telemetry queries over the Model Context Protocol, for agent consumers.
 
-Seven tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other six are always registered.
+Eleven tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other ten are always registered.
 
 | Tool | Purpose |
 |------|---------|
-| `trace_lookup(trace_id, tenant, detail, limit, include_attributes)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, errors, WARN-and-above logs; `detail=spans` returns every span, ordered by start time, with attributes unless `include_attributes` is false. The result can be large |
+| `list_tenants()` | tenant ids with stored telemetry. Takes no arguments and returns only tenant ids |
+| `list_services(tenant, source)` | service names for one tenant. `source` omitted or `traces` reads spans; `logs` reads log records |
+| `list_metric_names(tenant)` | metric names stored for one tenant |
+| `list_attribute_keys(tenant, signal, service_name, since_minutes, limit)` | attribute keys seen in a sample of the window (default 60 minutes, at most 2000 rows per signal), not every key ever stored. Each row is `signal`, `source` (`attributes` or `resource_attributes`), and `key`. A missing key is not proof it never existed |
+| `trace_lookup(trace_id, tenant, detail, limit, include_attributes)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, error spans, WARN-and-above logs; `detail=spans` returns every span, ordered by start time, with attributes unless `include_attributes` is false. The result can be large |
 | `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms, include_attributes)` | spans matching attribute key/value filters, optionally by duration. Attributes are omitted unless `include_attributes` is true |
 | `compare_spans(service_name, span_name, span_kind, filters, since_minutes, tenant, min_ms, max_ms, limit)` | why the slow spans differ. Compares a duration range (default, slower than the scope's p95) with the other spans in that scope, and returns the attribute values whose share differs most. `span_kind` defaults to `server` when `span_name` is omitted. Default 15 rows, cap 50 |
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
@@ -197,15 +201,17 @@ Follow a `trace_id` with `trace_lookup` for the full summary, and use
 - `GET /api/compare?tenant=&service_name=&span_name=&span_kind=&filter=k:v&since_minutes=&min_ms=&max_ms=&limit=` returns the `compare_spans` result.
 
 **Tenant isolation is mandatory.** `tenant` is a *required* parameter on every query
-tool — it is in the JSON schema, so a client cannot omit it — and every query
-hard-filters on the `tenant.id` resource attribute. A caller can restrict its scope
-but never widen it. `flush_buffer` takes no arguments and touches no data.
+tool and on `list_services`, `list_metric_names`, and `list_attribute_keys` — it is
+in the JSON schema, so a client cannot omit it — and those tools hard-filter on the
+`tenant.id` resource attribute. A caller can restrict its scope but never widen it.
+`list_tenants` takes no tenant and returns only tenant ids. `flush_buffer` takes no
+arguments and touches no data.
 
 **Dotted attribute keys work.** `span_search` takes filters as key/value pairs and
 quotes the key internally, because DuckDB treats `$.service.name` as field "service"
 then "name" and silently returns NULL. See the note under SQL Query Patterns.
 
-**Time windows default to 60 minutes** on the tools that take one. `trace_lookup` and `flush_buffer` do not. Pass `since_minutes` for a wider range. A wide
+**Time windows default to 60 minutes** on the tools that take one, including `list_attribute_keys`. `trace_lookup`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` do not. `list_attribute_keys` does not take `until_minutes`. Pass `since_minutes` for a wider range. A wide
 window reads every selected Parquet file in it, so it can be expensive. `until_minutes` ends the
 window that many minutes before now (default 0). It must be less than `since_minutes`. On the CLI, `--since 0` means no time filter.
 
@@ -295,7 +301,7 @@ For common query patterns, see [references/queries.md](references/queries.md).
 - **Metric types** are lowercase strings: `gauge`, `sum`, `histogram`, `summary`.
 - **`metric_query` on histograms** (`http.server.duration` and friends from the standard OTel instrumentations) aggregates observations: `count` and `sum` of observations, `avg` = sum/count, `min`/`max` as reported by the points, `p50`/`p95`/`p99` interpolated from the merged buckets, and `buckets` for the distribution itself: one row per bucket with `le` (inclusive upper bound, null above the last one) and `value` (observations), per group (`p*` and `buckets` need explicit-bucket histograms; exponential histograms support count/sum/avg/min/max). Cumulative series are turned into increments inside the window, so a long-running process is not counted from its start. The type is taken from the metric's most recent point.
 - **From a percentile to a request:** `metric_query(aggregation="exemplars")` returns the requests the SDK attached to the metric's points (`timestamp`, `value`, `trace_id`, `span_id`), highest value first, deduplicated; `min_value`/`max_value` (inclusive) narrow it to one bucket, `limit` defaults to 20 (cap 200). Follow a `trace_id` with `trace_lookup` and `log_search(trace_id=…)`. When exemplars are few, `span_search(min_ms=…, max_ms=…)` finds every span of that duration. For the direct question, `slow_requests` does the exemplar step and the trace summary in one call.
-- **Show where you found it:** when the server runs with `--dashboard-url`, each result ends with a `dashboard_url:` line. Give that link to the person you work with instead of describing the query.
+- **Show where you found it:** when the server runs with `--dashboard-url`, each query result ends with a `dashboard_url:` line. Discovery lists do not add one. Give that link to the person you work with instead of describing the query.
 - **`count` on a gauge or sum counts exported points, not events.** A gauge re-exported every interval is counted once per export, and percentiles over it weight each export equally. To count events, use a counter (`sum`) or a histogram.
 - **`metric_query` grouping:** `group_by` is comma-separated. Each key is a plain column (`service_name`, `metric_type`), a data-point attribute written `attr.<key>` or `attributes.<key>`, or a resource attribute written `resource.<key>` or `resource_attributes.<key>`. `service.name` is accepted and means the `service_name` column. For example, `group_by: "attr.kind"` splits the aggregate by the metric point's `attributes` JSON key `kind`, while `group_by: "resource.host.name"` splits it by the resource attribute `host.name`. The result rows carry the key as their column name. Attribute keys are validated against `[A-Za-z0-9_.-]`. `filters` matches attribute key/value pairs against data-point attributes or resource attributes, same as `span_search`. Add `step` (`30s`, `1m`, `5m`, `1h`, or a whole number of seconds) for one row per time bucket instead of one row per group.
 - **Filter values are bound, not interpolated.** The `traces`/`logs`/`metrics` commands pass filter values to DuckDB as parameters, so a service name or search term containing quotes is matched literally — it cannot alter the query. `--limit` is validated and capped at 10000.

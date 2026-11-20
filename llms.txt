@@ -4,16 +4,20 @@
 
 You query it with MCP or with the CLI. The server does not interpret attribute keys for you.
 
-Every MCP query tool requires `tenant`. The server keeps only rows whose `tenant.id` resource attribute equals that value. You cannot widen a query by omitting `tenant`.
+Every MCP query tool requires `tenant`, and so do `list_services`, `list_metric_names`, and `list_attribute_keys`. The server keeps only rows whose `tenant.id` resource attribute equals that value. You cannot widen a query by omitting `tenant`. `list_tenants` takes no arguments and returns only tenant ids.
 
-Time windows on `span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` default to the last 60 minutes (`since_minutes`). `until_minutes` ends the window that many minutes before now. The default is 0, which means now. `until_minutes` must be less than `since_minutes`. `log_search` with `trace_id` and no `since_minutes` searches the whole history. `trace_lookup` and `flush_buffer` have no time window.
+Time windows on `span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` default to the last 60 minutes (`since_minutes`). `until_minutes` ends the window that many minutes before now. The default is 0, which means now. `until_minutes` must be less than `since_minutes`. `log_search` with `trace_id` and no `since_minutes` searches the whole history. `list_attribute_keys` also defaults to the last 60 minutes and samples at most 2000 rows per signal. It does not take `until_minutes`. A missing key is not proof the key never existed. `trace_lookup`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` have no time window.
 
 Rows still in the receiver's memory buffer are not in the Parquet files yet. They are invisible to every query until a flush. The default flush interval is 30 seconds. If the MCP server was started with `--flush-url`, call `flush_buffer` and repeat the query.
 
 ## MCP tools
 
-Registered by `Register` in `internal/mcp/server.go`. Six tools are always registered. `flush_buffer` is registered only when a flush URL is set.
+Registered by `Register` in `internal/mcp/server.go`. Ten tools are always registered. `flush_buffer` is registered only when a flush URL is set.
 
+- [list_tenants](skills/ducktel/SKILL.md): tenant ids with stored telemetry. No arguments. Returns only tenant ids.
+- [list_services](skills/ducktel/SKILL.md): service names for one tenant. Requires `tenant`. `source` omitted or `traces` reads spans. `source=logs` reads log records.
+- [list_metric_names](skills/ducktel/SKILL.md): metric names for one tenant. Requires `tenant`.
+- [list_attribute_keys](skills/ducktel/SKILL.md): attribute keys seen for one tenant. Requires `tenant`. Each row is `signal` (`traces`, `logs`, or `metrics`), `source` (`attributes` or `resource_attributes`), and `key`. Optional `signal`, `service_name`, `since_minutes` (default 60), and `limit` (default 200 per signal and source, cap 1000). Omitting `signal` still returns keys from each view, and `resource_attributes` are not dropped when `attributes` fills the cap. This is a sample of at most 2000 rows per signal, not every key ever stored.
 - [trace_lookup](skills/ducktel/SKILL.md): one trace. Requires `trace_id` and `tenant`. `detail=summary` (the default) returns a compact summary. `detail=spans` returns every span and can be large. Attributes are included unless `include_attributes` is false. `limit` applies to `detail=spans` (default 1000).
 - [span_search](skills/ducktel/SKILL.md): spans in a time window. Optional `service_name`, `filters`, `min_ms`, `max_ms`, and `limit` (default 100, cap 1000). Attributes are omitted unless `include_attributes` is true. A filter is `{key, value, op}`. `op` is `=` (default) or `!=`.
 - [compare_spans](skills/ducktel/SKILL.md): why the slow spans differ from the rest of the same scope. The slow group defaults to spans slower than that scope's p95. Set `min_ms` and `max_ms` to choose the group yourself. Optional `service_name`, `span_name`, `span_kind`, and `filters`. `span_kind` defaults to `server` when `span_name` is omitted. `limit` defaults to 15 and caps at 50.
@@ -23,6 +27,8 @@ Registered by `Register` in `internal/mcp/server.go`. Six tools are always regis
 - [flush_buffer](skills/ducktel/SKILL.md): asks the receiver to write its buffer. No arguments. Absent from the tool list when no flush URL is configured.
 
 Row results are compact JSON, with no extra whitespace.
+
+Call `list_tenants` when you do not know the tenant. Call `list_services`, `list_metric_names`, or `list_attribute_keys` before you guess a service, a metric name, or a filter key.
 
 For "why is this slow", call `slow_requests` first. Call `compare_spans` when you want the attribute values that show up more often on the slow spans. Call `metric_query` for a rate, a percentile, or a histogram. Follow a `trace_id` with `trace_lookup`, then `log_search`.
 

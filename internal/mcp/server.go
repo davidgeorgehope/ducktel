@@ -14,10 +14,12 @@ import (
 
 // Server exposes ducktel's stored telemetry as MCP tools.
 //
-// Every tool takes a tenant and hard-filters on it, so a caller cannot widen
-// its scope by omitting a parameter or by crafting a filter. The tools are
-// generic: they operate on spans, attributes, metrics and time, and attach no
-// meaning to any particular attribute key.
+// Query tools take a tenant and hard-filter on it, so a caller cannot widen
+// its scope by omitting a parameter or by crafting a filter. list_tenants
+// takes no tenant and returns only tenant ids. list_services,
+// list_metric_names and list_attribute_keys require a tenant and hard-filter
+// the same way. The tools are generic: they operate on spans, attributes,
+// metrics and time, and attach no meaning to any particular attribute key.
 //
 // The actual query logic — tenant isolation, SQL construction, the aggregation
 // allowlist — lives in internal/telemetry, shared by every query consumer.
@@ -40,6 +42,34 @@ func NewServer(engine *query.Engine, flushURL, flushToken string) *Server {
 
 // Register adds the tools to an MCP server.
 func (s *Server) Register(srv *sdkmcp.Server) {
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "list_tenants",
+		Description: "List the tenant ids that have stored telemetry. Takes no arguments and " +
+			"returns only tenant ids. Call this when you do not already know which tenant to query.",
+	}, s.listTenants)
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "list_services",
+		Description: "List service names stored for one tenant. source omitted or \"traces\" reads " +
+			"span service names. source \"logs\" reads log service names. A tenant with no " +
+			"data returns an empty list.",
+	}, s.listServices)
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "list_metric_names",
+		Description: "List metric names stored for one tenant. Use a returned name as metric_query's " +
+			"metric_name. A tenant with no metrics returns an empty list.",
+	}, s.listMetricNames)
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "list_attribute_keys",
+		Description: "List attribute keys seen for one tenant. Each row is signal (traces, logs, or metrics), " +
+			"source (attributes or resource_attributes), and key (the raw JSON key, dotted keys included, values not included). " +
+			"Map attributes to filter keys and to group_by attr.<key>, and resource_attributes to group_by resource.<key>. " +
+			"This is keys seen in a sample of the window (default 60 minutes, at most 2000 rows per signal), not every key ever stored. " +
+			"A missing key is not proof it never existed. Omit signal to read all three views.",
+	}, s.listAttributeKeys)
+
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "trace_lookup",
 		Description: "Look up one trace. By default (detail=summary) this returns a compact, already-aggregated summary: " +
@@ -129,6 +159,71 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 				"repeat the query. Accepts no arguments.",
 		}, s.flushBuffer)
 	}
+}
+
+// --- discovery ---
+
+type listTenantsArgs struct{}
+
+func (s *Server) listTenants(ctx context.Context, req *sdkmcp.CallToolRequest, args listTenantsArgs) (*sdkmcp.CallToolResult, any, error) {
+	rows, cols, err := s.core.ListTenants()
+	if err != nil {
+		return errResult(err.Error())
+	}
+	return rowsResult(rows, cols)
+}
+
+type listServicesArgs struct {
+	Tenant string `json:"tenant" jsonschema:"the tenant to list services for; only this tenant's services are returned"`
+	Source string `json:"source,omitempty" jsonschema:"traces (default) lists services from spans; logs lists services from log records"`
+}
+
+func (s *Server) listServices(ctx context.Context, req *sdkmcp.CallToolRequest, args listServicesArgs) (*sdkmcp.CallToolResult, any, error) {
+	var (
+		rows []map[string]any
+		cols []string
+		err  error
+	)
+	switch args.Source {
+	case "", "traces":
+		rows, cols, err = s.core.ListServices(args.Tenant)
+	case "logs":
+		rows, cols, err = s.core.ListLogServices(args.Tenant)
+	default:
+		return errResult(fmt.Sprintf("source %q is not supported; use \"traces\" or \"logs\", or omit it for traces", args.Source))
+	}
+	if err != nil {
+		return errResult(err.Error())
+	}
+	return rowsResult(rows, cols)
+}
+
+type listMetricNamesArgs struct {
+	Tenant string `json:"tenant" jsonschema:"the tenant to list metric names for; only this tenant's metrics are returned"`
+}
+
+func (s *Server) listMetricNames(ctx context.Context, req *sdkmcp.CallToolRequest, args listMetricNamesArgs) (*sdkmcp.CallToolResult, any, error) {
+	rows, cols, err := s.core.ListMetricNames(args.Tenant)
+	if err != nil {
+		return errResult(err.Error())
+	}
+	return rowsResult(rows, cols)
+}
+
+type listAttributeKeysArgs struct {
+	Tenant       string `json:"tenant" jsonschema:"the tenant to list attribute keys for; only this tenant's keys are returned"`
+	Signal       string `json:"signal,omitempty" jsonschema:"traces, logs, or metrics. Omit to read all three views."`
+	ServiceName  string `json:"service_name,omitempty" jsonschema:"restrict the sample to one service name"`
+	SinceMinutes int    `json:"since_minutes,omitempty" jsonschema:"how far back to sample, in minutes. Default 60."`
+	Limit        int    `json:"limit,omitempty" jsonschema:"maximum keys per signal and source, default 200, cap 1000. Omitting signal still returns traces, logs, and metrics, and each source is capped on its own."`
+}
+
+func (s *Server) listAttributeKeys(ctx context.Context, req *sdkmcp.CallToolRequest, args listAttributeKeysArgs) (*sdkmcp.CallToolResult, any, error) {
+	rows, cols, err := s.core.ListAttributeKeys(args.Tenant, args.Signal, args.ServiceName, args.SinceMinutes, args.Limit)
+	if err != nil {
+		return errResult(err.Error())
+	}
+	return rowsResult(rows, cols)
 }
 
 // --- flush_buffer ---

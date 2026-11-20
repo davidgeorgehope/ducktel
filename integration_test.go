@@ -3,6 +3,7 @@ package ducktel_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	collectlogsv1 "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	collectmetricsv1 "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	collecttracev1 "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -24,6 +26,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/davidgeorgehope/ducktel/internal/cli"
+	"github.com/davidgeorgehope/ducktel/internal/mcp"
 	"github.com/davidgeorgehope/ducktel/internal/query"
 	"github.com/davidgeorgehope/ducktel/internal/receiver"
 	"github.com/davidgeorgehope/ducktel/internal/testharness"
@@ -780,4 +783,154 @@ func TestPascalCase(t *testing.T) {
 			t.Errorf("PascalCase(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+func TestDiscoveryThroughMCP(t *testing.T) {
+	addr, w, cleanup := startTestServer(t)
+	defer cleanup()
+
+	cfg := testharness.DefaultConfig()
+	cfg.Endpoint = addr
+	cfg.Tenant = "acme"
+	cfg.TraceRate = 20
+	cfg.MetricsMs = 200
+	h := testharness.New(cfg)
+	h.Start()
+	// traceLoop waits one tick before the first trace. At 20/s that is 50ms,
+	// and the entry point is chosen at random, so keep the generator up long
+	// enough for an api-gateway trace. metricsLoop sends a batch on start.
+	time.Sleep(time.Second)
+	h.Stop()
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := query.Open(w.DataDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	var tenants, services, metrics, keys []map[string]any
+	var problem string
+	for attempt := 0; attempt < 3; attempt++ {
+		tenants, services, metrics, keys, problem = readHarnessDiscovery(t, engine)
+		if problem == "" &&
+			rowHas(tenants, "tenant", "acme") &&
+			rowHas(services, "service_name", "api-gateway") &&
+			(rowHas(metrics, "metric_name", "system.cpu.utilization") || rowHas(metrics, "metric_name", "http.server.request.count")) &&
+			attrKey(keys, "traces", "attributes", "http.request.method") &&
+			attrSource(keys, "resource_attributes", "tenant.id") {
+			break
+		}
+		if attempt == 2 {
+			break
+		}
+		if err := w.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if problem != "" {
+		t.Fatalf("discovery tools: %s", problem)
+	}
+	if !rowHas(tenants, "tenant", "acme") {
+		t.Errorf("list_tenants = %v, want acme", tenants)
+	}
+	if !rowHas(services, "service_name", "api-gateway") {
+		t.Errorf("list_services = %v, want api-gateway", services)
+	}
+	if !rowHas(metrics, "metric_name", "system.cpu.utilization") && !rowHas(metrics, "metric_name", "http.server.request.count") {
+		t.Errorf("list_metric_names = %v, want system.cpu.utilization or http.server.request.count", metrics)
+	}
+	if !attrKey(keys, "traces", "attributes", "http.request.method") {
+		t.Errorf("list_attribute_keys missing http.request.method from trace attributes: %v", keys)
+	}
+	if !attrSource(keys, "resource_attributes", "tenant.id") {
+		t.Errorf("list_attribute_keys missing tenant.id from resource_attributes: %v", keys)
+	}
+}
+
+// readHarnessDiscovery opens a fresh MCP server on engine so a retry is not
+// served from the discovery cache of an earlier empty read.
+func readHarnessDiscovery(t *testing.T, engine *query.Engine) (tenants, services, metrics, keys []map[string]any, problem string) {
+	t.Helper()
+	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
+	mcp.NewServer(engine, "", "").Register(srv)
+	clientT, serverT := sdkmcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := srv.Connect(ctx, serverT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: "test"}, nil)
+	session, err := client.Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer session.Close()
+
+	call := func(name string, args map[string]any) ([]map[string]any, string) {
+		t.Helper()
+		res, err := session.CallTool(ctx, &sdkmcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatalf("CallTool(%s): %v", name, err)
+		}
+		var b strings.Builder
+		for _, c := range res.Content {
+			if text, ok := c.(*sdkmcp.TextContent); ok {
+				b.WriteString(text.Text)
+			}
+		}
+		if res.IsError {
+			return nil, name + ": " + b.String()
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(b.String()), &rows); err != nil {
+			return nil, name + ": " + err.Error()
+		}
+		return rows, ""
+	}
+
+	var errMsg string
+	tenants, errMsg = call("list_tenants", nil)
+	if errMsg != "" {
+		return nil, nil, nil, nil, errMsg
+	}
+	services, errMsg = call("list_services", map[string]any{"tenant": "acme"})
+	if errMsg != "" {
+		return nil, nil, nil, nil, errMsg
+	}
+	metrics, errMsg = call("list_metric_names", map[string]any{"tenant": "acme"})
+	if errMsg != "" {
+		return nil, nil, nil, nil, errMsg
+	}
+	keys, errMsg = call("list_attribute_keys", map[string]any{"tenant": "acme"})
+	return tenants, services, metrics, keys, errMsg
+}
+
+func rowHas(rows []map[string]any, col, want string) bool {
+	for _, r := range rows {
+		if r[col] == want {
+			return true
+		}
+	}
+	return false
+}
+
+func attrKey(rows []map[string]any, signal, source, key string) bool {
+	for _, r := range rows {
+		if r["signal"] == signal && r["source"] == source && r["key"] == key {
+			return true
+		}
+	}
+	return false
+}
+
+func attrSource(rows []map[string]any, source, key string) bool {
+	for _, r := range rows {
+		if r["source"] == source && r["key"] == key {
+			return true
+		}
+	}
+	return false
 }

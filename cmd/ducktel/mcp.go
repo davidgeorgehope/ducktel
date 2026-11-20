@@ -42,14 +42,23 @@ func mcpCmd() *cobra.Command {
 The tools are generic and domain-agnostic — they know about spans, attributes,
 metrics and time, and nothing about what any attribute means:
 
-  trace_lookup(trace_id)                all spans of one trace
-  span_search(filters, time_range)      spans matching arbitrary attribute filters
-  log_search(severity, search, ...)     log records matching body/severity/attribute filters
-  metric_query(name, aggregation, ...)  metric aggregation over a range
-  flush_buffer()                        make just-received telemetry queryable now
+  list_tenants()                          tenant ids with stored telemetry
+  list_services(tenant)                   service names for one tenant
+  list_metric_names(tenant)               metric names for one tenant
+  list_attribute_keys(tenant)             attribute keys in a recent sample
+  trace_lookup(trace_id, tenant)          one trace, summary by default
+  span_search(filters, tenant)            spans matching attribute filters
+  compare_spans(tenant)                   values that differ on slow spans
+  log_search(tenant)                      log records matching filters
+  slow_requests(tenant)                   slowest requests, with a short summary
+  metric_query(name, aggregation, tenant) one metric aggregated over a range
+  flush_buffer()                          make just-received telemetry queryable now
 
-Every tool requires a tenant and hard-filters on the tenant.id resource
-attribute, so a caller cannot widen its scope.
+list_tenants takes no arguments and returns only tenant ids. Every other tool
+except flush_buffer requires a tenant and hard-filters on the tenant.id
+resource attribute, so a caller cannot widen its scope. flush_buffer is
+advertised only when --flush-url is set. list_attribute_keys samples the last
+60 minutes, at most 2000 rows per signal, not every key ever stored.
 
 Two transports:
   stdio (default)   spawned as a subprocess; the process boundary is the trust
@@ -133,7 +142,7 @@ Examples:
 	cmd.Flags().StringVar(&token, "auth-token", "", "Require this bearer token in HTTP mode (env: DUCKTEL_MCP_TOKEN)")
 	cmd.Flags().StringVar(&basePath, "base-path", "/mcp", "URL path to serve the MCP endpoint on in HTTP mode")
 	cmd.Flags().StringVar(&flushURL, "flush-url", "", "Writer's POST /flush endpoint, e.g. http://localhost:4318/flush; enables the flush_buffer tool (env: DUCKTEL_FLUSH_URL)")
-	cmd.Flags().StringVar(&dashURL, "dashboard-url", "", "Public address of the dashboard, e.g. https://otel.example.com/dashboard/; every tool result then carries a dashboard_url that opens the same query (env: DUCKTEL_DASHBOARD_URL)")
+	cmd.Flags().StringVar(&dashURL, "dashboard-url", "", "Public address of the dashboard, e.g. https://otel.example.com/dashboard/; query results then carry a dashboard_url that opens the same query. Discovery lists do not (env: DUCKTEL_DASHBOARD_URL)")
 	cmd.Flags().BoolVar(&dashboard, "dashboard", false, "Also serve the dashboard SPA at /dashboard and its REST API at /api, guarded by the same --auth-token")
 
 	return cmd

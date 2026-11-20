@@ -170,9 +170,28 @@ func TestToolsAreRegistered(t *testing.T) {
 			t.Errorf("tool %q has no description — models need it to discriminate", tool.Name)
 		}
 	}
-	for _, want := range []string{"trace_lookup", "span_search", "log_search", "metric_query", "slow_requests"} {
+	for _, want := range []string{
+		"list_tenants", "list_services", "list_metric_names", "list_attribute_keys",
+		"trace_lookup", "span_search", "log_search", "metric_query", "slow_requests",
+	} {
 		if !got[want] {
 			t.Errorf("tool %q not registered", want)
+		}
+	}
+	for _, tool := range res.Tools {
+		if tool.Name != "list_attribute_keys" {
+			continue
+		}
+		for _, phrase := range []string{
+			"sample of the window",
+			"default 60 minutes",
+			"at most 2000 rows per signal",
+			"not every key ever stored",
+			"A missing key is not proof it never existed",
+		} {
+			if !strings.Contains(tool.Description, phrase) {
+				t.Errorf("list_attribute_keys description missing %q", phrase)
+			}
 		}
 	}
 	// Deliberately no domain-specific tool names.
@@ -263,5 +282,113 @@ func TestLogSearchAdapterPropagatesCoreValidationError(t *testing.T) {
 	body, isErr := call(t, s, "log_search", map[string]any{})
 	if !isErr {
 		t.Errorf("log_search without tenant should error, got: %s", body)
+	}
+}
+
+func toolRows(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	if strings.Contains(body, "dashboard_url") {
+		t.Fatalf("discovery result includes a dashboard link:\n%s", body)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(body), &rows); err != nil {
+		t.Fatalf("response is not a JSON array: %v\n%s", err, body)
+	}
+	return rows
+}
+
+func columnValues(rows []map[string]any, col string) []string {
+	var out []string
+	for _, r := range rows {
+		s, _ := r[col].(string)
+		out = append(out, s)
+	}
+	return out
+}
+
+func TestDiscoveryTools(t *testing.T) {
+	s := newTestServerWith(t, func(ds *Server) {
+		ds.SetDashboardURL("http://dash.example")
+	})
+
+	body, isErr := call(t, s, "list_tenants", nil)
+	if isErr {
+		t.Fatalf("list_tenants: %s", body)
+	}
+	tenants := toolRows(t, body)
+	if len(tenants) != 1 || tenants[0]["tenant"] != "acme" || len(tenants[0]) != 1 {
+		t.Errorf("list_tenants = %s, want only tenant acme", body)
+	}
+
+	body, isErr = call(t, s, "list_services", map[string]any{"tenant": "acme"})
+	if isErr {
+		t.Fatalf("list_services: %s", body)
+	}
+	services := columnValues(toolRows(t, body), "service_name")
+	if len(services) != 2 || services[0] != "api" || services[1] != "worker" {
+		t.Errorf("list_services(acme) = %v, want [api worker]", services)
+	}
+	if _, isErr = call(t, s, "list_services", map[string]any{}); !isErr {
+		t.Error("list_services without tenant should be IsError")
+	}
+	body, isErr = call(t, s, "list_services", map[string]any{"tenant": "other"})
+	if isErr {
+		t.Fatalf("unknown tenant should be an empty list, got error: %s", body)
+	}
+	if body != "[]" {
+		t.Errorf("list_services(other) = %s, want []", body)
+	}
+	body, isErr = call(t, s, "list_services", map[string]any{"tenant": "acme", "source": "logs"})
+	if isErr {
+		t.Fatalf("list_services source logs: %s", body)
+	}
+	logServices := columnValues(toolRows(t, body), "service_name")
+	if len(logServices) != 1 || logServices[0] != "api" {
+		t.Errorf("list_services source logs = %v, want [api]", logServices)
+	}
+	if _, isErr = call(t, s, "list_services", map[string]any{"tenant": "acme", "source": "metrics"}); !isErr {
+		t.Error("list_services source metrics should be IsError")
+	}
+
+	body, isErr = call(t, s, "list_metric_names", map[string]any{"tenant": "acme"})
+	if isErr {
+		t.Fatalf("list_metric_names: %s", body)
+	}
+	metrics := columnValues(toolRows(t, body), "metric_name")
+	if len(metrics) != 1 || metrics[0] != "http.server.duration" {
+		t.Errorf("list_metric_names = %v, want [http.server.duration]", metrics)
+	}
+	if _, isErr = call(t, s, "list_metric_names", map[string]any{}); !isErr {
+		t.Error("list_metric_names without tenant should be IsError")
+	}
+
+	body, isErr = call(t, s, "list_attribute_keys", map[string]any{"tenant": "acme", "signal": "traces"})
+	if isErr {
+		t.Fatalf("list_attribute_keys: %s", body)
+	}
+	var sawService, sawTenant bool
+	for _, row := range toolRows(t, body) {
+		if row["signal"] != "traces" || row["source"] != "resource_attributes" {
+			continue
+		}
+		switch row["key"] {
+		case "service.name":
+			sawService = true
+		case "tenant.id":
+			sawTenant = true
+		}
+	}
+	if !sawService || !sawTenant {
+		t.Errorf("list_attribute_keys = %s, want service.name and tenant.id from resource_attributes", body)
+	}
+	if _, isErr = call(t, s, "list_attribute_keys", map[string]any{"signal": "traces"}); !isErr {
+		t.Error("list_attribute_keys without tenant should be IsError")
+	}
+	body, isErr = call(t, s, "list_attribute_keys", map[string]any{"tenant": "other", "signal": "traces"})
+	if isErr {
+		t.Fatalf("unknown tenant should be an empty list, got error: %s", body)
+	}
+	if body != "[]" {
+		t.Errorf("list_attribute_keys(other) = %s, want []", body)
 	}
 }
