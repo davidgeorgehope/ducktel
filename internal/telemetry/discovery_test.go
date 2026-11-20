@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,15 +259,27 @@ func TestListAttributeKeys(t *testing.T) {
 		t.Errorf("service worker keys = %v", worker)
 	}
 
-	if len(rows) < 2 {
-		t.Fatalf("need at least two keys to check limit, got %d", len(rows))
-	}
-	limited, _, err := c.ListAttributeKeys("acme", "", "", 0, 1)
+	limited, _, err := c.ListAttributeKeys("acme", "traces", "", 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(limited) != 1 {
-		t.Errorf("limit 1 returned %d rows, want 1", len(limited))
+		t.Errorf("limit 1 on traces returned %d rows, want 1", len(limited))
+	}
+	// logs sorts before metrics and traces. A single limit over that order
+	// would return only the log key and hide the other signals.
+	shared, _, err := c.ListAttributeKeys("acme", "", "", 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	perSignal := map[string]int{}
+	for _, r := range shared {
+		perSignal[fmt.Sprint(r["signal"])]++
+	}
+	for _, signal := range []string{"traces", "logs", "metrics"} {
+		if perSignal[signal] != 1 {
+			t.Errorf("limit 1 with signal omitted has %d %s keys, want 1: %v", perSignal[signal], signal, shared)
+		}
 	}
 
 	nobody, _, err := c.ListAttributeKeys("nobody", "", "", 0, 0)
@@ -287,6 +300,58 @@ func TestListAttributeKeys(t *testing.T) {
 	const wantSignal = `signal "spans" is not supported; use "traces", "logs", or "metrics", or omit it for all three`
 	if err.Error() != wantSignal {
 		t.Errorf("signal error = %q, want %q", err.Error(), wantSignal)
+	}
+}
+
+// TestListAttributeKeysLimitIsPerSignal: logs sort before metrics and traces.
+// More log keys than the limit must not consume the budget for the other signals.
+func TestListAttributeKeysLimitIsPerSignal(t *testing.T) {
+	dir := t.TempDir()
+	w := writer.New(dir, time.Hour, 1000)
+	now := time.Now()
+	const limit = 3
+	const logKeys = limit + 5
+	parts := make([]string, logKeys)
+	for i := range parts {
+		parts[i] = fmt.Sprintf(`"log.key.%02d":"1"`, i)
+	}
+	w.AddLogs([]writer.LogRecord{{
+		Timestamp: now.UnixMicro(), ServiceName: "api", SeverityText: "INFO", Body: "ok",
+		Attributes: "{" + strings.Join(parts, ",") + "}", ResourceAttributes: tenantResource("api", "acme", ""),
+	}})
+	w.Add([]writer.TraceSpan{
+		attrSpan("api", "t1", "s1", now, `{"span.only":"1"}`, tenantResource("api", "acme", "")),
+	})
+	w.AddMetrics([]writer.MetricPoint{{
+		MetricName: "cpu.util", MetricType: "gauge", Timestamp: now.UnixMicro(),
+		ValueDouble: 0.5, ServiceName: "api",
+		Attributes: `{"metric.only":"1"}`, ResourceAttributes: tenantResource("api", "acme", ""),
+	}})
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := query.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { engine.Close() })
+
+	rows, _, err := NewCore(engine).ListAttributeKeys("acme", "", "", 0, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	perSignal := map[string]int{}
+	for _, r := range rows {
+		perSignal[fmt.Sprint(r["signal"])]++
+	}
+	if perSignal["logs"] != limit {
+		t.Errorf("logs returned %d keys, want the per-signal cap %d: %v", perSignal["logs"], limit, rows)
+	}
+	if !hasAttrKey(rows, "traces", "attributes", "span.only") {
+		t.Errorf("trace key missing beside %d log keys: %v", logKeys, rows)
+	}
+	if !hasAttrKey(rows, "metrics", "attributes", "metric.only") {
+		t.Errorf("metric key missing beside %d log keys: %v", logKeys, rows)
 	}
 }
 
