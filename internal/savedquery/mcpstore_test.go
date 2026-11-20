@@ -2,6 +2,7 @@ package savedquery
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -119,5 +120,41 @@ func TestMCPStoreConcurrentSave(t *testing.T) {
 	}
 	if len(list) != 8 {
 		t.Errorf("got %d records, want 8", len(list))
+	}
+}
+
+func TestSeparateStoresDoNotDropSaves(t *testing.T) {
+	dir := t.TempDir()
+	const n = 32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			tenant := "acme"
+			if i%2 == 1 {
+				tenant = "other"
+			}
+			store := NewMCPStore(dir)
+			name := fmt.Sprintf("q%02d", i)
+			args := json.RawMessage(`{"tenant":"` + tenant + `"}`)
+			if err := store.Save(MCPSavedQuery{Tenant: tenant, Name: name, Tool: "list_services", Arguments: args}); err != nil {
+				t.Errorf("Save %s: %v", name, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	store := NewMCPStore(dir)
+	acme, err := store.List("acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.List("other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acme) != n/2 || len(other) != n/2 {
+		t.Fatalf("acme=%d other=%d, want %d each", len(acme), len(other), n/2)
 	}
 }
