@@ -23,9 +23,25 @@ type MCPSavedQuery struct {
 }
 
 // MCPStore persists saved MCP queries under the data directory.
+//
+// HTTP mode builds a new store for every session, so the lock is keyed by
+// the file path and shared by every store in the process. An instance mutex
+// would let two saves read the same file and the later write would drop the
+// earlier record.
 type MCPStore struct {
 	path string
-	mu   sync.Mutex
+}
+
+// fileMu serializes read-modify-write of one mcp_saved_queries.json.
+var fileMu sync.Map
+
+func (s *MCPStore) lock() *sync.Mutex {
+	key, err := filepath.Abs(s.path)
+	if err != nil {
+		key = s.path
+	}
+	v, _ := fileMu.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // NewMCPStore opens the tenant-scoped MCP saved-query file in dataDir.
@@ -79,8 +95,9 @@ func (s *MCPStore) saveAll(queries []MCPSavedQuery) error {
 
 // Save inserts or replaces one query for tenant+name. created_at is preserved on update.
 func (s *MCPStore) Save(q MCPSavedQuery) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mu := s.lock()
+	mu.Lock()
+	defer mu.Unlock()
 
 	queries, err := s.load()
 	if err != nil {
@@ -109,8 +126,9 @@ func (s *MCPStore) Save(q MCPSavedQuery) error {
 
 // Get returns one saved query for the tenant and name, or an error if missing.
 func (s *MCPStore) Get(tenant, name string) (*MCPSavedQuery, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mu := s.lock()
+	mu.Lock()
+	defer mu.Unlock()
 
 	queries, err := s.load()
 	if err != nil {
@@ -127,8 +145,9 @@ func (s *MCPStore) Get(tenant, name string) (*MCPSavedQuery, error) {
 
 // List returns saved queries for one tenant, sorted by name.
 func (s *MCPStore) List(tenant string) ([]MCPSavedQuery, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mu := s.lock()
+	mu.Lock()
+	defer mu.Unlock()
 
 	queries, err := s.load()
 	if err != nil {
