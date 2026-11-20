@@ -118,6 +118,34 @@ func TestCompactOldDaysMergesDay(t *testing.T) {
 	}
 }
 
+// TestDayMergeDropsHourLeftovers: an hour merge that died after renaming
+// HH.parquet leaves the flush files beside it. Once that day ages out of
+// compactHours, compactOldDays must delete those flush files instead of
+// merging them into day.parquet.
+func TestDayMergeDropsHourLeftovers(t *testing.T) {
+	dataDir := t.TempDir()
+	dayDir := oldDayDir(t, dataDir, "traces")
+	writeSourceFile(t, filepath.Join(dayDir, "10.parquet"), spanN(1, "hour"))
+	writeSourceFile(t, filepath.Join(dayDir, "10-00.parquet"), spanN(1, "leftover"))
+	writeSourceFile(t, filepath.Join(dayDir, "11-00.parquet"), spanN(1, "later"))
+
+	w := New(dataDir, time.Hour, 1000)
+	if err := w.compactOldDays(context.Background()); err != nil {
+		t.Fatalf("compactOldDays: %v", err)
+	}
+	rows := readAll[TraceSpan](t, filepath.Join(dayDir, "day.parquet"))
+	if len(rows) != 2 {
+		t.Fatalf("day.parquet has %d rows, want 2 (hour file plus the later flush)", len(rows))
+	}
+	got := map[string]int{}
+	for _, row := range rows {
+		got[row.ServiceName]++
+	}
+	if got["leftover"] != 0 || got["hour"] != 1 || got["later"] != 1 {
+		t.Fatalf("rows = %v", got)
+	}
+}
+
 // TestCompactLeftoversDeletedNotMerged pins the crash-recovery rule: an
 // existing day.parquet means the merge already happened, so remaining
 // per-flush files are deleted — merging them would double the rows.

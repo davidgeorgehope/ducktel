@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,6 +128,104 @@ func TestStopFlushesRemaining(t *testing.T) {
 	if files := parquetFiles(t, dir); len(files) != 1 {
 		t.Errorf("Stop did not flush: %v", files)
 	}
+}
+
+// TestConcurrentFlushKeepsEverySpan: two flushes in the same minute must not
+// pick one HH-MM name. writeParquet chooses the name without the buffer lock,
+// and os.Rename replaces a file that is already there, so the first batch
+// disappears while Flush still returns nil.
+func TestConcurrentFlushKeepsEverySpan(t *testing.T) {
+	dir := t.TempDir()
+	w := New(dir, time.Hour, 1)
+	const n = 32
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			s := span("svc")
+			s.SpanID = fmt.Sprintf("s-%d", i)
+			s.TraceID = s.SpanID
+			w.Add([]TraceSpan{s})
+		}(i)
+	}
+	wg.Wait()
+
+	got := map[string]int{}
+	for _, f := range parquetFiles(t, dir) {
+		if strings.HasPrefix(filepath.Base(f), ".") {
+			t.Errorf("temp file visible: %s", f)
+			continue
+		}
+		for _, row := range readAll[TraceSpan](t, f) {
+			got[row.SpanID]++
+		}
+	}
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("s-%d", i)
+		if got[id] != 1 {
+			t.Errorf("span %s count = %d, want 1", id, got[id])
+		}
+	}
+}
+
+// TestSecondFlushWaitsForThePublish: a Flush that finds an empty buffer
+// must not return while another Flush still holds that batch unpublished.
+func TestSecondFlushWaitsForThePublish(t *testing.T) {
+	dir := t.TempDir()
+	w := New(dir, time.Hour, 1000)
+	w.Add([]TraceSpan{span("held")})
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	commitTestHook = func() {
+		close(started)
+		<-release
+	}
+	t.Cleanup(func() { commitTestHook = nil })
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- w.Flush() }()
+	<-started
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- w.Flush() }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second Flush returned (%v) before the first publish", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Flush did not return")
+	}
+	rows := readAll[TraceSpan](t, soleTraceFile(t, dir))
+	if len(rows) != 1 || rows[0].ServiceName != "held" {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func soleTraceFile(t *testing.T, dir string) string {
+	t.Helper()
+	var found string
+	for _, f := range parquetFiles(t, dir) {
+		if strings.HasPrefix(filepath.Base(f), ".") {
+			continue
+		}
+		found = f
+	}
+	if found == "" {
+		t.Fatal("no parquet file")
+	}
+	return found
 }
 
 // TestConcurrentAddIsRaceFree exercises the mutex under -race.

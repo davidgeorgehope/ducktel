@@ -12,5 +12,8 @@ data/
 .idea/
 .vscode/
 
+# TLC jar downloaded by scripts/tla/check.sh
+scripts/tla/.cache/
+
 # OS
 .DS_Store

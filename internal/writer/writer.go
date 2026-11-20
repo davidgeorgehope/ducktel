@@ -21,6 +21,7 @@ type Writer struct {
 	bufferSize    int
 
 	mu        sync.Mutex
+	flushMu   sync.Mutex // serializes Flush; not w.mu, and never taken under it
 	traces    []TraceSpan
 	logs      []LogRecord
 	metrics   []MetricPoint
@@ -134,6 +135,12 @@ func (w *Writer) AddMetrics(points []MetricPoint) {
 // of discarding them. Successes are logged with counts and bytes so the
 // process log answers "is it flushing, and how much?" without extra tooling.
 func (w *Writer) Flush() error {
+	// A second call must not return while this one still holds the snapshot.
+	// An empty buffer means the records are in this call, not that they are
+	// already on disk.
+	w.flushMu.Lock()
+	defer w.flushMu.Unlock()
+
 	w.mu.Lock()
 	traces := w.traces
 	logs := w.logs
@@ -290,6 +297,33 @@ func writeParquet[T any](dataDir, signal string, records []T) (string, error) {
 		return "", fmt.Errorf("closing %s: %w", signal, err)
 	}
 
+	return commitTemp(dir, signal, tmpPath, now)
+}
+
+// commitLocks serializes the stat-and-rename that publishes one directory's
+// flush file. writeParquet runs without w.mu, so two flushes can both observe
+// the same free HH-MM[-n] name. os.Rename then replaces the first file and
+// that batch is gone, while both Flush calls return nil.
+var commitLocks sync.Map
+
+func lockCommit(dir string) func() {
+	v, _ := commitLocks.LoadOrStore(dir, new(sync.Mutex))
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// commitTestHook runs after the batch has left the buffer and before the
+// rename publishes it. Tests hold a flush open there. It must not call Flush.
+// Production leaves it nil.
+var commitTestHook func()
+
+func commitTemp(dir, signal, tmpPath string, now time.Time) (string, error) {
+	if commitTestHook != nil {
+		commitTestHook()
+	}
+	unlock := lockCommit(dir)
+	defer unlock()
 	path, err := nextPath(dir, now)
 	if err != nil {
 		return "", err

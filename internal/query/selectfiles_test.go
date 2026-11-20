@@ -99,6 +99,13 @@ func writeFixtureFile(t *testing.T, path string) {
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatalf("writing %s: %v", path, err)
 	}
+	// One timestamp for the whole fixture. A later file would otherwise look
+	// like a newer merge and the supersede rule would hide the earlier names
+	// this test is here to list.
+	stamp := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatalf("stamping %s: %v", path, err)
+	}
 }
 
 func TestSelectFiles(t *testing.T) {
@@ -183,6 +190,76 @@ func TestSelectFiles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSelectFilesHidesSourceOlderThanMerge(t *testing.T) {
+	root := t.TempDir()
+	dayDir := filepath.Join(root, "traces", "2030-01-02")
+	source := filepath.Join(dayDir, "10-00.parquet")
+	hour := filepath.Join(dayDir, "10.parquet")
+	day := filepath.Join(dayDir, "day.parquet")
+	fresh := filepath.Join(dayDir, "10-15.parquet")
+	unknown := filepath.Join(dayDir, "foo.parquet")
+	for _, path := range []string{source, hour, day, fresh, unknown} {
+		writeFixtureFile(t, path)
+	}
+	old := time.Date(2030, 1, 2, 10, 0, 0, 0, time.UTC)
+	mid := old.Add(time.Hour)
+	neu := old.Add(2 * time.Hour)
+	for _, path := range []string{source, fresh} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(hour, mid, mid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(day, neu, neu); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(fresh, neu.Add(time.Minute), neu.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := selectFiles(filepath.Join(root, "traces"), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{day, fresh, unknown}
+	sort.Strings(got)
+	sort.Strings(want)
+	if len(got) != len(want) {
+		t.Fatalf("selected %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("selected[%d] = %s, want %s", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSelectFilesKeepsSourceWhenMergeIsNotNewer(t *testing.T) {
+	root := t.TempDir()
+	dayDir := filepath.Join(root, "traces", "2030-01-02")
+	source := filepath.Join(dayDir, "23-59.parquet")
+	day := filepath.Join(dayDir, "day.parquet")
+	writeFixtureFile(t, day)
+	writeFixtureFile(t, source)
+	same := time.Date(2030, 1, 2, 23, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(day, same, same); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(source, same, same); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := selectFiles(filepath.Join(root, "traces"), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("selected %v, want both files when the timestamps tie", got)
 	}
 }
 
