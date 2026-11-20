@@ -28,6 +28,10 @@ Registered by `Register` in `internal/mcp/server.go`. Ten tools are always regis
 
 Row results are compact JSON, with no extra whitespace.
 
+Span filters on `status_code` accept `ok`, `error`, or `unset`, and on `span_kind` accept `server`, `client`, `internal`, `producer`, or `consumer`, as well as the stored `STATUS_CODE_*` and `SPAN_KIND_*` values. `log_search` `severity=warning` also matches `WARN`, `err` matches `ERROR`, and `information` matches `INFO`. A bare dotted `group_by` such as `host.name` is rejected with a suggestion such as `resource.host.name`.
+
+An empty result keeps its JSON as the first content block and adds a second text block that says how to recover: the tenant filter, the default window, the receiver buffer, an unrecognized `status_code` or `span_kind` spelling, and the discovery tools. An ungrouped `metric_query` whose value is null (no points matched, often a misspelled `metric_name`) gets the same block. `count` returns 0 without one.
+
 Call `list_tenants` when you do not know the tenant. Call `list_services`, `list_metric_names`, or `list_attribute_keys` before you guess a service, a metric name, or a filter key.
 
 For "why is this slow", call `slow_requests` first. Call `compare_spans` when you want the attribute values that show up more often on the slow spans. Call `metric_query` for a rate, a percentile, or a histogram. Follow a `trace_id` with `trace_lookup`, then `log_search`.

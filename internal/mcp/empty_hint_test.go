@@ -254,3 +254,53 @@ func TestCompareAndSlowEmptyHint(t *testing.T) {
 		t.Fatalf("slow hint = %s", laterText(texts))
 	}
 }
+
+func TestMetricQueryNullAggregateHintsMetricNames(t *testing.T) {
+	s := newTestServer(t)
+
+	texts, isErr := callTexts(t, s, "metric_query", map[string]any{
+		"tenant": "nobody", "metric_name": "missing.metric", "aggregation": "avg",
+	})
+	if isErr {
+		t.Fatalf("avg: %v", texts)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(texts[0]), &rows); err != nil {
+		t.Fatalf("first block is not the JSON rows: %v\n%s", err, texts[0])
+	}
+	if len(rows) != 1 || rows[0]["value"] != nil {
+		t.Fatalf("rows = %v, want one null value", rows)
+	}
+	hint := laterText(texts)
+	for _, want := range []string{"tenant.id", "list_metric_names", "list_tenants"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint missing %q:\n%s", want, hint)
+		}
+	}
+}
+
+func TestEmptyHintNamesDiscoveryTools(t *testing.T) {
+	s := newTestServer(t)
+
+	texts, isErr := callTexts(t, s, "span_search", map[string]any{"tenant": "nobody"})
+	if isErr || texts[0] != "[]" {
+		t.Fatalf("isErr=%v texts=%q", isErr, texts)
+	}
+	hint := laterText(texts)
+	if !strings.Contains(hint, "list_tenants") || !strings.Contains(hint, "list_services") {
+		t.Fatalf("hint does not name the discovery tools:\n%s", hint)
+	}
+	if strings.Contains(hint, "list_metric_names") {
+		t.Fatalf("span_search hint names list_metric_names:\n%s", hint)
+	}
+
+	texts, isErr = callTexts(t, s, "slow_requests", map[string]any{
+		"tenant": "nobody", "metric_name": "missing.metric",
+	})
+	if isErr || texts[0] != "[]" {
+		t.Fatalf("slow_requests: isErr=%v texts=%q", isErr, texts)
+	}
+	if !strings.Contains(laterText(texts), "list_metric_names") {
+		t.Fatalf("slow_requests metric hint:\n%s", laterText(texts))
+	}
+}
