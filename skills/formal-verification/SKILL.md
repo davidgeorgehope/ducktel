@@ -82,7 +82,7 @@ The bug configs are the broken variants of the code.
 5. Run the Go tests named above.
 6. Set the sync commit below to the commit you checked. Move it forward only after that run passed and the spec still describes the code.
 
-Sync commit: `53409eaf01da21054e5db3a9134067bfaf85a1df`
+Sync commit: `2510d57980826d72a260ae3702a4f76d96a9f7ec`
 
 ## Upkeep
 
