@@ -104,7 +104,7 @@ func newTestServerWithSpans(t *testing.T, configure func(*Server), extra []write
 	t.Cleanup(func() { engine.Close() })
 
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
-	ds := NewServer(engine, "", "")
+	ds := NewServer(engine, dir, "", "")
 	if configure != nil {
 		configure(ds)
 	}
@@ -172,7 +172,8 @@ func TestToolsAreRegistered(t *testing.T) {
 	}
 	for _, want := range []string{
 		"list_tenants", "list_services", "list_metric_names", "list_attribute_keys",
-		"trace_lookup", "span_search", "log_search", "metric_query", "slow_requests",
+		"trace_lookup", "span_search", "compare_spans", "log_search", "metric_query", "slow_requests",
+		"list_saved_queries", "save_query", "run_saved_query",
 	} {
 		if !got[want] {
 			t.Errorf("tool %q not registered", want)

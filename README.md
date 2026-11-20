@@ -270,7 +270,7 @@ Register it with an MCP client, e.g. Claude Code:
 claude mcp add ducktel -- ducktel mcp --data-dir /data
 ```
 
-Eleven tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other ten are always registered.
+Fourteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other thirteen are always registered.
 
 | Tool | Purpose |
 |------|---------|
@@ -284,9 +284,12 @@ Eleven tools. They know about spans, attributes, logs, metrics, and time, and th
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
 | `metric_query(metric_name, aggregation, since_minutes, group_by, step, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99 — `group_by` accepts columns (the OTel key `service.name` names the `service_name` column), `attr.<key>` data-point attributes and `resource.<key>` resource attributes such as `resource.host.name`; `step` (30s, 1m, 5m, 1h) returns a time series with a leading `time` column; `filters` match attributes or resource attributes. Histograms are aggregated over observations (count, sum, avg, min, max, percentiles from buckets, `buckets` for the distribution; cumulative series become increments). `exemplars` returns the concrete requests senders attached to the points (`trace_id`, `span_id`, value), slowest first, narrowed by `min_value`/`max_value`. On a gauge, `count` counts exported points, not events |
 | `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, untraced time, top repeated span groups with their self time, the 3 slowest spans, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
+| `list_saved_queries(tenant)` | saved MCP queries for one tenant: `name`, `description`, `tool`, and `arguments`, sorted by name |
+| `save_query(tenant, name, tool, arguments, description)` | save a read tool invocation for this tenant after checking the tool and the arguments. The same name replaces the previous query |
+| `run_saved_query(tenant, name, since_minutes, until_minutes)` | run one saved query by name. Optional `since_minutes` and `until_minutes` override the stored window for this run only. An unknown name lists the names saved for that tenant |
 | `flush_buffer()` | make just-received telemetry queryable now (only advertised when `--flush-url` is set) |
 
-`span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` also take `until_minutes` (default 0, meaning now). It must be less than `since_minutes`. `list_attribute_keys` samples `since_minutes` (default 60) and does not take `until_minutes`. `trace_lookup`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` have no time window.
+`span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` also take `until_minutes` (default 0, meaning now). It must be less than `since_minutes`. `list_attribute_keys` samples `since_minutes` (default 60) and does not take `until_minutes`. `trace_lookup`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` have no time window. Saved queries are per tenant, in a file separate from `ducktel saved` SQL. `run_saved_query` can override that window for one run. A tool with no window rejects the override.
 
 **Time series and resource grouping.** `step` turns `metric_query` into a dashboard time series: one row per (time bucket, group), with a leading `time` column holding the bucket start in Unix microseconds (UTC), ordered by time then groups. `resource.<key>` groups by an OpenTelemetry resource attribute, so questions like CPU per host work: `metric_query(metric_name="system.cpu.utilization", aggregation="avg", group_by="resource.host.name", step="1m", since_minutes=360)`. At most 1500 buckets are allowed per query; `exemplars` ignores `step`.
 

@@ -8,11 +8,13 @@ Every MCP query tool requires `tenant`, and so do `list_services`, `list_metric_
 
 Time windows on `span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` default to the last 60 minutes (`since_minutes`). `until_minutes` ends the window that many minutes before now. The default is 0, which means now. `until_minutes` must be less than `since_minutes`. `log_search` with `trace_id` and no `since_minutes` searches the whole history. `list_attribute_keys` also defaults to the last 60 minutes and samples at most 2000 rows per signal. It does not take `until_minutes`. A missing key is not proof the key never existed. `trace_lookup`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` have no time window.
 
+Saved MCP queries are per tenant. `save_query` validates the tool and arguments before writing. `run_saved_query` can override `since_minutes` and `until_minutes` for that run only.
+
 Rows still in the receiver's memory buffer are not in the Parquet files yet. They are invisible to every query until a flush. The default flush interval is 30 seconds. If the MCP server was started with `--flush-url`, call `flush_buffer` and repeat the query.
 
 ## MCP tools
 
-Registered by `Register` in `internal/mcp/server.go`. Ten tools are always registered. `flush_buffer` is registered only when a flush URL is set.
+Registered by `Register` in `internal/mcp/server.go`. Thirteen tools are always registered. `flush_buffer` is registered only when a flush URL is set.
 
 - [list_tenants](skills/ducktel/SKILL.md): tenant ids with stored telemetry. No arguments. Returns only tenant ids.
 - [list_services](skills/ducktel/SKILL.md): service names for one tenant. Requires `tenant`. `source` omitted or `traces` reads spans. `source=logs` reads log records.
@@ -24,6 +26,9 @@ Registered by `Register` in `internal/mcp/server.go`. Ten tools are always regis
 - [log_search](skills/ducktel/SKILL.md): log records, newest first. Optional `trace_id`, `service_name`, `severity`, `search` (body substring), `filters`, and `limit` (default 100, cap 1000).
 - [slow_requests](skills/ducktel/SKILL.md): the slowest requests, each with a short trace summary. Pass `metric_name` to follow that metric's exemplars. Omit it to use the slowest root spans. `limit` defaults to 5 and caps at 20.
 - [metric_query](skills/ducktel/SKILL.md): one metric over a window. Requires `metric_name` and `aggregation`. Aggregations are `avg`, `sum`, `min`, `max`, `count`, `p50`, `p95`, `p99`, `buckets`, and `exemplars`. Histograms are aggregated from their observations. A histogram result is not 0 just because the type is histogram. `buckets`, `p50`, `p95`, and `p99` need an explicit-bucket histogram. An exponential histogram supports `count`, `sum`, `avg`, `min`, and `max`. `group_by` takes a column (`service.name` means `service_name`), `attr.<key>`, or `resource.<key>`. `step` (`30s`, `1m`, `5m`, `1h`, or a number of seconds) adds a `time` column. At most 1500 buckets. `exemplars` ignores `step`. On a gauge or a sum, `count` counts exported points, not events.
+- [list_saved_queries](skills/ducktel/SKILL.md): saved MCP queries for one tenant. Requires `tenant`. Returns `name`, `description`, `tool`, and `arguments`, sorted by name.
+- [save_query](skills/ducktel/SKILL.md): save a read tool invocation for one tenant. Requires `tenant`, `name`, `tool`, and `arguments`. Optional `description`. Validates like a direct tool call before writing. Same name replaces the record.
+- [run_saved_query](skills/ducktel/SKILL.md): run a saved query by name for one tenant. Optional `since_minutes` and `until_minutes` override the window for this run only.
 - [flush_buffer](skills/ducktel/SKILL.md): asks the receiver to write its buffer. No arguments. Absent from the tool list when no flush URL is configured.
 
 Row results are compact JSON, with no extra whitespace.
@@ -60,7 +65,7 @@ Global flags: `--data-dir` (default `./data`) and `--format json|table|csv` (def
 - `ducktel traces`, `ducktel logs`, and `ducktel metrics` are filtered shortcuts. `--since 0` means no time filter. `traces --limit` defaults to 20. `logs` and `metrics` default to 50.
 - `ducktel schema [traces|logs|metrics]` prints columns.
 - `ducktel services` lists service names seen in traces.
-- `ducktel saved` stores and runs SQL you want to repeat. Nothing runs it on a schedule.
+- `ducktel saved` stores and runs SQL you want to repeat. Nothing runs it on a schedule. MCP saved queries are a separate, tenant-scoped store: `list_saved_queries`, `save_query`, and `run_saved_query`.
 - `ducktel testdata` sends synthetic OTLP to a receiver.
 - `ducktel serve` is the receiver, not a query command. Default listen address is `localhost:4318`.
 

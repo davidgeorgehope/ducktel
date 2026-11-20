@@ -162,7 +162,7 @@ List distinct service names from traces.
 
 Serve telemetry queries over the Model Context Protocol, for agent consumers.
 
-Eleven tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other ten are always registered.
+Fourteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other thirteen are always registered.
 
 | Tool | Purpose |
 |------|---------|
@@ -176,6 +176,9 @@ Eleven tools. They know about spans, attributes, logs, metrics, and time, and th
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
 | `metric_query(metric_name, aggregation, since_minutes, group_by, step, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99, buckets (histograms), exemplars; `group_by` accepts columns, `attr.<key>` and `resource.<key>`; `step` returns a time series |
 | `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, untraced time, top repeated span groups with their self time, the 3 slowest spans, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
+| `list_saved_queries(tenant)` | saved MCP queries for one tenant: `name`, `description`, `tool`, and `arguments`, sorted by name |
+| `save_query(tenant, name, tool, arguments, description)` | save a read tool invocation for this tenant. Checks the tool and the arguments before writing. Saving the same name again replaces that query |
+| `run_saved_query(tenant, name, since_minutes, until_minutes)` | run one saved query by name. `since_minutes` and `until_minutes`, when set, override the stored window for this run only. An unknown name lists the names saved for that tenant |
 | `flush_buffer()` | make just-received telemetry queryable now (see Flush semantics) |
 
 A filter object is `{key, value, op}`. `op` is `=` (default) or `!=`. `!=` drops records where the key has that value, and keeps records that lack the key.
@@ -205,7 +208,10 @@ tool and on `list_services`, `list_metric_names`, and `list_attribute_keys` — 
 in the JSON schema, so a client cannot omit it — and those tools hard-filter on the
 `tenant.id` resource attribute. A caller can restrict its scope but never widen it.
 `list_tenants` takes no tenant and returns only tenant ids. `flush_buffer` takes no
-arguments and touches no data.
+arguments and touches no data. `list_saved_queries`, `save_query`, and `run_saved_query`
+are per tenant. `save_query` rejects `flush_buffer`, `list_tenants`, and the saved-query
+tools themselves. `run_saved_query` can override the time window for that run. Tools
+with no window reject the override, and `list_attribute_keys` rejects `until_minutes`.
 
 **Dotted attribute keys work.** `span_search` takes filters as key/value pairs and
 quotes the key internally, because DuckDB treats `$.service.name` as field "service"

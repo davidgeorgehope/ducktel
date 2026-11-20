@@ -54,7 +54,7 @@ func newCompareServer(t *testing.T, configure func(*Server)) (*sdkmcp.ClientSess
 	core := telemetry.NewCore(engine)
 
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
-	ds := NewServer(engine, "", "")
+	ds := NewServer(engine, dir, "", "")
 	if configure != nil {
 		configure(ds)
 	}

@@ -9,6 +9,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/davidgeorgehope/ducktel/internal/query"
+	"github.com/davidgeorgehope/ducktel/internal/savedquery"
 	"github.com/davidgeorgehope/ducktel/internal/telemetry"
 )
 
@@ -25,18 +26,20 @@ import (
 // allowlist — lives in internal/telemetry, shared by every query consumer.
 // This type only adapts MCP's argument/result shapes onto that shared core.
 type Server struct {
-	core    *telemetry.Core
-	flusher *telemetry.Flusher
+	core     *telemetry.Core
+	flusher  *telemetry.Flusher
+	mcpSaved *savedquery.MCPStore
 	// dashboardURL, when set, adds a dashboard link to every result.
 	dashboardURL string
 }
 
 // NewServer wires the query engine into an MCP server. An empty flushURL
-// disables the flush tool.
-func NewServer(engine *query.Engine, flushURL, flushToken string) *Server {
+// disables the flush tool. dataDir holds tenant-scoped MCP saved queries.
+func NewServer(engine *query.Engine, dataDir, flushURL, flushToken string) *Server {
 	return &Server{
-		core:    telemetry.NewCore(engine),
-		flusher: telemetry.NewFlusher(flushURL, flushToken),
+		core:     telemetry.NewCore(engine),
+		flusher:  telemetry.NewFlusher(flushURL, flushToken),
+		mcpSaved: savedquery.NewMCPStore(dataDir),
 	}
 }
 
@@ -145,6 +148,30 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 			"gauge re-exported every interval is counted once per export, so use a " +
 			"counter or a histogram to count events.",
 	}, s.metricQuery)
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "list_saved_queries",
+		Description: "List saved MCP queries for one tenant. Returns name, description, tool, and arguments " +
+			"for each entry, sorted by name. Other tenants' queries are not included.",
+	}, s.listSavedQueries)
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "save_query",
+		Description: "Save an MCP tool invocation for one tenant so it can be run again with run_saved_query. " +
+			"Requires tenant, name, tool, and arguments. Optional description. " +
+			"The tool must be a read tool that takes tenant. Rejects flush_buffer, list_tenants, and the saved-query tools. " +
+			"Arguments are validated the same way as a direct tool call before anything is written. " +
+			"If arguments omit tenant, it is set to the tool's tenant. A mismatched arguments.tenant is rejected. " +
+			"Saving the same name again replaces the record and keeps created_at.",
+	}, s.saveQuery)
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "run_saved_query",
+		Description: "Run a saved MCP query for one tenant by name. Optional since_minutes and until_minutes " +
+			"override the time window for this run only and do not change the stored arguments. " +
+			"Overrides are rejected when the saved tool has no time window, and until_minutes is rejected for list_attribute_keys. " +
+			"An unknown name lists the saved query names that exist for that tenant.",
+	}, s.runSavedQuery)
 
 	// Only offered when a flush endpoint is configured: without one the tool
 	// could not do anything, and advertising a tool that always fails would

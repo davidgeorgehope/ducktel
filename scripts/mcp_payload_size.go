@@ -42,7 +42,7 @@ func main() {
 	traceID, _ := rows[0]["trace_id"].(string)
 	fmt.Fprintf(os.Stderr, "trace_id=%s spans=%v\n", traceID, rows[0]["n"])
 
-	session := connect(engine)
+	session := connect(engine, os.Args[1])
 	defer session.Close()
 
 	calls := []struct {
@@ -86,9 +86,9 @@ func main() {
 	}
 }
 
-func connect(engine *query.Engine) *sdkmcp.ClientSession {
+func connect(engine *query.Engine, dataDir string) *sdkmcp.ClientSession {
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "measure", Version: "0"}, nil)
-	mcp.NewServer(engine, "", "").Register(srv)
+	mcp.NewServer(engine, dataDir, "", "").Register(srv)
 	clientT, serverT := sdkmcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := srv.Connect(ctx, serverT, nil); err != nil {
