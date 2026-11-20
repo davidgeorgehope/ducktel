@@ -44,7 +44,7 @@ Traditional observability platforms provide value through:
 
 Ingest and store. That's it. You need something to receive telemetry and something to persist it in a queryable format. Everything above that layer is intelligence — and intelligence is exactly what LLMs do.
 
-**ducktel is a proof of concept for this thesis.** It is the minimal backend an AI agent needs to do observability: receive OTLP, write Parquet, expose SQL. No dashboards. No query language. No visualization engine. Just structured data and a query interface that any LLM can use by shelling out to a CLI.
+**ducktel is a proof of concept for this thesis.** It is the minimal backend an AI agent needs to do observability: receive OTLP, write Parquet, and answer through SQL or MCP. An optional dashboard exists for a person. The agent calls the CLI or the MCP tools.
 
 ## Design Principles
 
@@ -56,7 +56,7 @@ Ingest and store. That's it. You need something to receive telemetry and somethi
 
 **CLI-first, agent-friendly.** ducktel is designed to be called from a shell. An LLM agent investigating an incident can shell out to `ducktel query`, get structured JSON back, reason about the results, and issue follow-up queries. The entire diagnostic loop — from anomaly detection to root cause analysis — can happen programmatically without a human touching a browser.
 
-**Single binary, zero dependencies.** `go build` and you have everything. No databases to run, no message queues to configure, no clusters to manage. This matters for local development, CI/CD pipelines, edge deployments, and anywhere you want telemetry without the overhead of a platform.
+**Single binary.** `go build` produces one binary. The build needs CGo for DuckDB. There is no database server, message queue, or cluster to run.
 
 **Nothing is dropped.** All OTLP fields are preserved in the Parquet schema. Resource attributes, scope metadata, span events, links, exemplars — everything. The schema is wide because the data model is rich, and AI agents can use all of it.
 
@@ -110,7 +110,7 @@ Ingest and store. That's it. You need something to receive telemetry and somethi
 │  ┌────────────────┐  │
 │  │ Embedded       │  │
 │  │ DuckDB         │  │
-│  │ (Parquet glob) │  │
+│  │ (file list)    │  │
 │  └────────────────┘  │
 └──────────────────────┘
 ```
@@ -137,7 +137,7 @@ go build -o ducktel ./cmd/ducktel/
 ducktel serve
 ```
 
-Listens on `:4318` for OTLP/HTTP (protobuf and JSON). Accepts all three signal types:
+Listens on `localhost:4318` for OTLP/HTTP (protobuf and JSON). Pass `--host 0.0.0.0` to listen on every interface. Accepts all three signal types:
 
 - `POST /v1/traces`
 - `POST /v1/logs`
@@ -215,14 +215,12 @@ Saved queries are the LLM's checklist — queries worth running periodically. du
 ducktel saved create "error-rate-by-service" \
   "SELECT service_name, count(*) FILTER (WHERE status_code = 'STATUS_CODE_ERROR') * 100.0 / count(*) as error_pct FROM traces WHERE start_time >= epoch_us(now() - INTERVAL '5 minutes') GROUP BY service_name HAVING error_pct > 0" \
   --description "Error rate by service over last 5 minutes" \
-  --schedule "every 60s" \
   --tags errors,slo
 
 # Save a latency check
 ducktel saved create "p99-latency" \
   "SELECT service_name, span_name, quantile_cont(duration_ms, 0.99) as p99_ms FROM traces WHERE start_time >= epoch_us(now() - INTERVAL '10 minutes') GROUP BY service_name, span_name ORDER BY p99_ms DESC LIMIT 10" \
   --description "Top 10 slowest endpoints by P99 latency" \
-  --schedule "every 5m" \
   --tags latency
 
 # List all saved queries
@@ -315,7 +313,6 @@ The real power of saved queries: the investigative query that diagnosed an incid
 ducktel saved create "payment-error-spike" \
   "SELECT count(*) as errors FROM traces WHERE service_name = 'payment-service' AND status_code = 'STATUS_CODE_ERROR' AND start_time >= epoch_us(now() - INTERVAL '5 minutes')" \
   --description "Errors in payment service over 5min window" \
-  --schedule "every 60s" \
   --tags payment,errors
 
 # Later, on the agent's heartbeat loop:
@@ -412,7 +409,7 @@ data/
       14-30.parquet
 ```
 
-Files are date-partitioned and named by minute. DuckDB auto-discovers all Parquet files via glob at query time. Nothing is dropped — all OTLP fields are preserved.
+Files are date-partitioned and named by the flush minute. The query engine passes a selected file list to `read_parquet`. It does not glob the directory. Nothing is dropped. All OTLP fields are preserved.
 
 ## Sending Telemetry
 

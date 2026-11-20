@@ -81,7 +81,7 @@ Integration tests (`integration_test.go`) spin up a real receiver and writer, se
 3. `convertSpans`/`convertLogs`/`convertMetrics` transforms OTLP proto → internal Go structs
 4. Structs passed to **Writer** (`internal/writer`) via `Consumer` interface
 5. Writer buffers in memory, flushes to date-partitioned Parquet files on interval or buffer full
-6. **Query Engine** (`internal/query`) creates DuckDB views over Parquet globs
+6. **Query engine** (`internal/query`) creates DuckDB views with `read_parquet` over the selected Parquet files
 7. SQL queries execute against views, results returned as `[]map[string]interface{}`
 8. **CLI formatter** (`internal/cli`) renders CLI results as json, table, or csv. MCP (`internal/mcp`) and the dashboard API (`internal/webapi`) do not use that formatter. They call `internal/telemetry`.
 

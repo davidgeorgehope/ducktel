@@ -102,7 +102,7 @@ data/
 
 A flush writes `HH-MM.parquet`. A second flush in the same minute adds a counter suffix. The clock in the name is the flush time, not the time on the rows.
 
-Compaction rewrites closed files. For today and yesterday (UTC), an hour that started at least 2 hours ago becomes `HH.parquet`. A day strictly before yesterday becomes one `day.parquet`. The views glob `data/traces/**/*.parquet` (and the same for `logs` and `metrics`), so all three names are visible.
+Compaction rewrites closed files. For today and yesterday (UTC), an hour that started at least 2 hours ago becomes `HH.parquet`. A day strictly before yesterday becomes one `day.parquet`. The query engine builds each view from those files with `read_parquet` over an explicit list (`internal/query/engine.go`). A time-bounded query leaves out files that cannot hold rows in the window. All three names are eligible.
 
 ## JSON Field Access (DuckDB)
 

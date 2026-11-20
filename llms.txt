@@ -6,7 +6,7 @@ You query it with MCP or with the CLI. The server does not interpret attribute k
 
 Every MCP query tool requires `tenant`. The server keeps only rows whose `tenant.id` resource attribute equals that value. You cannot widen a query by omitting `tenant`.
 
-Time windows default to the last 60 minutes (`since_minutes`). `until_minutes` ends the window that many minutes before now. The default is 0, which means now. `until_minutes` must be less than `since_minutes`. `log_search` with `trace_id` and no `since_minutes` searches the whole history.
+Time windows on `span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` default to the last 60 minutes (`since_minutes`). `until_minutes` ends the window that many minutes before now. The default is 0, which means now. `until_minutes` must be less than `since_minutes`. `log_search` with `trace_id` and no `since_minutes` searches the whole history. `trace_lookup` and `flush_buffer` have no time window.
 
 Rows still in the receiver's memory buffer are not in the Parquet files yet. They are invisible to every query until a flush. The default flush interval is 30 seconds. If the MCP server was started with `--flush-url`, call `flush_buffer` and repeat the query.
 
@@ -45,7 +45,7 @@ Add `--dashboard` to serve the read-only UI at `/dashboard` and the JSON routes 
 Global flags: `--data-dir` (default `./data`) and `--format json|table|csv` (default `json`).
 
 - `ducktel query "<sql>"` runs DuckDB SQL on the `traces`, `logs`, and `metrics` views. It is not sandboxed. It will run DDL.
-- `ducktel traces`, `ducktel logs`, and `ducktel metrics` are filtered shortcuts.
+- `ducktel traces`, `ducktel logs`, and `ducktel metrics` are filtered shortcuts. `--since 0` means no time filter. `traces --limit` defaults to 20. `logs` and `metrics` default to 50.
 - `ducktel schema [traces|logs|metrics]` prints columns.
 - `ducktel services` lists service names seen in traces.
 - `ducktel saved` stores and runs SQL you want to repeat. Nothing runs it on a schedule.

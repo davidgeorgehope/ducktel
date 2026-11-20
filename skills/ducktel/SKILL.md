@@ -205,9 +205,9 @@ but never widen it. `flush_buffer` takes no arguments and touches no data.
 quotes the key internally, because DuckDB treats `$.service.name` as field "service"
 then "name" and silently returns NULL. See the note under SQL Query Patterns.
 
-**Time windows default to 60 minutes.** Pass `since_minutes` for a wider range. A wide
-window scans every Parquet file in it, so it can be expensive. `until_minutes` ends the
-window that many minutes before now (default 0). It must be less than `since_minutes`.
+**Time windows default to 60 minutes** on the tools that take one. `trace_lookup` and `flush_buffer` do not. Pass `since_minutes` for a wider range. A wide
+window reads every selected Parquet file in it, so it can be expensive. `until_minutes` ends the
+window that many minutes before now (default 0). It must be less than `since_minutes`. On the CLI, `--since 0` means no time filter.
 
 #### Two transports, two trust domains
 
@@ -252,7 +252,7 @@ buffer is invisible to every tool. Ingest → queryable latency is therefore up 
 flush interval. Three triggers:
 
 1. the `--flush-interval` timer (default 30s)
-2. the in-memory buffer reaching 1000 records of a signal — a busy instance
+2. the in-memory buffer reaching `--buffer-size` records of one signal (default 1000). A busy instance
    flushes more often than the interval suggests
 3. an explicit request: the `flush_buffer` tool in HTTP mode, which calls the
    writer's `POST /flush`

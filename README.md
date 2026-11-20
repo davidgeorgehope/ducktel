@@ -206,14 +206,14 @@ ducktel query "SELECT ..." [--format json|table|csv] [--data-dir ./data]
 
 ### `ducktel services`
 
-List all services that have reported telemetry.
+List service names seen in traces. Logs-only and metrics-only names are not included.
 
 ### `ducktel traces`
 
 Browse traces with filters.
 
 ```bash
-ducktel traces [--service name] [--since 1h] [--status error] [--limit 50]
+ducktel traces [--service name] [--since 1h] [--status error] [--limit 20]
 ```
 
 ### `ducktel logs`
@@ -282,7 +282,7 @@ Seven tools. They know about spans, attributes, logs, metrics, and time, and the
 | `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, untraced time, top repeated span groups with their self time, the 3 slowest spans, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
 | `flush_buffer()` | make just-received telemetry queryable now (only advertised when `--flush-url` is set) |
 
-Every query tool also takes `until_minutes` (default 0, meaning now). It must be less than `since_minutes`.
+`span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` also take `until_minutes` (default 0, meaning now). It must be less than `since_minutes`. `trace_lookup` and `flush_buffer` have no time window.
 
 **Time series and resource grouping.** `step` turns `metric_query` into a dashboard time series: one row per (time bucket, group), with a leading `time` column holding the bucket start in Unix microseconds (UTC), ordered by time then groups. `resource.<key>` groups by an OpenTelemetry resource attribute, so questions like CPU per host work: `metric_query(metric_name="system.cpu.utilization", aggregation="avg", group_by="resource.host.name", step="1m", since_minutes=360)`. At most 1500 buckets are allowed per query; `exemplars` ignores `step`.
 
@@ -395,7 +395,7 @@ data/
       08-30.parquet
 ```
 
-Date-partitioned Parquet files. DuckDB reads them via glob at query time. Nothing is dropped — all OTLP fields are preserved. Your data is never trapped in a proprietary format.
+Date-partitioned Parquet files. At query time the engine passes the selected files to DuckDB with `read_parquet`. It does not glob the directory. Nothing is dropped. All OTLP fields are preserved. Your data is never trapped in a proprietary format.
 
 Retention is off by default (files accumulate forever) so upgrading an existing deployment never starts deleting data without an explicit opt-in. For any long-lived or container deployment, prefer `--retention 30d` so on-disk growth stays bounded. A maintenance pass runs at startup and then every 10 minutes. It does not follow `--flush-interval`. When `--retention` is set, that pass deletes whole `YYYY-MM-DD` directories older than the window. Deletion is day-granular. A date-shaped directory older than the cutoff is removed in full. Anything else under a signal directory is left alone.
 
