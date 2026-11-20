@@ -166,8 +166,8 @@ Seven tools. They know about spans, attributes, logs, metrics, and time, and the
 
 | Tool | Purpose |
 |------|---------|
-| `trace_lookup(trace_id, tenant, detail, limit)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, errors, WARN-and-above logs; `detail=spans` returns every span with attributes, ordered by start time, which can be large |
-| `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms)` | spans matching attribute key/value filters, optionally by duration |
+| `trace_lookup(trace_id, tenant, detail, limit, include_attributes)` | by default a compact summary of one trace: root span, span count, duration, services, groups of repeated spans with total time and `self_ms` (time not spent in child spans, so the groups add up), `untraced_ms` (root time no child span covers), slowest spans, errors, WARN-and-above logs; `detail=spans` returns every span, ordered by start time, with attributes unless `include_attributes` is false. The result can be large |
+| `span_search(filters, service_name, since_minutes, tenant, limit, min_ms, max_ms, include_attributes)` | spans matching attribute key/value filters, optionally by duration. Attributes are omitted unless `include_attributes` is true |
 | `compare_spans(service_name, span_name, span_kind, filters, since_minutes, tenant, min_ms, max_ms, limit)` | why the slow spans differ. Compares a duration range (default, slower than the scope's p95) with the other spans in that scope, and returns the attribute values whose share differs most. `span_kind` defaults to `server` when `span_name` is omitted. Default 15 rows, cap 50 |
 | `log_search(trace_id, severity, search, service_name, filters, since_minutes, tenant, limit)` | log records, newest first: exact case-insensitive severity, body substring, attribute filters; `trace_id` returns one trace's records across the whole history |
 | `metric_query(metric_name, aggregation, since_minutes, group_by, step, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99, buckets (histograms), exemplars; `group_by` accepts columns, `attr.<key>` and `resource.<key>`; `step` returns a time series |
@@ -187,7 +187,7 @@ At most 1500 buckets are allowed per query; `exemplars` ignores `step`.
 requests, each already carrying a brief trace summary. Use `compare_spans` when you
 want the attribute values that are more common on those slow spans than on the rest.
 Follow a `trace_id` with `trace_lookup` for the full summary, and use
-`trace_lookup(detail=spans)` only when every span with attributes is really needed.
+`trace_lookup(detail=spans)` only when every span is really needed. Set `include_attributes` to false to drop the attributes JSON. `span_search` omits attributes unless `include_attributes` is true. Row JSON has no extra whitespace.
 
 **Trace summaries and slow requests over REST.** The same queries are available on
 `/api`:
