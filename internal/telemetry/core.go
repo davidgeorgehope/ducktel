@@ -498,11 +498,24 @@ func metricGroupExpr(key string) (expr, alias string, ok bool) {
 			return fmt.Sprintf("json_extract_string(%s, '%s')", p.column, jsonPath(rest)), key, true
 		}
 	}
+	if column, found := otelColumnAliases[key]; found {
+		key = column
+	}
 	col, ok := quoteIdent(key)
 	if !ok {
 		return "", "", false
 	}
 	return col, col, true
+}
+
+// otelColumnAliases maps OTel semantic-convention keys that ducktel promotes
+// to their own column onto that column, so group_by accepts the same spelling
+// filters already do (a filter on service.name matches the resource
+// attribute). The result column keeps the column's name. Only promoted keys
+// are listed: any other dotted key is still rejected rather than guessed to
+// be a resource attribute.
+var otelColumnAliases = map[string]string{
+	"service.name": "service_name",
 }
 
 // maxMetricBuckets bounds how many time buckets one step query may produce.
