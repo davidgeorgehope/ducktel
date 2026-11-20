@@ -20,6 +20,9 @@ func TestMCPHelpListsEveryTool(t *testing.T) {
 		"log_search",
 		"slow_requests",
 		"metric_query",
+		"list_saved_queries",
+		"save_query",
+		"run_saved_query",
 		"flush_buffer",
 	} {
 		if !strings.Contains(help, name) {

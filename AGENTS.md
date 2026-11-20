@@ -41,7 +41,7 @@ The dashboard has no build step and no npm install.
 - `internal/mcp` registers the MCP tools and adapts their arguments.
 - `internal/webapi` registers the `/api` routes.
 - `internal/httpauth` checks bearer tokens.
-- `internal/savedquery` stores saved queries as JSON under the data directory.
+- `internal/savedquery` stores SQL saved queries in `saved_queries.json` and tenant-scoped MCP saved queries in `mcp_saved_queries.json`.
 - `internal/cli` formats CLI results as json, table, or csv.
 - `internal/testharness` generates the synthetic OTLP that `ducktel testdata` sends.
 - `web/dashboard` is the static dashboard. `web/webui.go` embeds it.

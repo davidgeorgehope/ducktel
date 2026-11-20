@@ -61,7 +61,7 @@ func newWindowServer(t *testing.T) *sdkmcp.ClientSession {
 	t.Cleanup(func() { engine.Close() })
 
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
-	NewServer(engine, "", "").Register(srv)
+	NewServer(engine, dir, "", "").Register(srv)
 	clientT, serverT := sdkmcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := srv.Connect(ctx, serverT, nil); err != nil {

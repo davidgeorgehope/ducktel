@@ -856,7 +856,7 @@ func TestDiscoveryThroughMCP(t *testing.T) {
 func readHarnessDiscovery(t *testing.T, engine *query.Engine) (tenants, services, metrics, keys []map[string]any, problem string) {
 	t.Helper()
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
-	mcp.NewServer(engine, "", "").Register(srv)
+	mcp.NewServer(engine, t.TempDir(), "", "").Register(srv)
 	clientT, serverT := sdkmcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := srv.Connect(ctx, serverT, nil); err != nil {
