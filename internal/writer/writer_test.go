@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,6 +127,45 @@ func TestStopFlushesRemaining(t *testing.T) {
 	w.Stop()
 	if files := parquetFiles(t, dir); len(files) != 1 {
 		t.Errorf("Stop did not flush: %v", files)
+	}
+}
+
+// TestConcurrentFlushKeepsEverySpan: two flushes in the same minute must not
+// pick one HH-MM name. writeParquet chooses the name without the buffer lock,
+// and os.Rename replaces a file that is already there, so the first batch
+// disappears while Flush still returns nil.
+func TestConcurrentFlushKeepsEverySpan(t *testing.T) {
+	dir := t.TempDir()
+	w := New(dir, time.Hour, 1)
+	const n = 32
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			s := span("svc")
+			s.SpanID = fmt.Sprintf("s-%d", i)
+			s.TraceID = s.SpanID
+			w.Add([]TraceSpan{s})
+		}(i)
+	}
+	wg.Wait()
+
+	got := map[string]int{}
+	for _, f := range parquetFiles(t, dir) {
+		if strings.HasPrefix(filepath.Base(f), ".") {
+			t.Errorf("temp file visible: %s", f)
+			continue
+		}
+		for _, row := range readAll[TraceSpan](t, f) {
+			got[row.SpanID]++
+		}
+	}
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("s-%d", i)
+		if got[id] != 1 {
+			t.Errorf("span %s count = %d, want 1", id, got[id])
+		}
 	}
 }
 

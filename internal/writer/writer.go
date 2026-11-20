@@ -290,6 +290,25 @@ func writeParquet[T any](dataDir, signal string, records []T) (string, error) {
 		return "", fmt.Errorf("closing %s: %w", signal, err)
 	}
 
+	return commitTemp(dir, signal, tmpPath, now)
+}
+
+// commitLocks serializes the stat-and-rename that publishes one directory's
+// flush file. writeParquet runs without w.mu, so two flushes can both observe
+// the same free HH-MM[-n] name. os.Rename then replaces the first file and
+// that batch is gone, while both Flush calls return nil.
+var commitLocks sync.Map
+
+func lockCommit(dir string) func() {
+	v, _ := commitLocks.LoadOrStore(dir, new(sync.Mutex))
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+func commitTemp(dir, signal, tmpPath string, now time.Time) (string, error) {
+	unlock := lockCommit(dir)
+	defer unlock()
 	path, err := nextPath(dir, now)
 	if err != nil {
 		return "", err

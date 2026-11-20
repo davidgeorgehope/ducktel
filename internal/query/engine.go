@@ -407,8 +407,140 @@ func selectFiles(signalDir string, since time.Time) ([]string, error) {
 		}
 		return nil, fmt.Errorf("listing parquet files under %s: %w", signalDir, err)
 	}
+	files, err = dropSuperseded(files)
+	if err != nil {
+		return nil, err
+	}
 	sort.Strings(files)
 	return files, nil
+}
+
+// dropSuperseded hides a per-flush or hour file once a newer merge of it
+// exists. Compaction renames the merged file into place before it deletes
+// the sources, and a crash in that gap leaves both. A reader that opens both
+// counts those rows twice. A file strictly newer than the merge is not inside
+// it (a flush that landed afterwards) and stays visible. Equal timestamps stay
+// visible too: hiding one would drop rows when the clock cannot order them.
+func dropSuperseded(files []string) ([]string, error) {
+	byDir := make(map[string][]string)
+	var dirs []string
+	for _, f := range files {
+		dir := filepath.Dir(f)
+		if _, ok := byDir[dir]; !ok {
+			dirs = append(dirs, dir)
+		}
+		byDir[dir] = append(byDir[dir], f)
+	}
+
+	out := make([]string, 0, len(files))
+	for _, dir := range dirs {
+		kept, err := dropSupersededDir(dir, byDir[dir])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, kept...)
+	}
+	return out, nil
+}
+
+func dropSupersededDir(dir string, files []string) ([]string, error) {
+	if _, err := time.ParseInLocation("2006-01-02", filepath.Base(dir), time.UTC); err != nil {
+		return files, nil
+	}
+
+	var dayPath string
+	hourPath := make(map[int]string)
+	for _, f := range files {
+		base := filepath.Base(f)
+		if base == "day.parquet" {
+			dayPath = f
+			continue
+		}
+		if hour, ok := hourFileHour(base); ok {
+			hourPath[hour] = f
+		}
+	}
+	if dayPath == "" && len(hourPath) == 0 {
+		return files, nil
+	}
+
+	var dayTime time.Time
+	var err error
+	if dayPath != "" {
+		dayTime, err = fileMtime(dayPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+	hourTime := make(map[int]time.Time, len(hourPath))
+	for hour, path := range hourPath {
+		ts, err := fileMtime(path)
+		if err != nil {
+			return nil, err
+		}
+		hourTime[hour] = ts
+	}
+
+	kept := make([]string, 0, len(files))
+	for _, f := range files {
+		base := filepath.Base(f)
+		hide, err := superseded(base, f, dayPath, dayTime, hourPath, hourTime)
+		if err != nil {
+			return nil, err
+		}
+		if !hide {
+			kept = append(kept, f)
+		}
+	}
+	return kept, nil
+}
+
+func fileMtime(path string) (time.Time, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, fmt.Errorf("stating %s: %w", path, err)
+	}
+	return info.ModTime(), nil
+}
+
+// superseded reports whether base is strictly older than a merge in the same
+// directory. A zero dayTime or hourTime means that merge file is absent, and
+// olderThan treats a zero time as do not hide.
+func superseded(base, path, dayPath string, dayTime time.Time, hourPath map[int]string, hourTime map[int]time.Time) (bool, error) {
+	if base == "day.parquet" || dayPath == path {
+		return false, nil
+	}
+	if hour, ok := hourFileHour(base); ok && hourPath[hour] == path {
+		return olderThan(path, dayTime)
+	}
+	hour, ok := flushFileHour(base)
+	if !ok {
+		return false, nil
+	}
+	if hourPath[hour] != "" {
+		hide, err := olderThan(path, hourTime[hour])
+		if err != nil || hide {
+			return hide, err
+		}
+	}
+	return olderThan(path, dayTime)
+}
+
+func olderThan(path string, merge time.Time) (bool, error) {
+	if merge.IsZero() {
+		return false, nil
+	}
+	ts, err := fileMtime(path)
+	if err != nil {
+		return false, err
+	}
+	if ts.IsZero() {
+		return false, nil
+	}
+	return ts.Before(merge), nil
 }
 
 // keepInDayDir reports whether base, a file directly inside b's day

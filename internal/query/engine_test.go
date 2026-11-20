@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/davidgeorgehope/ducktel/internal/writer"
 )
@@ -54,6 +55,122 @@ func TestAllViewsExist(t *testing.T) {
 		if _, err := e.Describe(v); err != nil {
 			t.Errorf("view %q not queryable: %v", v, err)
 		}
+	}
+}
+
+func TestQuerySkipsRowsAlreadyInANewerMerge(t *testing.T) {
+	dir := t.TempDir()
+	seed(t, dir, "api")
+	flush := soleParquet(t, dir)
+	day := filepath.Join(filepath.Dir(flush), "day.parquet")
+	copyFile(t, flush, day)
+	old := time.Now().Add(-time.Hour)
+	neu := time.Now()
+	if err := os.Chtimes(flush, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(day, neu, neu); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	rows, _, err := e.Query("SELECT count(*) AS c FROM traces")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0]["c"].(int64) != 1 {
+		t.Fatalf("count = %v, want 1", rows[0]["c"])
+	}
+}
+
+func TestQueryKeepsFlushNewerThanMerge(t *testing.T) {
+	dir := t.TempDir()
+	seed(t, dir, "api")
+	flush := soleParquet(t, dir)
+	day := filepath.Join(filepath.Dir(flush), "day.parquet")
+	copyFile(t, flush, day)
+	old := time.Now().Add(-time.Hour)
+	neu := time.Now()
+	if err := os.Chtimes(day, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(flush, neu, neu); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	rows, _, err := e.Query("SELECT count(*) AS c FROM traces")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0]["c"].(int64) != 2 {
+		t.Fatalf("count = %v, want 2", rows[0]["c"])
+	}
+}
+
+func TestQuerySkipsRowsAlreadyInANewerHourFile(t *testing.T) {
+	dir := t.TempDir()
+	seed(t, dir, "api")
+	flush := soleParquet(t, dir)
+	hour := filepath.Join(filepath.Dir(flush), filepath.Base(flush)[:2]+".parquet")
+	copyFile(t, flush, hour)
+	old := time.Now().Add(-time.Hour)
+	neu := time.Now()
+	if err := os.Chtimes(flush, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(hour, neu, neu); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	rows, _, err := e.Query("SELECT count(*) AS c FROM traces")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0]["c"].(int64) != 1 {
+		t.Fatalf("count = %v, want 1", rows[0]["c"])
+	}
+}
+
+func soleParquet(t *testing.T, dir string) string {
+	t.Helper()
+	var found string
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		if strings.HasSuffix(p, ".parquet") && !strings.HasPrefix(info.Name(), ".") {
+			found = p
+		}
+		return nil
+	})
+	if err != nil || found == "" {
+		t.Fatalf("finding parquet under %s: %v", dir, err)
+	}
+	return found
+}
+
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	in, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, in, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
