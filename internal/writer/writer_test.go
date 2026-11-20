@@ -169,6 +169,65 @@ func TestConcurrentFlushKeepsEverySpan(t *testing.T) {
 	}
 }
 
+// TestSecondFlushWaitsForThePublish: a Flush that finds an empty buffer
+// must not return while another Flush still holds that batch unpublished.
+func TestSecondFlushWaitsForThePublish(t *testing.T) {
+	dir := t.TempDir()
+	w := New(dir, time.Hour, 1000)
+	w.Add([]TraceSpan{span("held")})
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	commitTestHook = func() {
+		close(started)
+		<-release
+	}
+	t.Cleanup(func() { commitTestHook = nil })
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- w.Flush() }()
+	<-started
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- w.Flush() }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second Flush returned (%v) before the first publish", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Flush did not return")
+	}
+	rows := readAll[TraceSpan](t, soleTraceFile(t, dir))
+	if len(rows) != 1 || rows[0].ServiceName != "held" {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func soleTraceFile(t *testing.T, dir string) string {
+	t.Helper()
+	var found string
+	for _, f := range parquetFiles(t, dir) {
+		if strings.HasPrefix(filepath.Base(f), ".") {
+			continue
+		}
+		found = f
+	}
+	if found == "" {
+		t.Fatal("no parquet file")
+	}
+	return found
+}
+
 // TestConcurrentAddIsRaceFree exercises the mutex under -race.
 func TestConcurrentAddIsRaceFree(t *testing.T) {
 	dir := t.TempDir()

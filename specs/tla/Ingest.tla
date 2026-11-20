@@ -7,7 +7,9 @@
 \*   drop mem. The durability ack is Flush returning nil, including
 \*   POST /flush (receiver.go handleFlush).
 \*   StartFlush takes the buffer under w.mu and drops the lock before the
-\*   write (Writer.Flush).
+\*   write (Writer.Flush). FlushSerial is the flushMu around that whole
+\*   call. Without it, a second Flush sees an empty buffer and returns nil
+\*   while the first call has not renamed yet (FalseAck).
 \*   CommitLocked is commitTemp: nextPath and os.Rename under the per-
 \*   directory lock (writer.go). NameLock is FALSE when those two calls
 \*   are not in the same critical section.
@@ -18,7 +20,7 @@
 
 EXTENDS Integers, FiniteSets, TLC
 
-CONSTANTS NameLock, RequeuePublished
+CONSTANTS NameLock, RequeuePublished, FlushSerial
 
 Batches == {"b1", "b2"}
 Slots == {1, 2}
@@ -101,6 +103,15 @@ FailWrite(s) ==
   /\ name' = [name EXCEPT ![s] = None]
   /\ UNCHANGED <<files, ok>>
 
+\* POST /flush returns 200 for a snapshot another Flush still holds.
+FalseAck(s) ==
+  /\ ~FlushSerial
+  /\ phase[s] \in {Writing, Named}
+  /\ batch[s] \in Batches
+  /\ batch[s] \notin ok
+  /\ ok' = ok \union {batch[s]}
+  /\ UNCHANGED <<mem, phase, batch, name, files>>
+
 RequeueDone(s) ==
   /\ RequeuePublished
   /\ phase[s] = DonePh
@@ -131,6 +142,7 @@ Next ==
   \/ \E s \in Slots : Rename(s)
   \/ \E s \in Slots : FailWrite(s)
   \/ \E s \in Slots : RequeueDone(s)
+  \/ \E s \in Slots : FalseAck(s)
   \/ Crash
   \/ Done
 

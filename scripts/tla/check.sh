@@ -75,7 +75,10 @@ fail() {
 pass Ingest Ingest.cfg
 fail Ingest IngestLost.cfg NoLostCommit
 fail Ingest IngestRequeue.cfg NoRequeueDup
+fail Ingest IngestFalseAck.cfg NoLostCommit
 pass Compact Compact.cfg
+pass DayMerge DayMerge.cfg
+fail DayMerge DayMergeDouble.cfg NoDouble
 fail Compact CompactDouble.cfg NoDouble
 fail Compact CompactLoss.cfg NoLoss
 pass Tenant Tenant.cfg

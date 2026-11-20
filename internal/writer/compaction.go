@@ -432,6 +432,14 @@ func compactDayDir(ctx context.Context, signalDir, day, signal string) error {
 	if len(originals) == 0 {
 		return nil
 	}
+	kept, err := dropMergedHourSources(originals)
+	if err != nil {
+		return err
+	}
+	originals = kept
+	if len(originals) == 0 {
+		return nil
+	}
 	sort.Strings(originals) // chronological
 
 	if err := writeMerged(ctx, dayDir, merged, signal, originals); err != nil {
@@ -446,6 +454,38 @@ func compactDayDir(ctx context.Context, signalDir, day, signal string) error {
 	}
 	log.Printf("compaction: merged %d file(s) into %s", len(originals), merged)
 	return stepMaintenance(ctx)
+}
+
+// dropMergedHourSources deletes flush files whose hour already has HH.parquet.
+// An hour merge that died after the rename leaves those files beside the hour
+// file. compactHours will not visit a day this old, so merging them here
+// would store the rows twice.
+func dropMergedHourSources(originals []string) ([]string, error) {
+	mergedHours := make(map[int]bool)
+	for _, f := range originals {
+		base := filepath.Base(f)
+		if isHourFileName(base) {
+			hour, _ := strconv.Atoi(base[:2])
+			mergedHours[hour] = true
+		}
+	}
+	if len(mergedHours) == 0 {
+		return originals, nil
+	}
+	kept := make([]string, 0, len(originals))
+	for _, f := range originals {
+		base := filepath.Base(f)
+		hour, ok := flushFileHour(base)
+		if ok && mergedHours[hour] {
+			if err := os.Remove(f); err != nil {
+				return nil, fmt.Errorf("removing hour leftover %s: %w", f, err)
+			}
+			log.Printf("compaction: removed hour leftover %s", f)
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept, nil
 }
 
 // mergeFunc writes a merged parquet body to tmp.
