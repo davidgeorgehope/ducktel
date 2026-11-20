@@ -3,6 +3,7 @@ package telemetry
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,129 @@ var spanFilterColumns = map[string]string{
 	"span_kind":   "span_kind",
 }
 
+// statusCodeShort maps the status words a caller types onto the values stored
+// in traces.status_code. The optional status_code_ prefix is stripped by
+// canonicalStatusCode, so both "error" and "STATUS_CODE_ERROR" land here.
+var statusCodeShort = map[string]string{
+	"ok":    "STATUS_CODE_OK",
+	"error": "STATUS_CODE_ERROR",
+	"unset": "STATUS_CODE_UNSET",
+}
+
+// canonicalStatusCode maps a status_code filter value onto the stored column
+// value. recognized is false for an unknown spelling: the caller then binds
+// the original text, so the query still runs.
+func canonicalStatusCode(value string) (stored string, recognized bool) {
+	s := strings.ToLower(strings.TrimSpace(value))
+	s = strings.TrimPrefix(s, "status_code_")
+	stored, recognized = statusCodeShort[s]
+	if !recognized {
+		return value, false
+	}
+	return stored, true
+}
+
+type spelling struct {
+	name      string
+	canonical string
+}
+
+// SpanFilterSpellingHint is recovery text for status_code and span_kind
+// filters whose values are not known spellings. The query bound the literal
+// and still ran. Empty when every such filter was recognized, so an empty
+// result then has some other cause.
+func SpanFilterSpellingHint(filters []AttrFilter) string {
+	var parts []string
+	for _, f := range filters {
+		switch f.Key {
+		case "status_code":
+			if _, ok := canonicalStatusCode(f.Value); ok {
+				continue
+			}
+			parts = append(parts, spellingSentence(f.Key, f.Value,
+				storedValues(statusCodeShort), nearSpelling(f.Value, spellingsOf(statusCodeShort))))
+		case "span_kind":
+			if _, ok := canonicalSpanKindFilter(f.Value); ok {
+				continue
+			}
+			parts = append(parts, spellingSentence(f.Key, f.Value,
+				storedValues(spanKindShort, "SPAN_KIND_UNSPECIFIED"),
+				nearSpelling(f.Value, spellingsOf(spanKindShort, "SPAN_KIND_UNSPECIFIED"))))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func storedValues(shorts map[string]string, extra ...string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, v := range shorts {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, v := range extra {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func spellingsOf(shorts map[string]string, extra ...string) []spelling {
+	var out []spelling
+	for name, canonical := range shorts {
+		out = append(out, spelling{name: name, canonical: canonical}, spelling{name: canonical, canonical: canonical})
+	}
+	for _, canonical := range extra {
+		out = append(out, spelling{name: canonical, canonical: canonical})
+	}
+	return out
+}
+
+func nearSpelling(value string, cands []spelling) string {
+	folded := strings.ToLower(strings.TrimSpace(value))
+	best := ""
+	bestD := 3
+	for _, c := range cands {
+		d := levenshtein(folded, strings.ToLower(c.name))
+		if d > 2 {
+			continue
+		}
+		if best == "" || d < bestD || (d == bestD && c.canonical < best) {
+			best = c.canonical
+			bestD = d
+		}
+	}
+	return best
+}
+
+func spellingSentence(key, value string, stored []string, suggestion string) string {
+	msg := fmt.Sprintf("%s %q is not a recognized spelling. Stored values are %s", key, value, joinAnd(stored))
+	if suggestion == "" {
+		return msg + "."
+	}
+	return msg + "; did you mean " + suggestion + "?"
+}
+
+func joinAnd(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
+	}
+}
+
 // spanFilterCond builds the condition for one span filter. A reserved span
 // column name compares that column; everything else stays an attribute match,
 // so log, metric and exemplar filters are unaffected. The string columns are
@@ -58,11 +182,22 @@ func spanFilterCond(f AttrFilter) (string, []any, error) {
 	if !ok {
 		return attrFilterCond(f)
 	}
+	value := f.Value
+	switch f.Key {
+	case "status_code":
+		if stored, recognized := canonicalStatusCode(f.Value); recognized {
+			value = stored
+		}
+	case "span_kind":
+		if stored, recognized := canonicalSpanKindFilter(f.Value); recognized {
+			value = stored
+		}
+	}
 	switch f.Op {
 	case "", "=":
-		return col + " = ?", []any{f.Value}, nil
+		return col + " = ?", []any{value}, nil
 	case "!=":
-		return col + " <> ?", []any{f.Value}, nil
+		return col + " <> ?", []any{value}, nil
 	default:
 		return "", nil, invalidInput("attribute filter op %q is not supported; use = (default) or !=", f.Op)
 	}
@@ -348,6 +483,15 @@ func (c *Core) spanConds(tenant, serviceName string, filters []AttrFilter, d Ran
 	return conds, params, nil
 }
 
+// severitySynonyms maps words callers type onto the short severity_text
+// senders usually store. The lookup key is the lowercased input. The literal
+// uppercase is still matched, so the long form is not dropped.
+var severitySynonyms = map[string]string{
+	"warning":     "WARN",
+	"err":         "ERROR",
+	"information": "INFO",
+}
+
 // SearchLogs finds log records matching filters, scoped to tenant — the
 // log-signal counterpart of SearchSpans, with the same filter semantics: an
 // exact service name, a case-insensitive exact severity (matched against
@@ -407,8 +551,17 @@ func (c *Core) SearchLogs(tenant, traceID, serviceName, severity, search string,
 		params = append(params, serviceName)
 	}
 	if severity != "" {
-		conds = append(conds, "UPPER(severity_text) = ?")
-		params = append(params, strings.ToUpper(severity))
+		upper := strings.ToUpper(severity)
+		// A synonym is OR-ed with the literal so severity=warning matches a
+		// row stored as WARN and a row stored as WARNING. severity=error is
+		// not a synonym, so it still matches only ERROR.
+		if canon, ok := severitySynonyms[strings.ToLower(severity)]; ok && canon != upper {
+			conds = append(conds, "(UPPER(severity_text) = ? OR UPPER(severity_text) = ?)")
+			params = append(params, upper, canon)
+		} else {
+			conds = append(conds, "UPPER(severity_text) = ?")
+			params = append(params, upper)
+		}
 	}
 	if search != "" {
 		conds = append(conds, "body ILIKE ?")
@@ -512,10 +665,89 @@ func metricGroupExpr(key string) (expr, alias string, ok bool) {
 // to their own column onto that column, so group_by accepts the same spelling
 // filters already do (a filter on service.name matches the resource
 // attribute). The result column keeps the column's name. Only promoted keys
-// are listed: any other dotted key is still rejected rather than guessed to
-// be a resource attribute.
+// are listed: any other dotted key is still rejected rather than rewritten
+// to a resource attribute. The error suggests resource.<key> instead.
 var otelColumnAliases = map[string]string{
 	"service.name": "service_name",
+}
+
+// groupBySuggestion is appended to a rejected group_by. A near miss of a
+// column or a promoted alias wins over resource.<key>. The key itself is not
+// rewritten: host.name and resource.host.name are different queries.
+func groupBySuggestion(key string) string {
+	col, colD := nearestFolded(key, knownColumns)
+	alias, aliasD := nearestFolded(key, promotedAliasKeys())
+	if colD <= 2 && colD <= aliasD {
+		return "did you mean " + col + "?"
+	}
+	if aliasD <= 2 {
+		return "did you mean " + alias + "?"
+	}
+	if _, promoted := otelColumnAliases[key]; !promoted && strings.Contains(key, ".") && validAttrKey(key) {
+		return "did you mean resource." + key + "?"
+	}
+	return ""
+}
+
+func promotedAliasKeys() []string {
+	keys := make([]string, 0, len(otelColumnAliases))
+	for k := range otelColumnAliases {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// nearestFolded returns the closest name within edit distance 2. Case is
+// folded so the distance is the typo, and the returned name keeps the stored
+// spelling.
+func nearestFolded(key string, names []string) (string, int) {
+	folded := strings.ToLower(key)
+	best := ""
+	bestD := 3
+	for _, n := range names {
+		d := levenshtein(folded, strings.ToLower(n))
+		if d > 2 {
+			continue
+		}
+		if best == "" || d < bestD || (d == bestD && n < best) {
+			best = n
+			bestD = d
+		}
+	}
+	if best == "" {
+		return "", bestD
+	}
+	return best, bestD
+}
+
+func levenshtein(a, b string) int {
+	if a == b {
+		return 0
+	}
+	ar, br := []rune(a), []rune(b)
+	if len(ar) == 0 {
+		return len(br)
+	}
+	if len(br) == 0 {
+		return len(ar)
+	}
+	prev := make([]int, len(br)+1)
+	cur := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		cur[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(br)]
 }
 
 // maxMetricBuckets bounds how many time buckets one step query may produce.
@@ -656,9 +888,13 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	for _, key := range groupKeys {
 		expr, alias, ok := metricGroupExpr(key)
 		if !ok {
-			return nil, nil, invalidInput(
-				"group_by %q is not a groupable column; allowed columns: %s; attr.<key> / attributes.<key> for a data-point attribute; resource.<key> / resource_attributes.<key> for a resource attribute (key charset %s)",
-				key, knownColumnsList(), attrKeyCharset)
+			format := "group_by %q is not a groupable column; allowed columns: %s; attr.<key> / attributes.<key> for a data-point attribute; resource.<key> / resource_attributes.<key> for a resource attribute (key charset %s)"
+			args := []any{key, knownColumnsList(), attrKeyCharset}
+			if sug := groupBySuggestion(key); sug != "" {
+				format += "; %s"
+				args = append(args, sug)
+			}
+			return nil, nil, invalidInput(format, args...)
 		}
 		groupExprs = append(groupExprs, expr)
 		groupAliases = append(groupAliases, alias)

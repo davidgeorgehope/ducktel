@@ -80,6 +80,28 @@ var spanKindShort = map[string]string{
 	"consumer": "SPAN_KIND_CONSUMER",
 }
 
+// canonicalSpanKindFilter maps a span_kind filter value onto the stored
+// column value. "any" is not a filter alias; that word belongs to
+// normalizeSpanKind. An unrecognized value returns the original text and
+// false, and the filter keeps it.
+func canonicalSpanKindFilter(value string) (string, bool) {
+	s := strings.ToLower(strings.TrimSpace(value))
+	if full, ok := spanKindShort[s]; ok {
+		return full, true
+	}
+	rest, prefixed := strings.CutPrefix(s, "span_kind_")
+	if !prefixed {
+		return value, false
+	}
+	if full, ok := spanKindShort[rest]; ok {
+		return full, true
+	}
+	if rest == "unspecified" {
+		return "SPAN_KIND_UNSPECIFIED", true
+	}
+	return value, false
+}
+
 // normalizeSpanKind turns a caller's span_kind into the stored value. The
 // second result reports whether the caller chose a kind explicitly: "any" is
 // explicit (no kind condition), while an empty value lets CompareSpans pick a

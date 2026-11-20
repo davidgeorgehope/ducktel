@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -33,6 +34,18 @@ func TestMetricQueryStepAndResourceGroup(t *testing.T) {
 		if _, ok := r["resource.service.name"]; !ok {
 			t.Errorf("row has no resource.service.name column: %v", r)
 		}
+	}
+}
+
+func TestMetricQueryGroupByHostNameSuggestsResource(t *testing.T) {
+	s := newTestServer(t)
+
+	body, isErr := call(t, s, "metric_query", map[string]any{
+		"tenant": "acme", "metric_name": "http.server.duration", "aggregation": "count",
+		"group_by": "host.name",
+	})
+	if !isErr || !strings.Contains(body, "resource.host.name") {
+		t.Fatalf("isErr=%v body=%s", isErr, body)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -169,7 +170,7 @@ func (s *Server) traceLookup(ctx context.Context, req *sdkmcp.CallToolRequest, a
 		if err != nil {
 			return errResult(err.Error())
 		}
-		return jsonResult(summary, s.traceLink(tenant, args.TraceID))
+		return s.jsonReply(summary, s.traceLink(tenant, args.TraceID), summary.SpanCount == 0, s.emptyRecovery(emptyQuery{tenant: tenant}))
 	case "spans":
 		rows, cols, err := s.core.LookupTrace(args.TraceID, tenant, args.Limit)
 		if err != nil {
@@ -178,7 +179,7 @@ func (s *Server) traceLookup(ctx context.Context, req *sdkmcp.CallToolRequest, a
 		if !askedFor(args.IncludeAttributes, true) {
 			rows, cols = omitColumn(rows, cols, "attributes")
 		}
-		return withLink(rows, cols, s.traceLink(tenant, args.TraceID))
+		return s.rowsReply(rows, cols, s.traceLink(tenant, args.TraceID), s.emptyRecovery(emptyQuery{tenant: tenant}))
 	default:
 		return errResult(fmt.Sprintf("detail %q is not supported; use \"summary\" (the default) for the compact summary, or \"spans\" for every span with attributes", args.Detail))
 	}
@@ -194,7 +195,7 @@ type attrFilter struct {
 
 type spanSearchArgs struct {
 	Tenant            string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
-	Filters           []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together); span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}. Omit to match all spans in the time range."`
+	Filters           []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together); span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}. status_code accepts ok, error, or unset, and span_kind accepts server, client, internal, producer, or consumer. Omit to match all spans in the time range."`
 	ServiceName       string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
 	SinceMinutes      int          `json:"since_minutes,omitempty" jsonschema:"how far back to search, in minutes. Default 60."`
 	UntilMinutes      int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
@@ -219,7 +220,9 @@ func (s *Server) spanSearch(ctx context.Context, req *sdkmcp.CallToolRequest, ar
 	if !askedFor(args.IncludeAttributes, false) {
 		rows, cols = omitColumn(rows, cols, "attributes")
 	}
-	return withLink(rows, cols, s.spanLink(tenant, args))
+	return s.rowsReply(rows, cols, s.spanLink(tenant, args), s.emptyRecovery(emptyQuery{
+		tenant: tenant, window: true, since: args.SinceMinutes, spanFilters: filters,
+	}))
 }
 
 // --- compare_spans ---
@@ -229,7 +232,7 @@ type compareSpansArgs struct {
 	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
 	SpanName     string       `json:"span_name,omitempty" jsonschema:"optional exact span_name to match"`
 	SpanKind     string       `json:"span_kind,omitempty" jsonschema:"which span kind to compare: server (default when span_name is not given), client, internal, producer, consumer, or any"`
-	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together), against span attributes or resource attributes; span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}. Omit to compare all spans in the time range."`
+	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together), against span attributes or resource attributes; span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}. status_code accepts ok, error, or unset, and span_kind accepts server, client, internal, producer, or consumer. Omit to compare all spans in the time range."`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to look, in minutes. Default 60."`
 	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
 	MinMs        *float64     `json:"min_ms,omitempty" jsonschema:"the slow group is spans lasting at least this many milliseconds (inclusive). Omit min_ms and max_ms to use the scope's p95 duration instead."`
@@ -257,7 +260,9 @@ func (s *Server) compareSpans(ctx context.Context, req *sdkmcp.CallToolRequest, 
 	if err != nil {
 		return errResult(err.Error())
 	}
-	return jsonResult(cmp, s.compareLink(tenant, args))
+	return s.jsonReply(cmp, s.compareLink(tenant, args), cmp.SlowN == 0 && cmp.RestN == 0, s.emptyRecovery(emptyQuery{
+		tenant: tenant, window: true, since: args.SinceMinutes, spanFilters: filters,
+	}))
 }
 
 // --- log_search ---
@@ -266,7 +271,7 @@ type logSearchArgs struct {
 	Tenant       string       `json:"tenant" jsonschema:"the tenant to query; only data for this tenant is returned"`
 	TraceID      string       `json:"trace_id,omitempty" jsonschema:"restrict to the records of one trace id. A trace id is a precise key, so this searches the whole history unless since_minutes is given."`
 	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
-	Severity     string       `json:"severity,omitempty" jsonschema:"exact severity to match, case-insensitive: DEBUG, INFO, WARN, ERROR, FATAL. Matches the severity text senders set."`
+	Severity     string       `json:"severity,omitempty" jsonschema:"exact severity to match, case-insensitive: DEBUG, INFO, WARN, ERROR, FATAL. warning, err, and information also match WARN, ERROR, and INFO."`
 	Search       string       `json:"search,omitempty" jsonschema:"case-insensitive substring to find in the log body"`
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together), against record attributes OR resource attributes. Omit to match all records in the time range."`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to search, in minutes. Default 60 (whole history when trace_id is given)."`
@@ -284,7 +289,12 @@ func (s *Server) logSearch(ctx context.Context, req *sdkmcp.CallToolRequest, arg
 	if err != nil {
 		return errResult(err.Error())
 	}
-	return withLink(rows, cols, s.logLink(args.Tenant, args))
+	return s.rowsReply(rows, cols, s.logLink(args.Tenant, args), s.emptyRecovery(emptyQuery{
+		tenant:       args.Tenant,
+		window:       true,
+		since:        args.SinceMinutes,
+		wholeHistory: args.TraceID != "" && args.SinceMinutes <= 0,
+	}))
 }
 
 // --- slow_requests ---
@@ -294,7 +304,7 @@ type slowRequestsArgs struct {
 	MetricName   string       `json:"metric_name,omitempty" jsonschema:"when set, follow this metric's exemplars. Omit to use the slowest root spans instead."`
 	ServiceName  string       `json:"service_name,omitempty" jsonschema:"restrict to one service name"`
 	SpanName     string       `json:"span_name,omitempty" jsonschema:"spans source only: exact span_name to match"`
-	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together); on the spans source span_name, status_code and span_kind match the span's own fields, e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}"`
+	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match (ANDed together); on the spans source span_name, status_code and span_kind match the span's own fields (status_code accepts ok, error, or unset; span_kind accepts server, client, internal, producer, or consumer), e.g. {\"key\":\"span_name\",\"value\":\"POST /mcp\",\"op\":\"!=\"}"`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to look, in minutes. Default 60."`
 	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
 	MinValue     *float64     `json:"min_value,omitempty" jsonschema:"with metric_name: keep exemplars at least this value in the metric's unit; without it: keep spans lasting at least this many milliseconds"`
@@ -322,7 +332,11 @@ func (s *Server) slowRequests(ctx context.Context, req *sdkmcp.CallToolRequest, 
 	if err != nil {
 		return errResult(err.Error())
 	}
-	return jsonResult(rows, s.slowLink(tenant, args))
+	q := emptyQuery{tenant: tenant, window: true, since: args.SinceMinutes}
+	if args.MetricName == "" {
+		q.spanFilters = filters
+	}
+	return s.jsonReply(rows, s.slowLink(tenant, args), len(rows) == 0, s.emptyRecovery(q))
 }
 
 // --- metric_query ---
@@ -333,7 +347,7 @@ type metricQueryArgs struct {
 	Aggregation  string       `json:"aggregation" jsonschema:"one of: avg, sum, min, max, count, p50, p95, p99, buckets (histograms only), exemplars"`
 	SinceMinutes int          `json:"since_minutes,omitempty" jsonschema:"how far back to aggregate, in minutes. Default 60."`
 	UntilMinutes int          `json:"until_minutes,omitempty" jsonschema:"where the window ends, in minutes before now. Default 0 (now). Must be less than since_minutes."`
-	GroupBy      string       `json:"group_by,omitempty" jsonschema:"optional comma-separated grouping keys: a column name (service_name, metric_type, ...; service.name is accepted as service_name), a data-point attribute as attr.<key> / attributes.<key>, or a resource attribute as resource.<key> / resource_attributes.<key>, e.g. resource.host.name groups by the resource attributes JSON key 'host.name'. Result rows carry the key as their column name."`
+	GroupBy      string       `json:"group_by,omitempty" jsonschema:"optional comma-separated grouping keys: a column name (service_name, metric_type, ...; service.name is accepted as service_name), a data-point attribute as attr.<key> / attributes.<key>, or a resource attribute as resource.<key> / resource_attributes.<key>, e.g. resource.host.name groups by the resource attributes JSON key 'host.name'. Bare dotted keys other than service.name are not rewritten. Result rows carry the key as their column name."`
 	Step         string       `json:"step,omitempty" jsonschema:"optional time-series step as a duration (30s, 1m, 5m, 1h) or a whole number of seconds. Adds a leading time column (bucket start in Unix microseconds, UTC) and one row per time bucket and group, ordered by time then groups. At most 1500 buckets per query; exemplars ignores step."`
 	Filters      []attrFilter `json:"filters,omitempty" jsonschema:"attribute key/value pairs to match, ANDed together; matched against data-point attributes OR resource attributes, same as span_search filters. Dotted keys are handled correctly."`
 	MinValue     *float64     `json:"min_value,omitempty" jsonschema:"exemplars only: keep exemplars whose value is at least this (inclusive)"`
@@ -353,7 +367,9 @@ func (s *Server) metricQuery(ctx context.Context, req *sdkmcp.CallToolRequest, a
 	if err != nil {
 		return errResult(err.Error())
 	}
-	return withLink(rows, cols, s.metricLink(tenant, args))
+	return s.rowsReply(rows, cols, s.metricLink(tenant, args), s.emptyRecovery(emptyQuery{
+		tenant: tenant, window: true, since: args.SinceMinutes,
+	}))
 }
 
 // --- shared helpers ---
@@ -365,24 +381,66 @@ func errResult(msg string) (*sdkmcp.CallToolResult, any, error) {
 	}, nil, nil
 }
 
-// withLink is rowsResult plus the dashboard link, when links are on.
-func withLink(rows []map[string]any, cols []string, link string) (*sdkmcp.CallToolResult, any, error) {
+// emptyQuery is what an empty result needs in order to say only the clauses
+// that apply to this call. spanFilters is set when those filters were matched
+// against span columns.
+type emptyQuery struct {
+	tenant       string
+	window       bool
+	since        int
+	wholeHistory bool
+	spanFilters  []telemetry.AttrFilter
+}
+
+// emptyRecovery is the text for an empty result. flush_buffer is named only
+// when this server can call it. The telemetry package does not know the tool.
+func (s *Server) emptyRecovery(q emptyQuery) string {
+	parts := []string{
+		"Queries only return data whose resource attribute tenant.id equals the tenant argument.",
+	}
+	if q.window && q.since <= 0 && !q.wholeHistory {
+		parts = append(parts, "The query used the default window of the last 60 minutes, and since_minutes widens it.")
+	}
+	if s.flusher.Enabled() {
+		parts = append(parts, "Telemetry still in the receiver buffer is invisible until flush. Call flush_buffer and repeat the query.")
+	} else {
+		parts = append(parts, "Telemetry still in the receiver buffer is invisible until the receiver flushes it.")
+	}
+	if hint := telemetry.SpanFilterSpellingHint(q.spanFilters); hint != "" {
+		parts = append(parts, hint)
+	}
+	return strings.Join(parts, " ")
+}
+
+// appendRecovery adds the hint as its own content block. It is not folded
+// into the JSON, so a client that reads only the first block sees the same
+// payload. Dashboard links are appended after this.
+func appendRecovery(res *sdkmcp.CallToolResult, hint string) {
+	res.Content = append(res.Content, &sdkmcp.TextContent{Text: hint})
+}
+
+func (s *Server) rowsReply(rows []map[string]any, cols []string, link, hint string) (*sdkmcp.CallToolResult, any, error) {
 	res, _, err := rowsResult(rows, cols)
 	if err != nil {
 		return res, nil, err
 	}
+	if len(rows) == 0 {
+		appendRecovery(res, hint)
+	}
 	return linked(res, link)
 }
 
-// jsonResult is withLink for a JSON-marshalable object (a summary or a list of
-// structs), rather than engine rows with a separate column order.
-func jsonResult(v any, link string) (*sdkmcp.CallToolResult, any, error) {
+// jsonReply is rowsReply for a JSON object (a summary or a list of structs).
+func (s *Server) jsonReply(v any, link string, empty bool, hint string) (*sdkmcp.CallToolResult, any, error) {
 	out, err := json.Marshal(v)
 	if err != nil {
 		return errResult(fmt.Sprintf("encoding results: %v", err))
 	}
 	res := &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: string(out)}},
+	}
+	if empty {
+		appendRecovery(res, hint)
 	}
 	return linked(res, link)
 }
