@@ -29,6 +29,8 @@ node --test web/dashboard/*.test.mjs
 
 `gofmt -l .` must print nothing. Compaction tests are the slow part of `go test`.
 
+`make tla` model-checks the flush commit, the compaction reader view, and the tenant filter. It needs Java 21. The specs and the command are in [skills/formal-verification/SKILL.md](skills/formal-verification/SKILL.md). CI runs the same command.
+
 The dashboard has no build step and no npm install.
 
 ## Layout
@@ -46,6 +48,7 @@ The dashboard has no build step and no npm install.
 - `internal/testharness` generates the synthetic OTLP that `ducktel testdata` sends.
 - `web/dashboard` is the static dashboard. `web/webui.go` embeds it.
 - `skills/ducktel` is the agent skill and the schema and SQL references.
+- `skills/formal-verification` is the TLA+ check for flush commits, the compaction reader view, and tenant filters. `specs/tla` holds the specs. `scripts/tla/check.sh` runs them.
 
 ## Conventions
 
