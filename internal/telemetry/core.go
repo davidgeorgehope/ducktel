@@ -563,10 +563,89 @@ func metricGroupExpr(key string) (expr, alias string, ok bool) {
 // to their own column onto that column, so group_by accepts the same spelling
 // filters already do (a filter on service.name matches the resource
 // attribute). The result column keeps the column's name. Only promoted keys
-// are listed: any other dotted key is still rejected rather than guessed to
-// be a resource attribute.
+// are listed: any other dotted key is still rejected rather than rewritten
+// to a resource attribute. The error suggests resource.<key> instead.
 var otelColumnAliases = map[string]string{
 	"service.name": "service_name",
+}
+
+// groupBySuggestion is appended to a rejected group_by. A near miss of a
+// column or a promoted alias wins over resource.<key>. The key itself is not
+// rewritten: host.name and resource.host.name are different queries.
+func groupBySuggestion(key string) string {
+	col, colD := nearestFolded(key, knownColumns)
+	alias, aliasD := nearestFolded(key, promotedAliasKeys())
+	if colD <= 2 && colD <= aliasD {
+		return "did you mean " + col + "?"
+	}
+	if aliasD <= 2 {
+		return "did you mean " + alias + "?"
+	}
+	if _, promoted := otelColumnAliases[key]; !promoted && strings.Contains(key, ".") && validAttrKey(key) {
+		return "did you mean resource." + key + "?"
+	}
+	return ""
+}
+
+func promotedAliasKeys() []string {
+	keys := make([]string, 0, len(otelColumnAliases))
+	for k := range otelColumnAliases {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// nearestFolded returns the closest name within edit distance 2. Case is
+// folded so the distance is the typo, and the returned name keeps the stored
+// spelling.
+func nearestFolded(key string, names []string) (string, int) {
+	folded := strings.ToLower(key)
+	best := ""
+	bestD := 3
+	for _, n := range names {
+		d := levenshtein(folded, strings.ToLower(n))
+		if d > 2 {
+			continue
+		}
+		if best == "" || d < bestD || (d == bestD && n < best) {
+			best = n
+			bestD = d
+		}
+	}
+	if best == "" {
+		return "", bestD
+	}
+	return best, bestD
+}
+
+func levenshtein(a, b string) int {
+	if a == b {
+		return 0
+	}
+	ar, br := []rune(a), []rune(b)
+	if len(ar) == 0 {
+		return len(br)
+	}
+	if len(br) == 0 {
+		return len(ar)
+	}
+	prev := make([]int, len(br)+1)
+	cur := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		cur[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(br)]
 }
 
 // maxMetricBuckets bounds how many time buckets one step query may produce.
@@ -707,9 +786,13 @@ func (c *Core) QueryMetricWith(tenant, metricName, aggregation string, sinceMinu
 	for _, key := range groupKeys {
 		expr, alias, ok := metricGroupExpr(key)
 		if !ok {
-			return nil, nil, invalidInput(
-				"group_by %q is not a groupable column; allowed columns: %s; attr.<key> / attributes.<key> for a data-point attribute; resource.<key> / resource_attributes.<key> for a resource attribute (key charset %s)",
-				key, knownColumnsList(), attrKeyCharset)
+			format := "group_by %q is not a groupable column; allowed columns: %s; attr.<key> / attributes.<key> for a data-point attribute; resource.<key> / resource_attributes.<key> for a resource attribute (key charset %s)"
+			args := []any{key, knownColumnsList(), attrKeyCharset}
+			if sug := groupBySuggestion(key); sug != "" {
+				format += "; %s"
+				args = append(args, sug)
+			}
+			return nil, nil, invalidInput(format, args...)
 		}
 		groupExprs = append(groupExprs, expr)
 		groupAliases = append(groupAliases, alias)

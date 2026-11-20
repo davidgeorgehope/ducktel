@@ -346,7 +346,18 @@ func TestGroupByServiceNameAlias(t *testing.T) {
 		t.Fatalf("group_by service.name = %v %v, want the service_name answer %v %v", gotCols, got, wantCols, want)
 	}
 
-	if _, _, err := c.QueryMetricWith("acme", "cpu", "avg", 60, "host.name", nil, MetricOpts{}); err == nil {
-		t.Fatal("group_by host.name: want an error (not a promoted key; resource.host.name is the way)")
+	_, _, err = c.QueryMetricWith("acme", "cpu", "avg", 60, "host.name", nil, MetricOpts{})
+	if err == nil || !strings.Contains(err.Error(), "resource.host.name") {
+		t.Fatalf("group_by host.name: %v, want an error suggesting resource.host.name", err)
+	}
+
+	_, _, err = c.QueryMetricWith("acme", "cpu", "avg", 60, "service_nam", nil, MetricOpts{})
+	if err == nil || !strings.Contains(err.Error(), "did you mean service_name?") {
+		t.Fatalf("group_by service_nam: %v, want a suggestion of service_name", err)
+	}
+
+	_, _, err = c.QueryMetricWith("acme", "cpu", "avg", 60, "service.nam", nil, MetricOpts{})
+	if err == nil || !strings.Contains(err.Error(), "did you mean service.name?") || strings.Contains(err.Error(), "resource.service") {
+		t.Fatalf("group_by service.nam: %v, want the promoted alias, not a resource key", err)
 	}
 }
