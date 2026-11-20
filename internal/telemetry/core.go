@@ -72,7 +72,6 @@ func canonicalStatusCode(value string) (stored string, recognized bool) {
 	return stored, true
 }
 
-// spelling is one form a caller might type and the stored value to suggest.
 type spelling struct {
 	name      string
 	canonical string
@@ -154,11 +153,11 @@ func nearSpelling(value string, cands []spelling) string {
 }
 
 func spellingSentence(key, value string, stored []string, suggestion string) string {
-	msg := fmt.Sprintf("%s %q is not a recognized spelling. Stored values are %s.", key, value, joinAnd(stored))
-	if suggestion != "" {
-		msg += " did you mean " + suggestion + "?"
+	msg := fmt.Sprintf("%s %q is not a recognized spelling. Stored values are %s", key, value, joinAnd(stored))
+	if suggestion == "" {
+		return msg + "."
 	}
-	return msg
+	return msg + "; did you mean " + suggestion + "?"
 }
 
 func joinAnd(items []string) string {
