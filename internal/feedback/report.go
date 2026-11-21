@@ -21,10 +21,6 @@ const (
 	ServiceName = "ducktel.agent_feedback"
 	// ScopeName is the instrumentation scope on the stored log.
 	ScopeName = "ducktel.feedback"
-
-	// BufferNote is the result text when a report was posted to a receiver
-	// that has no flush URL, so the record is still in that process's buffer.
-	BufferNote = "record stays in the receiver buffer until the next flush"
 )
 
 // Category is why the agent filed the report.

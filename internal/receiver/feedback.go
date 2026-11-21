@@ -20,7 +20,10 @@ func (r *Receiver) writeFeedback(ctx context.Context, report feedback.Report) er
 		return errors.New("flush is not configured")
 	}
 	r.consumer.AddLogs([]writer.LogRecord{report.LogRecord(time.Now())})
-	return r.flush()
+	if err := r.flush(); err != nil {
+		return &feedback.Accepted{Err: err}
+	}
+	return nil
 }
 
 func (r *Receiver) handleFeedback(w http.ResponseWriter, req *http.Request) {
@@ -54,7 +57,8 @@ func (r *Receiver) handleFeedback(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(struct {
-		ReportID string `json:"report_id"`
-		Status   string `json:"status"`
-	}{res.ReportID, "stored"})
+		ReportID   string `json:"report_id"`
+		Status     string `json:"status"`
+		FlushError string `json:"flush_error,omitempty"`
+	}{res.ReportID, "stored", res.FlushError})
 }

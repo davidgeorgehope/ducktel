@@ -310,8 +310,10 @@ ducktel mcp --data-dir /data --feedback-url http://127.0.0.1:4318/feedback
 ```
 
 A second `ducktel serve` on that data directory will not store the report. It exits because the
-directory is locked. At most 20 accepted reports per tenant are stored per rolling hour. The window
-is in memory, and a restart clears it. A retry with the same `report_id` does not write a second log.
+directory is locked. `POST /feedback` flushes that log before it returns success, so the result
+does not say the record is still buffered. A flush error still keeps the `report_id`. A retry does
+not write a second log. At most 20 accepted reports per tenant are stored per rolling hour. The
+window is in memory, and a restart clears it.
 
 Clients that cannot call a tool can force a flush directly:
 

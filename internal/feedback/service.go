@@ -52,17 +52,30 @@ type Options struct {
 	// HTTPClient is used for the feedback POST and the sink. Nil uses a
 	// client with a 10s timeout that does not follow redirects.
 	HTTPClient *http.Client
-	// AfterStore runs after a successful POST to Endpoint. Nil means the
-	// record stays in the receiver buffer.
-	AfterStore func(context.Context) error
+}
+
+// Accepted marks a report the store has taken. A later flush may still have
+// failed. Submit remembers the id and does not append the report again.
+type Accepted struct{ Err error }
+
+func (e *Accepted) Error() string {
+	if e == nil || e.Err == nil {
+		return "feedback accepted"
+	}
+	return e.Err.Error()
+}
+
+func (e *Accepted) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // Service accepts validated reports: rate limit, one store, then one sink.
 type Service struct {
-	store  store
-	sink   Sink
-	remote bool
-	after  func(context.Context) error
+	store store
+	sink  Sink
 
 	mu       sync.Mutex
 	tenants  map[string]*tenantWindow
@@ -135,7 +148,6 @@ func New(opt Options) (*Service, error) {
 	}
 
 	var st store
-	remote := false
 	switch {
 	case opt.DataDir != "":
 		st = directStore{dir: opt.DataDir}
@@ -146,14 +158,11 @@ func New(opt Options) (*Service, error) {
 			return nil, err
 		}
 		st = remoteStore{url: opt.Endpoint, token: opt.Token, client: client}
-		remote = true
 	}
 
 	return &Service{
 		store:    st,
 		sink:     sink,
-		remote:   remote,
-		after:    opt.AfterStore,
 		tenants:  make(map[string]*tenantWindow),
 		seen:     make(map[memKey]memory),
 		inflight: make(map[memKey]*flight),
@@ -227,7 +236,8 @@ func (s *Service) Submit(ctx context.Context, r Report) (Result, error) {
 		s.mu.Unlock()
 
 		err := s.store.Write(ctx, r)
-		if err != nil {
+		var taken *Accepted
+		if err != nil && !errors.As(err, &taken) {
 			s.mu.Lock()
 			s.release(r.Tenant, slotID)
 			delete(s.inflight, key)
@@ -236,6 +246,9 @@ func (s *Service) Submit(ctx context.Context, r Report) (Result, error) {
 			return Result{}, err
 		}
 		res := s.finish(ctx, r)
+		if taken != nil {
+			res.FlushError = taken.Error()
+		}
 		s.mu.Lock()
 		s.remember(key, r, res)
 		delete(s.inflight, key)
@@ -254,13 +267,6 @@ func (s *Service) finish(ctx context.Context, r Report) Result {
 	}
 	if s.sink != nil {
 		res.Sink = s.sink.Kind()
-	}
-	if s.remote {
-		if s.after == nil {
-			res.Note = BufferNote
-		} else if err := s.after(ctx); err != nil {
-			res.FlushError = err.Error()
-		}
 	}
 	res.SinkError = s.deliver(ctx, r)
 	return res
@@ -425,6 +431,12 @@ func (s remoteStore) Write(ctx context.Context, r Report) error {
 			msg = resp.Status
 		}
 		return fmt.Errorf("feedback POST rejected: %s", msg)
+	}
+	var parsed struct {
+		FlushError string `json:"flush_error"`
+	}
+	if json.Unmarshal(slurp, &parsed) == nil && parsed.FlushError != "" {
+		return &Accepted{Err: errors.New(parsed.FlushError)}
 	}
 	return nil
 }

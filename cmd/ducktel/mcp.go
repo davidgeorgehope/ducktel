@@ -178,7 +178,7 @@ Examples:
 			if bearer == "" {
 				bearer = os.Getenv("DUCKTEL_FLUSH_TOKEN")
 			}
-			feedbackSvc, err := newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken, flushURL, token)
+			feedbackSvc, err := newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken)
 			if err != nil {
 				return err
 			}
@@ -234,7 +234,7 @@ Examples:
 	return cmd
 }
 
-func newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken, flushURL, mcpToken string) (*feedback.Service, error) {
+func newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken string) (*feedback.Service, error) {
 	opt := feedback.Options{
 		Token:       bearer,
 		WebhookURL:  webhookURL,
@@ -243,10 +243,6 @@ func newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, gi
 	}
 	if feedbackURL != "" {
 		opt.Endpoint = feedbackURL
-		if flushURL != "" {
-			flusher := telemetry.NewFlusher(flushURL, mcpToken)
-			opt.AfterStore = flusher.Flush
-		}
 	} else {
 		opt.DataDir = dataDir
 	}

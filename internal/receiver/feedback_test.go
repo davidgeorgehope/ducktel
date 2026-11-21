@@ -3,6 +3,7 @@ package receiver
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -112,6 +113,50 @@ func postFeedbackBody(t *testing.T, base, token string, body []byte) (map[string
 	json.NewDecoder(resp.Body).Decode(&decoded)
 	return decoded, resp.StatusCode
 }
+
+func TestFlushFailureDoesNotStoreTheReportTwice(t *testing.T) {
+	dir := t.TempDir()
+	w := writer.New(dir, time.Hour, 1000)
+	logs := 0
+	consumer := &countLogs{n: &logs, inner: w}
+	r, err := New("localhost", 0, consumer, "", "", func() error {
+		return errors.New("disk full")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(r.server.Handler)
+	t.Cleanup(srv.Close)
+
+	body := []byte(`{"report_id":"fb-1","tenant":"acme","tool_name":"log_search","category":"bug","severity":"high","summary":"rows hid the error","details":"empty list","proposed_fix":"show the error"}`)
+	res, status := postFeedbackBody(t, srv.URL, "", body)
+	if status != http.StatusOK || res["flush_error"] != "disk full" || res["status"] != "stored" {
+		t.Fatalf("first status %d body %v", status, res)
+	}
+	res2, status2 := postFeedbackBody(t, srv.URL, "", body)
+	if status2 != http.StatusOK || res2["report_id"] != "fb-1" || res2["flush_error"] != "disk full" {
+		t.Fatalf("retry status %d body %v", status2, res2)
+	}
+	if logs != 1 {
+		t.Fatalf("appended %d logs, want 1", logs)
+	}
+}
+
+type countLogs struct {
+	n     *int
+	inner interface {
+		Add([]writer.TraceSpan)
+		AddLogs([]writer.LogRecord)
+		AddMetrics([]writer.MetricPoint)
+	}
+}
+
+func (c *countLogs) Add(spans []writer.TraceSpan) { c.inner.Add(spans) }
+func (c *countLogs) AddLogs(recs []writer.LogRecord) {
+	*c.n += len(recs)
+	c.inner.AddLogs(recs)
+}
+func (c *countLogs) AddMetrics(points []writer.MetricPoint) { c.inner.AddMetrics(points) }
 
 func number(v any) int64 {
 	switch n := v.(type) {

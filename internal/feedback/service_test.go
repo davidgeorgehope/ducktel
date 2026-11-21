@@ -285,7 +285,7 @@ func TestLockedDirectoryWritesNothing(t *testing.T) {
 	}
 }
 
-func TestRemotePostFlushesAndRetriesSinkWithoutASecondPost(t *testing.T) {
+func TestRemotePostRetriesSinkWithoutASecondPost(t *testing.T) {
 	var posts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		posts.Add(1)
@@ -305,7 +305,6 @@ func TestRemotePostFlushesAndRetriesSinkWithoutASecondPost(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var flushes atomic.Int32
 	var sinkCalls atomic.Int32
 	svc, err := feedback.New(feedback.Options{
 		Endpoint:   srv.URL + "?token=supersecret",
@@ -318,10 +317,6 @@ func TestRemotePostFlushesAndRetriesSinkWithoutASecondPost(t *testing.T) {
 			}
 			return http.DefaultTransport.RoundTrip(r)
 		})},
-		AfterStore: func(context.Context) error {
-			flushes.Add(1)
-			return errors.New("flush rejected")
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -334,18 +329,18 @@ func TestRemotePostFlushesAndRetriesSinkWithoutASecondPost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Stored || res.Sink != "webhook" || res.FlushError == "" || res.SinkError == "" {
+	if !res.Stored || res.Sink != "webhook" || res.FlushError != "" || res.SinkError == "" || res.Note != "" {
 		t.Fatalf("result = %+v", res)
 	}
-	if strings.Contains(res.SinkError, "supersecret") || strings.Contains(res.FlushError, "supersecret") {
+	if strings.Contains(res.SinkError, "supersecret") {
 		t.Fatalf("error leaked the query secret: %+v", res)
 	}
 	retry, err := svc.Submit(context.Background(), r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if posts.Load() != 1 || flushes.Load() != 1 || sinkCalls.Load() != 2 {
-		t.Fatalf("posts=%d flushes=%d sinks=%d, want 1, 1, 2", posts.Load(), flushes.Load(), sinkCalls.Load())
+	if posts.Load() != 1 || sinkCalls.Load() != 2 {
+		t.Fatalf("posts=%d sinks=%d, want 1, 2", posts.Load(), sinkCalls.Load())
 	}
 	if !retry.Stored || retry.SinkError == "" {
 		t.Fatalf("retry = %+v", retry)
@@ -377,9 +372,10 @@ func TestUnsetSinkMakesNoOutboundRequest(t *testing.T) {
 	}
 }
 
-func TestNoFlushURLNotesTheBuffer(t *testing.T) {
+func TestRemoteSuccessDoesNotClaimTheRecordIsBuffered(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"report_id":"id","status":"stored"}`))
 	}))
 	defer srv.Close()
 	svc, err := feedback.New(feedback.Options{Endpoint: srv.URL})
@@ -394,8 +390,68 @@ func TestNoFlushURLNotesTheBuffer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Stored || res.Note != feedback.BufferNote || res.FlushError != "" {
+	if !res.Stored || res.Note != "" || res.FlushError != "" {
 		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestFlushErrorKeepsTheReportID(t *testing.T) {
+	var writes atomic.Int32
+	svc, err := feedback.New(feedback.Options{Write: func(context.Context, feedback.Report) error {
+		writes.Add(1)
+		return &feedback.Accepted{Err: errors.New("disk full")}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := feedback.ParseFields(validFields("id", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := svc.Submit(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Stored || res.FlushError != "disk full" {
+		t.Fatalf("result = %+v", res)
+	}
+	again, err := svc.Submit(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.Stored || again.FlushError != "disk full" || writes.Load() != 1 {
+		t.Fatalf("retry = %+v writes = %d", again, writes.Load())
+	}
+}
+
+func TestRemoteFlushErrorDoesNotPostTwice(t *testing.T) {
+	var posts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"report_id":"id","status":"stored","flush_error":"disk full"}`))
+	}))
+	defer srv.Close()
+	svc, err := feedback.New(feedback.Options{Endpoint: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := feedback.ParseFields(validFields("id", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := svc.Submit(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Stored || res.FlushError != "disk full" || res.Note != "" {
+		t.Fatalf("result = %+v", res)
+	}
+	if _, err := svc.Submit(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if posts.Load() != 1 {
+		t.Fatalf("posts = %d, want 1", posts.Load())
 	}
 }
 
