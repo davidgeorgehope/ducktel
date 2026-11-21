@@ -211,6 +211,10 @@ func TestSQLQueryRejectsWrites(t *testing.T) {
 	if got := numberValue(t, rows[0]["n"]); got != 2 {
 		t.Fatalf("count after write attempts = %v, want 2", got)
 	}
+	rows, _ = querySQL(t, c, "acme", "SELECT count(*) AS n FROM spans -- trailing", 0)
+	if got := numberValue(t, rows[0]["n"]); got != 2 {
+		t.Fatalf("count after line comment = %v, want 2", got)
+	}
 }
 
 func TestSQLQueryRejectsFileReads(t *testing.T) {
