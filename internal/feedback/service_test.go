@@ -99,6 +99,48 @@ func TestRateLimitIsPerTenantAndSkipsInvalidAndRetries(t *testing.T) {
 	}
 }
 
+func TestRotatingTenantsHitTheGlobalCap(t *testing.T) {
+	var writes atomic.Int32
+	svc := memService(t, func(feedback.Report) { writes.Add(1) })
+	ctx := context.Background()
+
+	for i := 0; i < 30; i++ {
+		r, err := feedback.ParseFields(validFields(fmt.Sprintf("id-%d", i), fmt.Sprintf("tenant-%d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := svc.Submit(ctx, r)
+		if err != nil || !res.Stored {
+			t.Fatalf("report %d: %v %+v", i, err, res)
+		}
+	}
+	if writes.Load() != 30 {
+		t.Fatalf("writes = %d, want 30", writes.Load())
+	}
+
+	blocked, err := feedback.ParseFields(validFields("id-31", "tenant-31"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Submit(ctx, blocked); !errors.Is(err, feedback.ErrRateLimited) {
+		t.Fatalf("31st tenant = %v, want rate limit", err)
+	}
+	if writes.Load() != 30 {
+		t.Fatalf("writes after the cap = %d, want 30", writes.Load())
+	}
+
+	retry, err := feedback.ParseFields(validFields("id-0", "tenant-0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Submit(ctx, retry); err != nil {
+		t.Fatalf("retry of a stored report: %v", err)
+	}
+	if writes.Load() != 30 {
+		t.Fatalf("retry wrote again: %d", writes.Load())
+	}
+}
+
 func TestSameReportIDWritesOneLog(t *testing.T) {
 	var writes atomic.Int32
 	started := make(chan struct{})

@@ -81,14 +81,18 @@ func TestGitHubIssueAndNon2xx(t *testing.T) {
 		agent = r.Header.Get("User-Agent")
 		raw, _ := io.ReadAll(r.Body)
 		var payload struct {
-			Title string `json:"title"`
-			Body  string `json:"body"`
+			Title  string   `json:"title"`
+			Body   string   `json:"body"`
+			Labels []string `json:"labels"`
 		}
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			t.Errorf("json: %v", err)
 		}
 		title = payload.Title
 		body = payload.Body
+		if len(payload.Labels) != 1 || payload.Labels[0] != "feedback" {
+			t.Errorf("labels = %#v, want [feedback]", payload.Labels)
+		}
 		return &http.Response{
 			StatusCode: http.StatusForbidden,
 			Status:     "403 Forbidden",
