@@ -5,7 +5,7 @@ description: >
   Use when querying OTLP traces, logs, or metrics via the ducktel CLI or its MCP tools, writing DuckDB SQL against Parquet-stored
   telemetry, diagnosing issues from OTel data, developing the ducktel Go codebase, or running the OTLP receiver.
   TRIGGER when: code imports ducktel packages, user mentions ducktel commands (serve, query, traces, logs,
-  metrics, schema, services, mcp), or user works with the ducktel project directory.
+  metrics, schema, services, feedback, mcp), or user works with the ducktel project directory.
 ---
 
 # ducktel
@@ -44,11 +44,11 @@ ducktel serve --flush-interval 10s     # flush every 10 seconds
 ducktel serve --buffer-size 5000       # records per signal that force an early flush
 ducktel serve --retention 30d          # delete date-partition directories older than 30 days
 ducktel serve --auth-token secret      # require a bearer token on OTLP ingest
-ducktel serve --flush-token secret2    # ...and a different one on POST /flush
+ducktel serve --flush-token secret2    # ...and a different one on POST /flush and POST /feedback
 ```
 
 Endpoints: `POST /v1/traces`, `POST /v1/logs`, `POST /v1/metrics`, `GET /health`,
-and `POST /flush` (see Authentication).
+`POST /flush`, and `POST /feedback` (see Authentication).
 
 
 #### Retention
@@ -96,10 +96,12 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer secret"
 - `GET /health` stays unauthenticated so liveness/readiness probes keep working.
 - A 401 is returned for a missing, malformed, or wrong credential. The scheme
   name is case-insensitive; the `Bearer ` prefix is required.
-- **`POST /flush` is a separate credential.** It takes `--flush-token` /
+- **`POST /flush` and `POST /feedback` share a credential.** It takes `--flush-token` /
   `DUCKTEL_FLUSH_TOKEN`, falling back to `DUCKTEL_MCP_TOKEN`, so the process that
-  queries can also ask for a flush without being handed the write token. The
-  ingest token is *not* accepted there. See the MCP section for the full model.
+  queries can ask for a flush without being handed the OTLP ingest token. The
+  ingest token is *not* accepted on either route. `POST /feedback` stores one
+  feedback log. It does not accept spans, metrics, or arbitrary logs. See the
+  MCP section for the full model.
 - **TLS is not terminated by ducktel.** If the token would cross an untrusted
   network, front the receiver with a proxy or ingress. OTLP/HTTP is
   request/response rather than a persistent connection, so a terminating proxy is
@@ -158,11 +160,29 @@ Show column names and types. Default view: `traces`. Valid: `traces`, `logs`, `m
 
 List distinct service names from traces.
 
+### `ducktel feedback`
+
+List or export agent feedback stored as logs for one tenant.
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--tenant` | Tenant id. Required | `--tenant acme` |
+| `--since` | Reports newer than this duration. Default `168h`. `0` means no lower bound | `--since 24h` |
+| `--limit` | Maximum reports. Default 50, cap 1000 | `--limit 100` |
+| `--as` | `export` only. `markdown` (default) or `json` | `--as json` |
+
+`list` prints through the global `--format`. `export` defaults to markdown a person can paste into a GitHub issue. `--as json` prints a JSON array of the report fields, not raw log rows. A row for another tenant is not returned.
+
+```bash
+ducktel feedback list --tenant acme
+ducktel feedback export --tenant acme --since 0 --as json
+```
+
 ### `ducktel mcp`
 
 Serve telemetry queries over the Model Context Protocol, for agent consumers.
 
-Fifteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other fourteen are always registered.
+Sixteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other fifteen, including `sql_query` and `submit_feedback`, are always registered. `save_query` will not store `submit_feedback`.
 
 | Tool | Purpose |
 |------|---------|
@@ -177,9 +197,10 @@ Fifteen tools. They know about spans, attributes, logs, metrics, and time, and t
 | `metric_query(metric_name, aggregation, since_minutes, group_by, step, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99, buckets (histograms), exemplars; `group_by` accepts columns, `attr.<key>` and `resource.<key>`; `step` returns a time series |
 | `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, untraced time, top repeated span groups with their self time, the 3 slowest spans, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
 | `list_saved_queries(tenant)` | saved MCP queries for one tenant: `name`, `description`, `tool`, and `arguments`, sorted by name |
-| `save_query(tenant, name, tool, arguments, description)` | save a read tool invocation for this tenant. Checks the tool and the arguments before writing. Saving the same name again replaces that query |
+| `save_query(tenant, name, tool, arguments, description)` | save a read tool invocation for this tenant. Checks the tool and the arguments before writing. Saving the same name again replaces that query. Will not store `submit_feedback` |
 | `run_saved_query(tenant, name, since_minutes, until_minutes)` | run one saved query by name. `since_minutes` and `until_minutes`, when set, override the stored window for this run only. An unknown name lists the names saved for that tenant |
 | `sql_query(sql, tenant, limit)` | one read-only SELECT or WITH. The views are `spans`, `logs`, and `metrics`. `traces` is not a view. Timestamps are Unix microseconds. `limit` defaults to 200 and is rejected above 1000. No default time window |
+| `submit_feedback(tenant, tool_name, category, severity, summary, details, proposed_fix)` | call this after a ducktel tool returned confusing, unhelpful, or wrong output, or a capability was missing. Include a concrete proposed fix. Stored as a log for this tenant under service `ducktel.agent_feedback`. `log_search` and the logs dashboard show it. Nothing is sent off the machine unless a sink is configured |
 | `flush_buffer()` | make just-received telemetry queryable now (see Flush semantics) |
 
 A filter object is `{key, value, op}`. `op` is `=` (default) or `!=`. `!=` drops records where the key has that value, and keeps records that lack the key.
@@ -210,7 +231,7 @@ in the JSON schema, so a client cannot omit it — and those tools hard-filter o
 `tenant.id` resource attribute. A caller can restrict its scope but never widen it.
 `list_tenants` takes no tenant and returns only tenant ids. `flush_buffer` takes no
 arguments and touches no data. `list_saved_queries`, `save_query`, and `run_saved_query`
-are per tenant. `save_query` rejects `flush_buffer`, `list_tenants`, and the saved-query
+are per tenant. `save_query` rejects `flush_buffer`, `list_tenants`, `submit_feedback`, and the saved-query
 tools themselves. `run_saved_query` can override the time window for that run. Tools
 with no window reject the override, and `list_attribute_keys` rejects `until_minutes`.
 
@@ -251,10 +272,11 @@ separate trust domains:
 | token | grants | held by |
 |-------|--------|---------|
 | `DUCKTEL_AUTH_TOKEN` | **write** — OTLP ingest | senders |
-| `DUCKTEL_MCP_TOKEN` | **read** — MCP queries, and `POST /flush` | consumers |
+| `DUCKTEL_MCP_TOKEN` | **read** — MCP queries, `POST /flush`, and `POST /feedback` | consumers |
 
 Use a different value for each. A compromised sender must not gain read access to
-every tenant, and a read token must not be able to forge telemetry. Verified: the
+every tenant. The flush token can store one feedback log and cannot write arbitrary
+spans, metrics, or logs. The ingest token is rejected on `/feedback`. Verified: the
 read token is rejected (401) on `/v1/traces`, and the write token is rejected (401)
 on `/mcp` and on `/flush`.
 
@@ -272,12 +294,24 @@ flush interval. Three triggers:
 
 `--flush-url` is what enables the tool; without it the tool is not advertised at all.
 
-**`POST /flush` is authorised by the MCP token, not the OTLP token.** The query
-container is given only the read token, so it can ask the writer for a flush but can
-never write telemetry. The writer holds both tokens precisely so it can accept that
-call. It sits on the OTLP port, so wherever OTLP is exposed, `/flush` is reachable
-too — token-guarded, and unable to write. Block the path at the ingress if that is
-unwanted.
+**`POST /flush` and `POST /feedback` are authorised by the flush token, not the OTLP token.** The query
+container is given only that token, so it can ask the writer for a flush. `/feedback` stores one
+agent-feedback log and does not accept OTLP spans, metrics, or arbitrary logs. The writer holds both
+tokens precisely so it can accept the flush call. Both routes sit on the OTLP port, so wherever OTLP
+is exposed they are reachable too — token-guarded. Block the path at the ingress if that is unwanted.
+
+**Feedback stays local unless a sink is on.** The sink is off by default. `--feedback-webhook-url`, or
+`--feedback-github-repo` with `--feedback-github-token`, sends the agent-written text off the machine.
+ducktel does not scrub that text. Setting both sinks makes `ducktel mcp` fail at startup. With no
+`--feedback-url`, the MCP process writes its data directory. To store into a running receiver:
+
+```bash
+ducktel mcp --data-dir /data --feedback-url http://127.0.0.1:4318/feedback
+```
+
+A second `ducktel serve` on that data directory will not store the report. It exits because the
+directory is locked. At most 20 accepted reports per tenant are stored per rolling hour. The window
+is in memory, and a restart clears it. A retry with the same `report_id` does not write a second log.
 
 Clients that cannot call a tool can force a flush directly:
 

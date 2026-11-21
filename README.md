@@ -179,7 +179,7 @@ ducktel serve --retention 30d    # recommended for long-lived / container deploy
 ducktel serve --host 0.0.0.0 --auth-token "$DUCKTEL_AUTH_TOKEN"   # network-exposed, authenticated
 ```
 
-Accepts `POST /v1/traces`, `POST /v1/logs`, `POST /v1/metrics` — protobuf and JSON. Also serves `GET /health` (always unauthenticated, for liveness/readiness probes) and `POST /flush` (forces an immediate flush of buffered records; see Authentication below).
+Accepts `POST /v1/traces`, `POST /v1/logs`, `POST /v1/metrics` — protobuf and JSON. Also serves `GET /health` (always unauthenticated, for liveness/readiness probes), `POST /flush` (forces an immediate flush of buffered records; see Authentication below), and `POST /feedback` (stores one agent-feedback log, authorised with the flush token, not the OTLP ingest token).
 
 Binds to `localhost` by default, so a local developer instance isn't silently exposed to the network — pass `--host 0.0.0.0` for containers/VMs.
 
@@ -194,7 +194,7 @@ ducktel serve --host 0.0.0.0 --auth-token "$DUCKTEL_AUTH_TOKEN"
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $DUCKTEL_AUTH_TOKEN"
 ```
 
-`POST /flush` takes a **separate** token (`--flush-token` / `DUCKTEL_FLUSH_TOKEN`, falling back to `DUCKTEL_MCP_TOKEN`): it's a control action requested by the query side, not a data-ingest action, so the process that queries can trigger a flush without ever holding the write token. If the token would cross an untrusted network, put a TLS-terminating proxy in front — ducktel does not terminate TLS itself.
+`POST /flush` and `POST /feedback` take a **separate** token (`--flush-token` / `DUCKTEL_FLUSH_TOKEN`, falling back to `DUCKTEL_MCP_TOKEN`). `/flush` is a control action requested by the query side, not a data-ingest action, so the process that queries can trigger a flush without holding the OTLP ingest token. `/feedback` stores one feedback log and rejects the ingest token. It does not accept spans, metrics, or arbitrary logs. If the token would cross an untrusted network, put a TLS-terminating proxy in front — ducktel does not terminate TLS itself.
 
 ### `ducktel query`
 
@@ -253,6 +253,17 @@ ducktel saved run-all
 ducktel saved delete <name>
 ```
 
+### `ducktel feedback`
+
+List or export agent feedback stored as logs for one tenant. Reports are logs under service `ducktel.agent_feedback`.
+
+```bash
+ducktel feedback list --tenant acme [--since 168h] [--limit 50]
+ducktel feedback export --tenant acme [--since 168h] [--limit 50] [--as markdown|json]
+```
+
+`list` uses the global `--format`. `export` defaults to markdown a person can paste into a GitHub issue. `--as json` prints a JSON array of the report fields. `--since 0` means no time lower bound. The default window is 168 hours. The default limit is 50 and the cap is 1000. A row for another tenant is not returned.
+
 ### `ducktel mcp`
 
 Serve telemetry queries over the Model Context Protocol, for agent consumers that speak MCP instead of shelling out to the CLI.
@@ -270,7 +281,7 @@ Register it with an MCP client, e.g. Claude Code:
 claude mcp add ducktel -- ducktel mcp --data-dir /data
 ```
 
-Fifteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other fourteen are always registered.
+Sixteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other fifteen, including `sql_query` and `submit_feedback`, are always registered. `save_query` will not store `submit_feedback`.
 
 | Tool | Purpose |
 |------|---------|
@@ -285,9 +296,10 @@ Fifteen tools. They know about spans, attributes, logs, metrics, and time, and t
 | `metric_query(metric_name, aggregation, since_minutes, group_by, step, tenant, filters)` | metric aggregation: avg, sum, min, max, count, p50, p95, p99 — `group_by` accepts columns (the OTel key `service.name` names the `service_name` column), `attr.<key>` data-point attributes and `resource.<key>` resource attributes such as `resource.host.name`; `step` (30s, 1m, 5m, 1h) returns a time series with a leading `time` column; `filters` match attributes or resource attributes. Histograms are aggregated over observations (count, sum, avg, min, max, percentiles from buckets, `buckets` for the distribution; cumulative series become increments). `exemplars` returns the concrete requests senders attached to the points (`trace_id`, `span_id`, value), slowest first, narrowed by `min_value`/`max_value`. On a gauge, `count` counts exported points, not events |
 | `slow_requests(metric_name, service_name, span_name, filters, since_minutes, tenant, min_value, max_value, limit)` | the slowest requests in one call, each with a brief trace summary (root, span count, untraced time, top repeated span groups with their self time, the 3 slowest spans, errors, first WARN-or-above log). With `metric_name` it follows that metric's exemplars, with min/max in the metric's unit; otherwise it returns the slowest root spans, with min/max in milliseconds. Default 5, cap 20 |
 | `list_saved_queries(tenant)` | saved MCP queries for one tenant: `name`, `description`, `tool`, and `arguments`, sorted by name |
-| `save_query(tenant, name, tool, arguments, description)` | save a read tool invocation for this tenant after checking the tool and the arguments. The same name replaces the previous query |
+| `save_query(tenant, name, tool, arguments, description)` | save a read tool invocation for this tenant after checking the tool and the arguments. The same name replaces the previous query. Will not store `submit_feedback` |
 | `run_saved_query(tenant, name, since_minutes, until_minutes)` | run one saved query by name. Optional `since_minutes` and `until_minutes` override the stored window for this run only. An unknown name lists the names saved for that tenant |
 | `sql_query(sql, tenant, limit)` | one read-only SELECT or WITH. The views are `spans`, `logs`, and `metrics`. `traces` is not a view. Timestamps are Unix microseconds. `limit` defaults to 200 and is rejected above 1000. No default time window |
+| `submit_feedback(tenant, tool_name, category, severity, summary, details, proposed_fix)` | report a tool that was confusing, unhelpful, wrong, or missing, with a concrete proposed fix. Stored as a log for this tenant under service `ducktel.agent_feedback`. `log_search` and the logs dashboard show it. Nothing is sent off the machine unless a sink is configured |
 | `flush_buffer()` | make just-received telemetry queryable now (only advertised when `--flush-url` is set) |
 
 `span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` also take `until_minutes` (default 0, meaning now). It must be less than `since_minutes`. `list_attribute_keys` samples `since_minutes` (default 60) and does not take `until_minutes`. `trace_lookup`, `sql_query`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` have no time window. Saved queries are per tenant, in a file separate from `ducktel saved` SQL. `run_saved_query` can override that window for one run. A tool with no window rejects the override.
@@ -320,7 +332,9 @@ The parameters mean the same as in the MCP tools.
 
 **`tenant` is required on every query tool and on `list_services`, `list_metric_names`, and `list_attribute_keys`** — it's in the JSON schema, so a client cannot omit it — and those tools hard-filter on the `tenant.id` resource attribute. A caller can narrow its scope but never widen it. `list_tenants` takes no tenant and returns only tenant ids.
 
-**The MCP token is a separate secret from the OTLP token.** `DUCKTEL_AUTH_TOKEN` grants write (OTLP ingest, held by senders); `DUCKTEL_MCP_TOKEN` grants read (MCP queries, and `POST /flush`, held by consumers). A compromised sender must not gain read access to every tenant, and a read token must not be able to forge telemetry — so use a different value for each. In HTTP mode, `--auth-token` is required; ducktel refuses to start without one rather than silently exposing every tenant's data.
+**The MCP token is a separate secret from the OTLP token.** `DUCKTEL_AUTH_TOKEN` grants OTLP ingest (held by senders); `DUCKTEL_MCP_TOKEN` grants read (MCP queries, and `POST /flush`, held by consumers). The flush token also authorises `POST /feedback`, which stores one feedback log and does not accept spans, metrics, or arbitrary logs. A compromised sender must not gain read access to every tenant, and the ingest token must not be able to file feedback — so use a different value for each. In HTTP mode, `--auth-token` is required; ducktel refuses to start without one rather than silently exposing every tenant's data.
+
+**Agent feedback stays on the machine unless you turn a sink on.** `submit_feedback` writes a log for the calling tenant. With no `--feedback-url`, the MCP process writes its own data directory. To store into a running receiver, pass `--feedback-url http://127.0.0.1:4318/feedback`. A second `ducktel serve` on that directory will not store the report; it exits because the directory is locked. The sink is off by default. `--feedback-webhook-url` or `--feedback-github-repo` (with `--feedback-github-token`) sends the agent-written text off the machine. ducktel does not scrub that text. Setting both sinks fails at startup. At most 20 accepted reports per tenant are stored per rolling hour, in memory, and a restart clears the window.
 
 See [`skills/ducktel/SKILL.md`](skills/ducktel/SKILL.md) for the full reference, including flush-latency semantics and dotted-attribute-key gotchas.
 

@@ -43,7 +43,8 @@ The dashboard has no build step and no npm install.
 - `internal/receiver` accepts OTLP/HTTP and converts it to the writer structs.
 - `internal/writer` buffers records, writes Parquet, deletes old date directories, and compacts past days.
 - `internal/query` opens DuckDB and defines the `traces`, `logs`, and `metrics` views.
-- `internal/telemetry` is the query behavior. MCP and the dashboard API both call it.
+- `internal/feedback` validates an agent feedback report, stores it as one log, and optionally sends one sink.
+- `internal/telemetry` is the query behavior. MCP and the dashboard API both call it. `ListFeedback` is the feedback list query.
 - `internal/mcp` registers the MCP tools and adapts their arguments.
 - `internal/webapi` registers the `/api` routes.
 - `internal/httpauth` checks bearer tokens.
@@ -66,7 +67,7 @@ One `ducktel serve` process owns a data directory. A second process for that dir
 
 When you add, remove, or rename a tool, change `Register` in `internal/mcp/server.go`. Put the same names in `llms.txt`, `README.md`, `skills/ducktel/SKILL.md`, and `ducktel mcp --help`.
 
-`flush_buffer` is registered only when a flush URL is configured. Document that condition with the tool. Do not describe it as always present, and do not drop it.
+`submit_feedback` is always registered. `save_query` will not store it. `flush_buffer` is registered only when a flush URL is configured. Document that condition with the tool. Do not describe it as always present, and do not drop it.
 
 `sql_query` is read-only ad-hoc SQL over the tenant views `spans`, `logs`, and `metrics`. `ducktel query` is still unsandboxed. The tool is always registered.
 
