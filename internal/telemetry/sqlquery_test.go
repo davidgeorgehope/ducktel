@@ -145,6 +145,13 @@ func TestSQLQueryTenantIsolation(t *testing.T) {
 	if len(metricsView) != 2 {
 		t.Fatalf("metrics view rows = %d, want 2", len(metricsView))
 	}
+	tracesView, _, err := c.engine.Query("SELECT service_name FROM traces")
+	if err != nil {
+		t.Fatalf("traces view after sql_query: %v", err)
+	}
+	if len(tracesView) != 3 {
+		t.Fatalf("traces view rows = %d, want 3", len(tracesView))
+	}
 }
 
 func TestSQLQueryHidesBaseViews(t *testing.T) {
@@ -156,6 +163,18 @@ func TestSQLQueryHidesBaseViews(t *testing.T) {
 		"SELECT service_name FROM spans WHERE 1 = 0 UNION ALL SELECT service_name FROM traces",
 		"WITH spans AS (SELECT * FROM traces) SELECT * FROM spans",
 		"WITH RECURSIVE c AS (SELECT * FROM traces UNION ALL SELECT * FROM c WHERE false) SELECT * FROM c",
+		"WITH RECURSIVE traces AS (SELECT * FROM traces UNION ALL SELECT * FROM traces WHERE false) SELECT * FROM traces",
+		"WITH a AS (SELECT * FROM traces), traces AS (SELECT service_name FROM spans) SELECT * FROM a",
+		"WITH a AS (SELECT * FROM b), b AS (SELECT * FROM traces) SELECT * FROM a",
+		"WITH spans AS (SELECT service_name FROM spans) SELECT * FROM spans",
+		"WITH logs AS (SELECT body FROM logs) SELECT * FROM logs",
+		"WITH metrics AS (SELECT metric_name FROM metrics) SELECT * FROM metrics",
+		"WITH traces AS (SELECT service_name FROM spans) SELECT * FROM traces",
+		"SELECT * FROM spans AS traces",
+		"SELECT * FROM spans AS _ducktel_traces",
+		"SELECT * FROM logs AS _ducktel_logs",
+		"WITH RECURSIVE _ducktel_logs AS (SELECT * FROM _ducktel_logs UNION ALL SELECT * FROM _ducktel_logs WHERE false) SELECT * FROM _ducktel_logs",
+		"WITH RECURSIVE _ducktel_traces AS (SELECT * FROM _ducktel_traces UNION ALL SELECT * FROM _ducktel_traces WHERE false) SELECT * FROM _ducktel_traces",
 	}
 	for _, statement := range statements {
 		t.Run(statement, func(t *testing.T) {
@@ -225,9 +244,17 @@ func TestSQLQueryRejectsFileReads(t *testing.T) {
 	statements := []string{
 		"SELECT * FROM read_parquet('" + parquet + "')",
 		"SELECT * FROM read_csv('" + out + "')",
+		"SELECT * FROM read_json('" + out + "')",
 		"SELECT read_blob('" + out + "')",
 		"SELECT * FROM glob('" + dir + "/*')",
+		"SELECT * FROM parquet_scan('" + parquet + "')",
 		"COPY (SELECT 1) TO '" + out + "'",
+		"SELECT current_setting('home_directory')",
+		"SELECT getenv('PATH')",
+		"SELECT * FROM duckdb_tables()",
+		"SELECT * FROM duckdb_settings()",
+		"SELECT * FROM pragma_table_info('spans')",
+		"PRAGMA version",
 	}
 	for _, statement := range statements {
 		t.Run(statement, func(t *testing.T) {
@@ -301,6 +328,22 @@ func TestSQLQueryTimeout(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("expected the range scan to stop")
+	}
+}
+
+func TestSQLQueryAllowsPlainCTE(t *testing.T) {
+	c := newSQLCore(t)
+	rows, _ := querySQL(t, c, "acme", "WITH s AS (SELECT service_name FROM spans) SELECT service_name FROM s", 0)
+	if len(rows) != 2 || rowsHave(rows, "globex") {
+		t.Fatalf("plain cte = %v", rows)
+	}
+	rows, _ = querySQL(t, c, "acme", "WITH RECURSIVE c AS (SELECT service_name FROM spans UNION ALL SELECT service_name FROM c WHERE false) SELECT service_name FROM c", 0)
+	if len(rows) != 2 || rowsHave(rows, "globex") {
+		t.Fatalf("self-reference cte = %v", rows)
+	}
+	rows, _ = querySQL(t, c, "acme", "WITH a AS (SELECT * FROM b), b AS (SELECT service_name FROM spans) SELECT service_name FROM a", 0)
+	if len(rows) != 2 || rowsHave(rows, "globex") {
+		t.Fatalf("forward-reference cte = %v", rows)
 	}
 }
 

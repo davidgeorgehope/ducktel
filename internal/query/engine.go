@@ -681,9 +681,10 @@ func (e *Engine) QueryTenant(ctx context.Context, tenant, statement string, limi
 	defer conn.Close()
 
 	// A temp view named logs whose query also reads logs rebinds to itself.
-	// Rename the signal view for this transaction, then point the temp view
-	// at that name. Rollback restores the signal view and drops the temp view.
-	// The DROP names the temp schema, so a leftover cannot drop the signal view.
+	// Rename every signal view for this transaction, then point the temp view
+	// at that name. traces is renamed too, so the statement has no unfiltered
+	// relation. Rollback restores the signal views and drops the temp views.
+	// The DROP names the temp schema, so a leftover cannot drop a signal view.
 	dropTenantViews(context.Background(), conn)
 
 	tx, err := conn.BeginTx(ctx, nil)
@@ -696,6 +697,7 @@ func (e *Engine) QueryTenant(ctx context.Context, tenant, statement string, limi
 	}()
 
 	for _, name := range []struct{ from, to string }{
+		{"traces", "_ducktel_traces"},
 		{"logs", "_ducktel_logs"},
 		{"metrics", "_ducktel_metrics"},
 	} {
@@ -707,7 +709,7 @@ func (e *Engine) QueryTenant(ctx context.Context, tenant, statement string, limi
 
 	pred := "json_extract_string(resource_attributes, '$.\"tenant.id\"') = " + quoteSQLString(tenant)
 	tenantViews := []struct{ name, source string }{
-		{"spans", "traces"},
+		{"spans", "_ducktel_traces"},
 		{"logs", "_ducktel_logs"},
 		{"metrics", "_ducktel_metrics"},
 	}

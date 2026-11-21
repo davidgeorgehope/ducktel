@@ -19,6 +19,26 @@ const (
 	sqlRejectVisible = "only spans, logs, and metrics are visible"
 )
 
+// sqlRelations are names that exist while a statement runs, or the signal
+// view names those internal views replace. A CTE or table alias with one of
+// these names is rejected. The check does not depend on which object DuckDB
+// would bind.
+var sqlRelations = map[string]struct{}{
+	"spans":            {},
+	"logs":             {},
+	"metrics":          {},
+	"traces":           {},
+	"_ducktel_spans":   {},
+	"_ducktel_logs":    {},
+	"_ducktel_metrics": {},
+	"_ducktel_traces":  {},
+}
+
+func sqlRelationName(name string) bool {
+	_, ok := sqlRelations[strings.ToLower(name)]
+	return ok
+}
+
 // SQLQuery runs one read-only statement against the tenant views spans, logs,
 // and metrics. limit <= 0 uses 200. limit above 1000 is rejected.
 func (c *Core) SQLQuery(ctx context.Context, tenant, statement string, limit int) ([]map[string]any, []string, error) {
@@ -161,9 +181,16 @@ func walkSQL(v any, ctes map[string]struct{}, relation bool) error {
 		}
 		return nil
 	case map[string]any:
-		ctes = scopeWithCTEs(ctes, n)
+		var err error
+		ctes, err = scopeWithCTEs(ctes, n)
+		if err != nil {
+			return err
+		}
 		if name, ok := n["function_name"].(string); ok && forbiddenFunction(name) {
 			return sqlRejected(sqlRejectVisible)
+		}
+		if err := checkRelationAlias(n); err != nil {
+			return err
 		}
 		if relation {
 			if err := checkRelation(n, ctes); err != nil {
@@ -189,14 +216,14 @@ func walkSQL(v any, ctes map[string]struct{}, relation bool) error {
 	}
 }
 
-func scopeWithCTEs(parent map[string]struct{}, obj map[string]any) map[string]struct{} {
+func scopeWithCTEs(parent map[string]struct{}, obj map[string]any) (map[string]struct{}, error) {
 	cm, ok := obj["cte_map"].(map[string]any)
 	if !ok {
-		return parent
+		return parent, nil
 	}
 	list, _ := cm["map"].([]any)
 	if len(list) == 0 {
-		return parent
+		return parent, nil
 	}
 	next := make(map[string]struct{}, len(parent)+len(list))
 	for k := range parent {
@@ -208,11 +235,29 @@ func scopeWithCTEs(parent map[string]struct{}, obj map[string]any) map[string]st
 			continue
 		}
 		key, _ := m["key"].(string)
-		if key != "" {
-			next[strings.ToLower(key)] = struct{}{}
+		if key == "" {
+			continue
 		}
+		if sqlRelationName(key) {
+			return nil, sqlRejected(sqlRejectVisible)
+		}
+		next[strings.ToLower(key)] = struct{}{}
 	}
-	return next
+	return next, nil
+}
+
+func checkRelationAlias(n map[string]any) error {
+	typ, _ := n["type"].(string)
+	switch typ {
+	case "BASE_TABLE", "SUBQUERY", "JOIN", "TABLE_FUNCTION", "EMPTY":
+	default:
+		return nil
+	}
+	alias, _ := n["alias"].(string)
+	if alias != "" && sqlRelationName(alias) {
+		return sqlRejected(sqlRejectVisible)
+	}
+	return nil
 }
 
 func checkRelation(n map[string]any, ctes map[string]struct{}) error {
@@ -246,7 +291,7 @@ func checkBaseTable(n map[string]any, ctes map[string]struct{}) error {
 	case "spans", "logs", "metrics":
 		return nil
 	}
-	if _, ok := ctes[name]; ok {
+	if _, ok := ctes[name]; ok && !sqlRelationName(name) {
 		return nil
 	}
 	return sqlRejected(sqlRejectVisible)
@@ -269,8 +314,8 @@ func checkTableFunction(n map[string]any) error {
 func forbiddenFunction(name string) bool {
 	n := strings.ToLower(name)
 	switch n {
-	case "read_blob", "read_text", "glob":
+	case "read_blob", "read_text", "glob", "getenv", "current_setting":
 		return true
 	}
-	return strings.HasPrefix(n, "read_") || strings.Contains(n, "_scan")
+	return strings.HasPrefix(n, "read_") || strings.HasPrefix(n, "getenv") || strings.Contains(n, "_scan")
 }
