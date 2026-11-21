@@ -1,6 +1,7 @@
 package query
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io/fs"
@@ -304,10 +305,14 @@ func (e *Engine) rememberView(name string, stamps []fileStamp) {
 // not identifiers and cannot be bound as placeholders in read_parquet's table
 // argument, so only the string literal escaping applies: a single quote is
 // doubled.
+func quoteSQLString(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 func quotePaths(paths []string) string {
 	quoted := make([]string, len(paths))
 	for i, p := range paths {
-		quoted[i] = "'" + strings.ReplaceAll(p, "'", "''") + "'"
+		quoted[i] = quoteSQLString(p)
 	}
 	return strings.Join(quoted, ", ")
 }
@@ -638,25 +643,114 @@ func (e *Engine) query(since time.Time, sqlStr string, args ...any) ([]map[strin
 		return nil, nil, fmt.Errorf("executing query: %w", err)
 	}
 	defer rows.Close()
+	return scanRows(rows)
+}
 
+// SerializeSQL returns DuckDB's JSON plan for statement. The text is bound
+// as a value, so the driver does not execute it.
+func (e *Engine) SerializeSQL(ctx context.Context, statement string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var raw string
+	err := e.db.QueryRowContext(ctx,
+		"SELECT CAST(json_serialize_sql(CAST(? AS VARCHAR)) AS VARCHAR)",
+		statement).Scan(&raw)
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// QueryTenant runs statement against temp views that contain one tenant's
+// rows. limit is the SQL LIMIT integer. The caller has already decided that
+// statement is one read-only query. e.mu is held until the transaction rolls
+// back, so the temp views and the read share one connection and no other
+// query replaces the signal views mid-flight.
+func (e *Engine) QueryTenant(ctx context.Context, tenant, statement string, limit int) ([]map[string]any, []string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if err := e.createViews(time.Time{}); err != nil {
+		return nil, nil, fmt.Errorf("refreshing views: %w", err)
+	}
+	conn, err := e.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening connection: %w", err)
+	}
+	defer conn.Close()
+
+	// A temp view named logs whose query also reads logs rebinds to itself.
+	// Rename the signal view for this transaction, then point the temp view
+	// at that name. Rollback restores the signal view and drops the temp view.
+	// The DROP names the temp schema, so a leftover cannot drop the signal view.
+	dropTenantViews(context.Background(), conn)
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer func() {
+		tx.Rollback()
+		dropTenantViews(context.Background(), conn)
+	}()
+
+	for _, name := range []struct{ from, to string }{
+		{"logs", "_ducktel_logs"},
+		{"metrics", "_ducktel_metrics"},
+	} {
+		q := fmt.Sprintf("ALTER VIEW %s RENAME TO %s", name.from, name.to)
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return nil, nil, fmt.Errorf("renaming %s: %w", name.from, err)
+		}
+	}
+
+	pred := "json_extract_string(resource_attributes, '$.\"tenant.id\"') = " + quoteSQLString(tenant)
+	tenantViews := []struct{ name, source string }{
+		{"spans", "traces"},
+		{"logs", "_ducktel_logs"},
+		{"metrics", "_ducktel_metrics"},
+	}
+	for _, v := range tenantViews {
+		q := fmt.Sprintf("CREATE TEMP VIEW %s AS SELECT * FROM %s WHERE %s", v.name, v.source, pred)
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return nil, nil, fmt.Errorf("creating tenant view %s: %w", v.name, err)
+		}
+	}
+
+	// The closing paren is on its own line so a `--` comment cannot swallow it.
+	wrapped := fmt.Sprintf("SELECT * FROM (\n%s\n) AS _q LIMIT %d", statement, limit)
+	rows, err := tx.QueryContext(ctx, wrapped)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows)
+}
+
+func dropTenantViews(ctx context.Context, conn *sql.Conn) {
+	for _, name := range []string{"temp.spans", "temp.logs", "temp.metrics"} {
+		_, _ = conn.ExecContext(ctx, "DROP VIEW IF EXISTS "+name)
+	}
+}
+
+func scanRows(rows *sql.Rows) ([]map[string]any, []string, error) {
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, nil, fmt.Errorf("getting columns: %w", err)
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	for rows.Next() {
-		values := make([]interface{}, len(columns))
-		valuePtrs := make([]interface{}, len(columns))
+		values := make([]any, len(columns))
+		valuePtrs := make([]any, len(columns))
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
-
 		if err := rows.Scan(valuePtrs...); err != nil {
 			return nil, nil, fmt.Errorf("scanning row: %w", err)
 		}
-
-		row := make(map[string]interface{}, len(columns))
+		row := make(map[string]any, len(columns))
 		for i, col := range columns {
 			val := values[i]
 			if b, ok := val.([]byte); ok {
@@ -666,11 +760,9 @@ func (e *Engine) query(since time.Time, sqlStr string, args ...any) ([]map[strin
 		}
 		results = append(results, row)
 	}
-
 	if err := rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("iterating rows: %w", err)
 	}
-
 	return results, columns, nil
 }
 
