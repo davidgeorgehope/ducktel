@@ -195,7 +195,7 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 		Description: "Call this after a ducktel tool returned confusing, unhelpful, or wrong output, or a capability was missing. " +
 			"Include a concrete proposed fix a maintainer could apply. " +
 			"The report is stored as a log for this tenant under service ducktel.agent_feedback. " +
-			"log_search and the logs dashboard show it. " +
+			"log_search finds it by the attributes category, tool_name, severity, and report_id. The logs dashboard shows the body. " +
 			"Nothing is sent off the machine unless a sink is configured. " +
 			"A configured sink sends the agent-written text off the machine unchanged. ducktel does not scrub it. " +
 			"At most 20 accepted reports per tenant are stored per rolling hour. A restart clears that window. " +

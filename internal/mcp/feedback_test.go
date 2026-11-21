@@ -52,6 +52,7 @@ func TestSubmitFeedbackTool(t *testing.T) {
 		"concrete proposed fix",
 		"ducktel.agent_feedback",
 		"log_search",
+		"category, tool_name, severity, and report_id",
 		"logs dashboard",
 		"unless a sink is configured",
 		"does not scrub",
