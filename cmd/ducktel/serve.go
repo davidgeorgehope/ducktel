@@ -53,6 +53,12 @@ Authentication is disabled unless a token is configured. Set it with
 "Authorization: Bearer <token>", which every OTel exporter supports via
 OTEL_EXPORTER_OTLP_HEADERS. /health stays unauthenticated for probes.
 
+POST /feedback stores one agent-feedback log. It uses the flush token, the
+same check as POST /flush, and rejects the OTLP ingest token. It does not
+accept spans, metrics, or arbitrary logs. A second ducktel serve is not how
+another process stores feedback. Point that process at
+--feedback-url http://127.0.0.1:4318/feedback.
+
 TLS is not terminated here — front the receiver with a proxy or ingress if the
 token would cross an untrusted network.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -181,7 +187,7 @@ token would cross an untrusted network.`,
 	cmd.Flags().IntVar(&bufferSize, "buffer-size", 1000, "Records per signal that force a flush ahead of --flush-interval")
 	cmd.Flags().StringVar(&retention, "retention", "", "Delete date partitions older than this window (e.g. 720h or 30d); empty keeps data forever")
 	cmd.Flags().StringVar(&token, "auth-token", "", "Require this bearer token on OTLP endpoints (env: DUCKTEL_AUTH_TOKEN)")
-	cmd.Flags().StringVar(&flushToken, "flush-token", "", "Require this bearer token on POST /flush (env: DUCKTEL_FLUSH_TOKEN, or DUCKTEL_MCP_TOKEN)")
+	cmd.Flags().StringVar(&flushToken, "flush-token", "", "Require this bearer token on POST /flush and POST /feedback (env: DUCKTEL_FLUSH_TOKEN, or DUCKTEL_MCP_TOKEN)")
 
 	return cmd
 }

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/davidgeorgehope/ducktel/internal/feedback"
 	"github.com/davidgeorgehope/ducktel/internal/httpauth"
 
 	collectlogsv1 "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -53,11 +54,12 @@ type Receiver struct {
 	server   *http.Server
 	consumer Consumer
 	token    string
-	// flushToken authorises POST /flush, and is deliberately a DIFFERENT secret
-	// from token: /flush is a control action requested by the query side, not a
-	// data-ingest action. The query container holds only this token, so it can
-	// ask for a flush but can never write telemetry.
+	// flushToken authorises POST /flush and POST /feedback. It is deliberately
+	// a different secret from token. /flush is a control action. /feedback
+	// stores one agent-feedback log and does not accept OTLP spans, metrics,
+	// or arbitrary logs. The ingest token is not accepted on either route.
 	flushToken string
+	feedback   *feedback.Service
 	// flush makes buffered records durable on demand.
 	flush func() error
 }
@@ -72,19 +74,28 @@ type Receiver struct {
 // (OTEL_EXPORTER_OTLP_HEADERS). An empty token disables the check, which keeps
 // local development frictionless.
 //
-// flushToken, when non-empty, is required on POST /flush. It is intentionally a
-// separate secret from token: the query container is given only flushToken, so
-// it can ask this process to flush without being able to forge telemetry.
+// flushToken, when non-empty, is required on POST /flush and POST /feedback.
+// It is intentionally a separate secret from token: the query container is
+// given only flushToken. /feedback writes one feedback log, not arbitrary
+// telemetry, and it rejects the OTLP ingest token.
 func New(host string, port int, consumer Consumer, token, flushToken string, flush func() error) *Receiver {
 	r := &Receiver{consumer: consumer, token: token, flushToken: flushToken, flush: flush}
+	// Write-only options cannot fail. A failure leaves the route returning 500
+	// instead of storing a report the process cannot accept.
+	if svc, err := feedback.New(feedback.Options{Write: r.writeFeedback}); err != nil {
+		log.Printf("feedback: %v", err)
+	} else {
+		r.feedback = svc
+	}
 
 	mux := http.NewServeMux()
 	// OTLP ingest is authenticated when a token is configured.
 	mux.Handle("POST /v1/traces", r.authenticate(http.HandlerFunc(r.handleTraces)))
 	mux.Handle("POST /v1/logs", r.authenticate(http.HandlerFunc(r.handleLogs)))
 	mux.Handle("POST /v1/metrics", r.authenticate(http.HandlerFunc(r.handleMetrics)))
-	// Flush is a control action, authorised by its own token.
+	// Flush and feedback are authorised by the flush token, not the ingest token.
 	mux.Handle("POST /flush", httpauth.Bearer(flushToken, http.HandlerFunc(r.handleFlush)))
+	mux.Handle("POST /feedback", httpauth.Bearer(flushToken, http.HandlerFunc(r.handleFeedback)))
 	// Health stays unauthenticated so liveness/readiness probes keep working.
 	mux.HandleFunc("GET /health", r.handleHealth)
 
