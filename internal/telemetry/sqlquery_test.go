@@ -331,6 +331,26 @@ func TestSQLQueryTimeout(t *testing.T) {
 	}
 }
 
+func TestSQLQueryJoin(t *testing.T) {
+	c := newSQLCore(t)
+	rows, _, err := c.SQLQuery(context.Background(), "acme",
+		"SELECT spans.service_name AS span_svc, logs.body FROM spans JOIN logs ON spans.trace_id = logs.trace_id", 0)
+	if err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	if rowsHave(rows, "globex") {
+		t.Fatalf("join includes globex: %v", rows)
+	}
+	rows, _ = querySQL(t, c, "acme", "SELECT service_name, service_name FROM spans", 0)
+	if len(rows) != 2 || rowsHave(rows, "globex") {
+		t.Fatalf("repeated column = %v", rows)
+	}
+	rows, _ = querySQL(t, c, "acme", "SELECT * FROM spans LIMIT 1", 0)
+	if len(rows) != 1 {
+		t.Fatalf("sql LIMIT 1 returned %d rows", len(rows))
+	}
+}
+
 func TestSQLQueryAllowsPlainCTE(t *testing.T) {
 	c := newSQLCore(t)
 	rows, _ := querySQL(t, c, "acme", "WITH s AS (SELECT service_name FROM spans) SELECT service_name FROM s", 0)

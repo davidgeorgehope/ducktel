@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -66,11 +67,43 @@ func (c *Core) SQLQuery(ctx context.Context, tenant, statement string, limit int
 	if err := allowSQL(raw); err != nil {
 		return nil, nil, err
 	}
+	if !statementHasLimit(raw) {
+		statement += "\nLIMIT " + strconv.Itoa(limit)
+	}
 	rows, cols, err := c.engine.QueryTenant(ctx, tenant, statement, limit)
 	if err != nil {
 		return nil, nil, sqlFailed(err)
 	}
 	return rows, cols, nil
+}
+
+func statementHasLimit(doc string) bool {
+	var root any
+	if err := json.Unmarshal([]byte(doc), &root); err != nil {
+		return false
+	}
+	return jsonHasType(root, "LIMIT_MODIFIER")
+}
+
+func jsonHasType(v any, want string) bool {
+	switch n := v.(type) {
+	case map[string]any:
+		if n["type"] == want {
+			return true
+		}
+		for _, child := range n {
+			if jsonHasType(child, want) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range n {
+			if jsonHasType(child, want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func stripOneSemicolon(s string) string {

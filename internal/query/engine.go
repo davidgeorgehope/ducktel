@@ -720,14 +720,12 @@ func (e *Engine) QueryTenant(ctx context.Context, tenant, statement string, limi
 		}
 	}
 
-	// The closing paren is on its own line so a `--` comment cannot swallow it.
-	wrapped := fmt.Sprintf("SELECT * FROM (\n%s\n) AS _q LIMIT %d", statement, limit)
-	rows, err := tx.QueryContext(ctx, wrapped)
+	rows, err := tx.QueryContext(ctx, statement)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
-	return scanRows(rows)
+	return scanRowsMax(rows, limit)
 }
 
 func dropTenantViews(ctx context.Context, conn *sql.Conn) {
@@ -737,6 +735,10 @@ func dropTenantViews(ctx context.Context, conn *sql.Conn) {
 }
 
 func scanRows(rows *sql.Rows) ([]map[string]any, []string, error) {
+	return scanRowsMax(rows, 0)
+}
+
+func scanRowsMax(rows *sql.Rows, max int) ([]map[string]any, []string, error) {
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, nil, fmt.Errorf("getting columns: %w", err)
@@ -744,6 +746,9 @@ func scanRows(rows *sql.Rows) ([]map[string]any, []string, error) {
 
 	var results []map[string]any
 	for rows.Next() {
+		if max > 0 && len(results) >= max {
+			break
+		}
 		values := make([]any, len(columns))
 		valuePtrs := make([]any, len(columns))
 		for i := range values {
