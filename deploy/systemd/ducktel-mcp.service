@@ -1,0 +1,32 @@
+[Unit]
+Description=ducktel mcp --http (MCP + dashboard on 127.0.0.1:4319)
+After=ducktel-serve.service
+Wants=ducktel-serve.service
+
+[Service]
+Type=simple
+User=ducktel
+Group=ducktel
+Slice=ducktel.slice
+# DUCKTEL_MCP_TOKEN is the read token. The feedback sink lines in the env
+# file stay commented out until a fine-grained token exists:
+#   DUCKTEL_FEEDBACK_GITHUB_REPO=davidgeorgehope/ducktel
+#   DUCKTEL_FEEDBACK_GITHUB_TOKEN=...
+EnvironmentFile=/etc/ducktel/ducktel.env
+Environment=DUCKTEL_DASHBOARD_URL=https://hetzner-ash.taile209c0.ts.net:8446/dashboard/
+ExecStart=/usr/local/bin/ducktel mcp --http --host 127.0.0.1 --port 4319 \
+  --data-dir /var/lib/ducktel \
+  --flush-url http://127.0.0.1:4318/flush \
+  --feedback-url http://127.0.0.1:4318/feedback \
+  --dashboard
+Restart=on-failure
+RestartSec=5
+MemoryMax=1G
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/ducktel
+
+[Install]
+WantedBy=multi-user.target

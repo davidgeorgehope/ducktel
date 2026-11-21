@@ -1,0 +1,29 @@
+[Unit]
+Description=ducktel serve (OTLP/HTTP ingest on 127.0.0.1:4318)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ducktel
+Group=ducktel
+Slice=ducktel.slice
+# DUCKTEL_AUTH_TOKEN (senders) and DUCKTEL_FLUSH_TOKEN (POST /flush, POST /feedback).
+EnvironmentFile=/etc/ducktel/ducktel.env
+ExecStart=/usr/local/bin/ducktel serve --host 127.0.0.1 --port 4318 \
+  --data-dir /var/lib/ducktel --retention 14d
+StateDirectory=ducktel
+StateDirectoryMode=0750
+Restart=on-failure
+RestartSec=5
+MemoryMax=768M
+# SIGTERM runs the receiver drain and the final flush.
+TimeoutStopSec=30
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/ducktel
+
+[Install]
+WantedBy=multi-user.target
