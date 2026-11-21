@@ -270,7 +270,7 @@ Register it with an MCP client, e.g. Claude Code:
 claude mcp add ducktel -- ducktel mcp --data-dir /data
 ```
 
-Fourteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other thirteen are always registered.
+Fifteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other fourteen are always registered.
 
 | Tool | Purpose |
 |------|---------|
@@ -287,9 +287,10 @@ Fourteen tools. They know about spans, attributes, logs, metrics, and time, and 
 | `list_saved_queries(tenant)` | saved MCP queries for one tenant: `name`, `description`, `tool`, and `arguments`, sorted by name |
 | `save_query(tenant, name, tool, arguments, description)` | save a read tool invocation for this tenant after checking the tool and the arguments. The same name replaces the previous query |
 | `run_saved_query(tenant, name, since_minutes, until_minutes)` | run one saved query by name. Optional `since_minutes` and `until_minutes` override the stored window for this run only. An unknown name lists the names saved for that tenant |
+| `sql_query(sql, tenant, limit)` | one read-only SELECT or WITH. The views are `spans`, `logs`, and `metrics`. `traces` is not a view. Timestamps are Unix microseconds. `limit` defaults to 200 and is rejected above 1000. No default time window |
 | `flush_buffer()` | make just-received telemetry queryable now (only advertised when `--flush-url` is set) |
 
-`span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` also take `until_minutes` (default 0, meaning now). It must be less than `since_minutes`. `list_attribute_keys` samples `since_minutes` (default 60) and does not take `until_minutes`. `trace_lookup`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` have no time window. Saved queries are per tenant, in a file separate from `ducktel saved` SQL. `run_saved_query` can override that window for one run. A tool with no window rejects the override.
+`span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` also take `until_minutes` (default 0, meaning now). It must be less than `since_minutes`. `list_attribute_keys` samples `since_minutes` (default 60) and does not take `until_minutes`. `trace_lookup`, `sql_query`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` have no time window. Saved queries are per tenant, in a file separate from `ducktel saved` SQL. `run_saved_query` can override that window for one run. A tool with no window rejects the override.
 
 **Time series and resource grouping.** `step` turns `metric_query` into a dashboard time series: one row per (time bucket, group), with a leading `time` column holding the bucket start in Unix microseconds (UTC), ordered by time then groups. `resource.<key>` groups by an OpenTelemetry resource attribute, so questions like CPU per host work: `metric_query(metric_name="system.cpu.utilization", aggregation="avg", group_by="resource.host.name", step="1m", since_minutes=360)`. At most 1500 buckets are allowed per query; `exemplars` ignores `step`.
 

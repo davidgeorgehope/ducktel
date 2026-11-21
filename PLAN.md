@@ -9,7 +9,7 @@ An older copy of this file called some of these future work. They are on `main`.
 ## Not built
 
 - An OTLP/gRPC receiver. Ingest is HTTP on port 4318. Nothing listens on 4317.
-- An HTTP route that accepts raw SQL. `/api/*` runs the same structured queries as the MCP tools. `ducktel query` is still the SQL entry point.
+- An HTTP route that accepts raw SQL. `/api/*` runs the same structured queries as the MCP tools. `sql_query` is the MCP exception. It is read-only SQL for one tenant. `ducktel query` is still unsandboxed. The HTTP route is still absent.
 - A scheduler for saved queries. An agent runs `ducktel saved run-all` itself.
 - Tail-based sampling before write.
 - Generated DuckDB views that join signals for you. You write the join in SQL. Examples are in [skills/ducktel/references/queries.md](skills/ducktel/references/queries.md).

@@ -6,7 +6,7 @@ You query it with MCP or with the CLI. The server does not interpret attribute k
 
 Every MCP query tool requires `tenant`, and so do `list_services`, `list_metric_names`, and `list_attribute_keys`. The server keeps only rows whose `tenant.id` resource attribute equals that value. You cannot widen a query by omitting `tenant`. `list_tenants` takes no arguments and returns only tenant ids.
 
-Time windows on `span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` default to the last 60 minutes (`since_minutes`). `until_minutes` ends the window that many minutes before now. The default is 0, which means now. `until_minutes` must be less than `since_minutes`. `log_search` with `trace_id` and no `since_minutes` searches the whole history. `list_attribute_keys` also defaults to the last 60 minutes and samples at most 2000 rows per signal. It does not take `until_minutes`. A missing key is not proof the key never existed. `trace_lookup`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` have no time window.
+Time windows on `span_search`, `compare_spans`, `log_search`, `slow_requests`, and `metric_query` default to the last 60 minutes (`since_minutes`). `until_minutes` ends the window that many minutes before now. The default is 0, which means now. `until_minutes` must be less than `since_minutes`. `log_search` with `trace_id` and no `since_minutes` searches the whole history. `list_attribute_keys` also defaults to the last 60 minutes and samples at most 2000 rows per signal. It does not take `until_minutes`. A missing key is not proof the key never existed. `trace_lookup`, `sql_query`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` have no time window.
 
 Saved MCP queries are per tenant. `save_query` validates the tool and arguments before writing. `run_saved_query` can override `since_minutes` and `until_minutes` for that run only.
 
@@ -14,7 +14,7 @@ Rows still in the receiver's memory buffer are not in the Parquet files yet. The
 
 ## MCP tools
 
-Registered by `Register` in `internal/mcp/server.go`. Thirteen tools are always registered. `flush_buffer` is registered only when a flush URL is set.
+Registered by `Register` in `internal/mcp/server.go`. Fourteen tools are always registered. `flush_buffer` is registered only when a flush URL is set.
 
 - [list_tenants](skills/ducktel/SKILL.md): tenant ids with stored telemetry. No arguments. Returns only tenant ids.
 - [list_services](skills/ducktel/SKILL.md): service names for one tenant. Requires `tenant`. `source` omitted or `traces` reads spans. `source=logs` reads log records.
@@ -29,6 +29,7 @@ Registered by `Register` in `internal/mcp/server.go`. Thirteen tools are always 
 - [list_saved_queries](skills/ducktel/SKILL.md): saved MCP queries for one tenant. Requires `tenant`. Returns `name`, `description`, `tool`, and `arguments`, sorted by name.
 - [save_query](skills/ducktel/SKILL.md): save a read tool invocation for one tenant. Requires `tenant`, `name`, `tool`, and `arguments`. Optional `description`. Validates like a direct tool call before writing. Same name replaces the record.
 - [run_saved_query](skills/ducktel/SKILL.md): run a saved query by name for one tenant. Optional `since_minutes` and `until_minutes` override the window for this run only.
+- [sql_query](skills/ducktel/SKILL.md): one read-only SELECT or WITH for one tenant. Requires `tenant` and `sql`. The views are `spans`, `logs`, and `metrics`. `traces` is not a view. Timestamps are Unix microseconds. `limit` defaults to 200 and is rejected above 1000. No default time window.
 - [flush_buffer](skills/ducktel/SKILL.md): asks the receiver to write its buffer. No arguments. Absent from the tool list when no flush URL is configured.
 
 Row results are compact JSON, with no extra whitespace.
@@ -61,7 +62,7 @@ Add `--dashboard` to serve the read-only UI at `/dashboard` and the JSON routes 
 
 Global flags: `--data-dir` (default `./data`) and `--format json|table|csv` (default `json`).
 
-- `ducktel query "<sql>"` runs DuckDB SQL on the `traces`, `logs`, and `metrics` views. It is not sandboxed. It will run DDL.
+- `ducktel query "<sql>"` runs DuckDB SQL on the `traces`, `logs`, and `metrics` views. It is not sandboxed. It will run DDL. `sql_query` is the read-only MCP path.
 - `ducktel traces`, `ducktel logs`, and `ducktel metrics` are filtered shortcuts. `--since 0` means no time filter. `traces --limit` defaults to 20. `logs` and `metrics` default to 50.
 - `ducktel schema [traces|logs|metrics]` prints columns.
 - `ducktel services` lists service names seen in traces.

@@ -162,7 +162,7 @@ List distinct service names from traces.
 
 Serve telemetry queries over the Model Context Protocol, for agent consumers.
 
-Fourteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other thirteen are always registered.
+Fifteen tools. They know about spans, attributes, logs, metrics, and time, and they attach no meaning to an attribute key. `flush_buffer` is registered only when `--flush-url` is set. The other fourteen are always registered.
 
 | Tool | Purpose |
 |------|---------|
@@ -179,6 +179,7 @@ Fourteen tools. They know about spans, attributes, logs, metrics, and time, and 
 | `list_saved_queries(tenant)` | saved MCP queries for one tenant: `name`, `description`, `tool`, and `arguments`, sorted by name |
 | `save_query(tenant, name, tool, arguments, description)` | save a read tool invocation for this tenant. Checks the tool and the arguments before writing. Saving the same name again replaces that query |
 | `run_saved_query(tenant, name, since_minutes, until_minutes)` | run one saved query by name. `since_minutes` and `until_minutes`, when set, override the stored window for this run only. An unknown name lists the names saved for that tenant |
+| `sql_query(sql, tenant, limit)` | one read-only SELECT or WITH. The views are `spans`, `logs`, and `metrics`. `traces` is not a view. Timestamps are Unix microseconds. `limit` defaults to 200 and is rejected above 1000. No default time window |
 | `flush_buffer()` | make just-received telemetry queryable now (see Flush semantics) |
 
 A filter object is `{key, value, op}`. `op` is `=` (default) or `!=`. `!=` drops records where the key has that value, and keeps records that lack the key.
@@ -217,7 +218,7 @@ with no window reject the override, and `list_attribute_keys` rejects `until_min
 quotes the key internally, because DuckDB treats `$.service.name` as field "service"
 then "name" and silently returns NULL. See the note under SQL Query Patterns.
 
-**Time windows default to 60 minutes** on the tools that take one, including `list_attribute_keys`. `trace_lookup`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` do not. `list_attribute_keys` does not take `until_minutes`. Pass `since_minutes` for a wider range. A wide
+**Time windows default to 60 minutes** on the tools that take one, including `list_attribute_keys`. `trace_lookup`, `sql_query`, `flush_buffer`, `list_tenants`, `list_services`, and `list_metric_names` do not. `list_attribute_keys` does not take `until_minutes`. Pass `since_minutes` for a wider range. A wide
 window reads every selected Parquet file in it, so it can be expensive. `until_minutes` ends the
 window that many minutes before now (default 0). It must be less than `since_minutes`. On the CLI, `--since 0` means no time filter.
 
@@ -313,7 +314,7 @@ For common query patterns, see [references/queries.md](references/queries.md).
 - **`count` on a gauge or sum counts exported points, not events.** A gauge re-exported every interval is counted once per export, and percentiles over it weight each export equally. To count events, use a counter (`sum`) or a histogram.
 - **`metric_query` grouping:** `group_by` is comma-separated. Each key is a plain column (`service_name`, `metric_type`), a data-point attribute written `attr.<key>` or `attributes.<key>`, or a resource attribute written `resource.<key>` or `resource_attributes.<key>`. `service.name` is accepted and means the `service_name` column. For example, `group_by: "attr.kind"` splits the aggregate by the metric point's `attributes` JSON key `kind`, while `group_by: "resource.host.name"` splits it by the resource attribute `host.name`. The result rows carry the key as their column name. Attribute keys are validated against `[A-Za-z0-9_.-]`. `filters` matches attribute key/value pairs against data-point attributes or resource attributes, same as `span_search`. Add `step` (`30s`, `1m`, `5m`, `1h`, or a whole number of seconds) for one row per time bucket instead of one row per group.
 - **Filter values are bound, not interpolated.** The `traces`/`logs`/`metrics` commands pass filter values to DuckDB as parameters, so a service name or search term containing quotes is matched literally — it cannot alter the query. `--limit` is validated and capped at 10000.
-- **`query` and `saved run` execute raw SQL by design.** There is no sandbox on `ducktel query "<sql>"`; it runs whatever you give it, including DDL. That is intentional (it is the SQL escape hatch for agents), so treat its input as trusted.
+- **`query` and `saved run` execute raw SQL by design.** There is no sandbox on `ducktel query "<sql>"`; it runs whatever you give it, including DDL. That is intentional (it is the SQL escape hatch for agents), so treat its input as trusted. `sql_query` is the read-only MCP tool. It runs one SELECT or WITH on the tenant views `spans`, `logs`, and `metrics`. `traces` is not a view in that tool.
 
 ## Development
 

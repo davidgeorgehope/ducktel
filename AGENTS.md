@@ -68,4 +68,6 @@ When you add, remove, or rename a tool, change `Register` in `internal/mcp/serve
 
 `flush_buffer` is registered only when a flush URL is configured. Document that condition with the tool. Do not describe it as always present, and do not drop it.
 
+`sql_query` is read-only ad-hoc SQL over the tenant views `spans`, `logs`, and `metrics`. `ducktel query` is still unsandboxed. The tool is always registered.
+
 What is still absent is listed in [PLAN.md](PLAN.md). Do not document a feature that is not on `main`.

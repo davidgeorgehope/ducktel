@@ -130,6 +130,21 @@ func TestSQLQueryTenantIsolation(t *testing.T) {
 	if len(globex) != 1 || globex[0]["service_name"] != "globex-svc" {
 		t.Fatalf("globex spans after acme = %v", globex)
 	}
+
+	logsView, _, err := c.engine.Query("SELECT body FROM logs")
+	if err != nil {
+		t.Fatalf("logs view after sql_query: %v", err)
+	}
+	if len(logsView) != 2 {
+		t.Fatalf("logs view rows = %d, want 2", len(logsView))
+	}
+	metricsView, _, err := c.engine.Query("SELECT service_name FROM metrics")
+	if err != nil {
+		t.Fatalf("metrics view after sql_query: %v", err)
+	}
+	if len(metricsView) != 2 {
+		t.Fatalf("metrics view rows = %d, want 2", len(metricsView))
+	}
 }
 
 func TestSQLQueryHidesBaseViews(t *testing.T) {
@@ -137,6 +152,7 @@ func TestSQLQueryHidesBaseViews(t *testing.T) {
 	statements := []string{
 		"SELECT * FROM traces",
 		"SELECT * FROM main.traces",
+		"SELECT * FROM _ducktel_logs",
 		"SELECT service_name FROM spans WHERE 1 = 0 UNION ALL SELECT service_name FROM traces",
 		"WITH spans AS (SELECT * FROM traces) SELECT * FROM spans",
 		"WITH RECURSIVE c AS (SELECT * FROM traces UNION ALL SELECT * FROM c WHERE false) SELECT * FROM c",
@@ -179,6 +195,8 @@ func TestSQLQueryRejectsWrites(t *testing.T) {
 		"COPY (SELECT 1) TO '/tmp/ducktel-sql-query-copy.csv'",
 		"INSTALL json",
 		"LOAD json",
+		"SELECT * FROM spans /*",
+		"SELECT 1 */ ; DROP VIEW traces; /*",
 	}
 	for _, statement := range statements {
 		t.Run(statement, func(t *testing.T) {
