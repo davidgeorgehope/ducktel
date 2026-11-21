@@ -1,0 +1,26 @@
+# Assign new agent-feedback issues to the maintainer, so the issue-assigned
+# routine picks them up. Reads only the issue number and labels from the
+# event; never checks out code or touches the title or body.
+name: feedback-assign
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  assign:
+    if: >-
+      contains(github.event.issue.labels.*.name, 'feedback') &&
+      toJSON(github.event.issue.assignees) == '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Assign to davidgeorgehope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue edit "$ISSUE" --add-assignee davidgeorgehope
