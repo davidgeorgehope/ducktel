@@ -1,0 +1,21 @@
+[Unit]
+Description=ducktel data volume (fixed-size loopback ext4, hard disk cap)
+# The image is fully allocated on the root filesystem from day one, so the
+# volume can never take more than its size. Create it with:
+#   fallocate -l 3G /var/lib/ducktel.img
+#   mkfs.ext4 -F -m 0 -E nodiscard -L ducktel /var/lib/ducktel.img
+#   fallocate -l 3G /var/lib/ducktel.img   # re-fill any holes mkfs punched
+#   du -B1 /var/lib/ducktel.img            # must equal the apparent size
+# No discard mount option: deletes inside the volume never hand blocks back.
+# To undo: stop ducktel, umount, copy the data out, delete the image.
+ConditionPathExists=/var/lib/ducktel.img
+Before=ducktel-serve.service ducktel-mcp.service
+
+[Mount]
+What=/var/lib/ducktel.img
+Where=/var/lib/ducktel
+Type=ext4
+Options=loop,nodev,nosuid,noexec,noatime
+
+[Install]
+WantedBy=multi-user.target

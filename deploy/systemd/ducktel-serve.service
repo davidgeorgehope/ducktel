@@ -1,7 +1,10 @@
 [Unit]
 Description=ducktel serve (OTLP/HTTP ingest on 127.0.0.1:4318)
-After=network-online.target
+After=network-online.target var-lib-ducktel.mount
 Wants=network-online.target
+
+# The data dir is a fixed-size volume; never write to the root filesystem.
+RequiresMountsFor=/var/lib/ducktel
 
 [Service]
 Type=simple
@@ -14,6 +17,11 @@ ExecStart=/usr/local/bin/ducktel serve --host 127.0.0.1 --port 4318 \
   --data-dir /var/lib/ducktel --retention 14d
 StateDirectory=ducktel
 StateDirectoryMode=0750
+# DuckDB spills to .tmp under the working directory, so keep it on the volume.
+WorkingDirectory=/var/lib/ducktel
+# Bound what this unit can push into the journal.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=500
 Restart=on-failure
 RestartSec=5
 MemoryMax=768M

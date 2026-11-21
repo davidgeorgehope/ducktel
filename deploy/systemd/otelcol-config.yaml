@@ -59,11 +59,10 @@ receivers:
       - /var/log/nginx/access.log
       - /var/log/nginx/error.log
     start_at: end
+    # Read offsets stay in memory (no storage extension), so nothing is
+    # written to disk; a restart resumes at the end of each file.
     resource:
       service.name: nginx-files
-  docker_stats:
-    endpoint: unix:///var/run/docker.sock
-    collection_interval: 30s
   # Lets local apps send OTLP through the collector instead of straight to ducktel.
   otlp:
     protocols:
@@ -98,6 +97,14 @@ exporters:
     encoding: proto
     headers:
       Authorization: Bearer ${env:DUCKTEL_AUTH_TOKEN}
+    # In-memory queue only (no file_storage extension): nothing buffers on
+    # disk. If ducktel is down, the queue fills and new data is dropped.
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 5m
 
 service:
   telemetry:
@@ -105,7 +112,7 @@ service:
       level: none
   pipelines:
     metrics:
-      receivers: [hostmetrics, docker_stats, otlp]
+      receivers: [hostmetrics, otlp]
       processors: [memory_limiter, resourcedetection, resource, resource/default_service, batch]
       exporters: [otlphttp/ducktel]
     logs:

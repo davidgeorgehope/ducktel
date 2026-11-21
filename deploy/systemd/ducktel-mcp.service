@@ -1,7 +1,10 @@
 [Unit]
 Description=ducktel mcp --http (MCP + dashboard on 127.0.0.1:4319)
-After=ducktel-serve.service
+After=ducktel-serve.service var-lib-ducktel.mount
 Wants=ducktel-serve.service
+
+# The data dir is a fixed-size volume; never write to the root filesystem.
+RequiresMountsFor=/var/lib/ducktel
 
 [Service]
 Type=simple
@@ -19,6 +22,11 @@ ExecStart=/usr/local/bin/ducktel mcp --http --host 127.0.0.1 --port 4319 \
   --flush-url http://127.0.0.1:4318/flush \
   --feedback-url http://127.0.0.1:4318/feedback \
   --dashboard
+# DuckDB spills to .tmp under the working directory, so keep it on the volume.
+WorkingDirectory=/var/lib/ducktel
+# Bound what this unit can push into the journal.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=500
 Restart=on-failure
 RestartSec=5
 MemoryMax=1G
