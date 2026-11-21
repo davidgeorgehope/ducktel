@@ -8,14 +8,15 @@ package testharness
 
 import (
 	"bytes"
-	"crypto/rand"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
-	mathrand "math/rand"
+	"math/rand"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,79 @@ type Config struct {
 	Tenant string
 }
 
+// Span is one span EmitBatch emitted.
+type Span struct {
+	TraceID      string
+	SpanID       string
+	ParentSpanID string
+	Service      string
+	Name         string
+	Kind         int
+	StartNano    int64
+	EndNano      int64
+	Status       int
+}
+
+// Log is one log record EmitBatch emitted.
+type Log struct {
+	Service     string
+	Severity    string
+	SeverityNum int
+	Body        string
+	TraceID     string
+	SpanID      string
+}
+
+// Metric is one numeric point EmitBatch emitted.
+type Metric struct {
+	Name    string
+	Service string
+	Value   float64
+}
+
+// Batch is the traces, logs, and metrics snapshot EmitBatch produced.
+type Batch struct {
+	// Tenant is the tenant.id resource attribute applied to the batch.
+	// Empty when Config.Tenant is empty.
+	Tenant  string
+	Spans   []Span
+	Logs    []Log
+	Metrics []Metric
+}
+
+// MetricNames returns the metric names the generator emits, in catalog order.
+func MetricNames() []string {
+	cat := metricCatalog()
+	names := make([]string, len(cat))
+	for i, m := range cat {
+		names[i] = m.name
+	}
+	return names
+}
+
+type metricKind int
+
+const (
+	metricGauge metricKind = iota
+	metricSum
+)
+
+type metricDef struct {
+	name  string
+	unit  string
+	kind  metricKind
+	asInt bool
+}
+
+func metricCatalog() []metricDef {
+	return []metricDef{
+		{name: "system.cpu.utilization", unit: "%", kind: metricGauge},
+		{name: "process.memory.usage", unit: "By", kind: metricGauge, asInt: true},
+		{name: "http.server.request.count", unit: "requests", kind: metricSum},
+		{name: "http.server.request.error.count", unit: "errors", kind: metricSum},
+	}
+}
+
 // Harness generates and sends synthetic telemetry.
 type Harness struct {
 	cfg    Config
@@ -80,10 +154,18 @@ type Harness struct {
 
 	svcMap  map[string]*Service
 	scenMap map[string]*Scenario // service -> scenario
+
+	// endpointSet is true when Config.Endpoint was non-empty. EmitBatch posts
+	// only then. Start still sends to the default endpoint New fills in.
+	endpointSet bool
+
+	rnd   *rand.Rand
+	rndMu sync.Mutex
 }
 
 // New creates a harness from config, applying defaults.
 func New(cfg Config) *Harness {
+	endpointSet := cfg.Endpoint != ""
 	if cfg.Endpoint == "" {
 		cfg.Endpoint = "http://localhost:4318"
 	}
@@ -94,16 +176,14 @@ func New(cfg Config) *Harness {
 	if cfg.MetricsMs <= 0 {
 		cfg.MetricsMs = 10000
 	}
-	if cfg.ErrorRate <= 0 {
-		cfg.ErrorRate = 0.05
-	}
 
 	h := &Harness{
-		cfg:     cfg,
-		client:  &http.Client{Timeout: 5 * time.Second},
-		stop:    make(chan struct{}),
-		svcMap:  make(map[string]*Service),
-		scenMap: make(map[string]*Scenario),
+		cfg:         cfg,
+		client:      &http.Client{Timeout: 5 * time.Second},
+		stop:        make(chan struct{}),
+		svcMap:      make(map[string]*Service),
+		scenMap:     make(map[string]*Scenario),
+		endpointSet: endpointSet,
 	}
 	for i := range cfg.Services {
 		h.svcMap[cfg.Services[i].Name] = &cfg.Services[i]
@@ -112,6 +192,63 @@ func New(cfg Config) *Harness {
 		h.scenMap[cfg.Scenarios[i].TargetService] = &cfg.Scenarios[i]
 	}
 	return h
+}
+
+// SetRand makes generation deterministic. Nil keeps the global math/rand and
+// crypto/rand path the CLI uses.
+func (h *Harness) SetRand(r *rand.Rand) {
+	h.rndMu.Lock()
+	h.rnd = r
+	h.rndMu.Unlock()
+}
+
+func (h *Harness) intn(n int) int {
+	h.rndMu.Lock()
+	r := h.rnd
+	if r == nil {
+		h.rndMu.Unlock()
+		return rand.Intn(n)
+	}
+	v := r.Intn(n)
+	h.rndMu.Unlock()
+	return v
+}
+
+func (h *Harness) int63n(n int64) int64 {
+	h.rndMu.Lock()
+	r := h.rnd
+	if r == nil {
+		h.rndMu.Unlock()
+		return rand.Int63n(n)
+	}
+	v := r.Int63n(n)
+	h.rndMu.Unlock()
+	return v
+}
+
+func (h *Harness) float64() float64 {
+	h.rndMu.Lock()
+	r := h.rnd
+	if r == nil {
+		h.rndMu.Unlock()
+		return rand.Float64()
+	}
+	v := r.Float64()
+	h.rndMu.Unlock()
+	return v
+}
+
+func (h *Harness) randomHex(byteLen int) string {
+	h.rndMu.Lock()
+	r := h.rnd
+	if r == nil {
+		h.rndMu.Unlock()
+		return cryptoHex(byteLen)
+	}
+	b := make([]byte, byteLen)
+	_, _ = r.Read(b)
+	h.rndMu.Unlock()
+	return hex.EncodeToString(b)
 }
 
 // DefaultConfig returns a ready-to-use e-commerce topology.
@@ -210,40 +347,124 @@ func (h *Harness) traceLoop() {
 }
 
 func (h *Harness) generateTrace() {
+	spans, logs := h.buildTrace(time.Now())
+	if len(spans) > 0 {
+		h.sendTraces(spans)
+	}
+	if len(logs) > 0 {
+		h.sendLogs(logs)
+	}
+}
+
+func (h *Harness) buildTrace(now time.Time) ([]spanData, []logData) {
 	// Pick a random entry-point service (those not depended on by others).
 	entries := h.findEntryPoints()
 	if len(entries) == 0 {
-		return
+		return nil, nil
 	}
-	entry := entries[mathrand.Intn(len(entries))]
+	entry := entries[h.intn(len(entries))]
 
-	traceID := randomHex(16)
+	traceID := h.randomHex(16)
 
 	// Decide if this trace has an error and pick the source.
 	errorRate := h.cfg.ErrorRate
 	var errorSource string
 	// Check scenario overrides first
 	for _, s := range h.cfg.Scenarios {
-		if s.Type == "error_rate" && mathrand.Float64() < s.ErrorRate {
+		if s.Type == "error_rate" && h.float64() < s.ErrorRate {
 			errorSource = s.TargetService
 			break
 		}
 	}
-	if errorSource == "" && mathrand.Float64() < errorRate {
-		errorSource = h.cfg.Services[mathrand.Intn(len(h.cfg.Services))].Name
+	if errorSource == "" && h.float64() < errorRate {
+		errorSource = h.cfg.Services[h.intn(len(h.cfg.Services))].Name
 	}
 
 	var allSpans []spanData
 	var allLogs []logData
 
-	h.walkService(entry.Name, traceID, "", time.Now(), errorSource, &allSpans, &allLogs, map[string]bool{}, 0)
+	h.walkService(entry.Name, traceID, "", now, errorSource, &allSpans, &allLogs, map[string]bool{}, 0)
+	return allSpans, allLogs
+}
 
-	if len(allSpans) > 0 {
-		h.sendTraces(allSpans)
+// EmitBatch generates n traces and one metrics snapshot, posts them to
+// cfg.Endpoint when Endpoint is set, and returns the records it emitted.
+// now is the clock for timestamps. The zero time means time.Now().
+// A non-2xx or a transport error is returned. Do not swallow it on this path.
+func (h *Harness) EmitBatch(n int, now time.Time) (Batch, error) {
+	if now.IsZero() {
+		now = time.Now()
 	}
-	if len(allLogs) > 0 {
-		h.sendLogs(allLogs)
+	batch := Batch{Tenant: h.cfg.Tenant}
+	// Each trace starts a second later so span start times do not tie.
+	for i := 0; i < n; i++ {
+		spans, logs := h.buildTrace(now.Add(time.Duration(i) * time.Second))
+		batch.Spans = append(batch.Spans, exportedSpans(spans)...)
+		batch.Logs = append(batch.Logs, exportedLogs(logs)...)
+		if err := h.postTrace(spans, logs); err != nil {
+			return batch, err
+		}
 	}
+	counters := map[string]int64{}
+	errCounters := map[string]int64{}
+	points, payload := h.buildMetrics(now, counters, errCounters)
+	batch.Metrics = points
+	if h.endpointSet {
+		if err := h.postPayload("/v1/metrics", payload); err != nil {
+			return batch, err
+		}
+	}
+	return batch, nil
+}
+
+func (h *Harness) postTrace(spans []spanData, logs []logData) error {
+	if !h.endpointSet {
+		return nil
+	}
+	if len(spans) > 0 {
+		if err := h.postPayload("/v1/traces", tracePayload(spans)); err != nil {
+			return err
+		}
+	}
+	if len(logs) > 0 {
+		if err := h.postPayload("/v1/logs", logPayload(logs)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func exportedSpans(spans []spanData) []Span {
+	out := make([]Span, len(spans))
+	for i, s := range spans {
+		out[i] = Span{
+			TraceID:      s.TraceID,
+			SpanID:       s.SpanID,
+			ParentSpanID: s.ParentSpanID,
+			Service:      s.ServiceName,
+			Name:         s.SpanName,
+			Kind:         s.Kind,
+			StartNano:    s.StartNano,
+			EndNano:      s.EndNano,
+			Status:       s.StatusCode,
+		}
+	}
+	return out
+}
+
+func exportedLogs(logs []logData) []Log {
+	out := make([]Log, len(logs))
+	for i, l := range logs {
+		out[i] = Log{
+			Service:     l.ServiceName,
+			Severity:    l.Severity,
+			SeverityNum: l.SeverityNum,
+			Body:        l.Body,
+			TraceID:     l.TraceID,
+			SpanID:      l.SpanID,
+		}
+	}
+	return out
 }
 
 type spanData struct {
@@ -288,18 +509,18 @@ func (h *Harness) walkService(
 		return startTime, false
 	}
 
-	spanID := randomHex(8)
+	spanID := h.randomHex(8)
 
 	// Pick an operation
 	var op Operation
 	if len(svc.Operations) > 0 {
-		op = svc.Operations[mathrand.Intn(len(svc.Operations))]
+		op = svc.Operations[h.intn(len(svc.Operations))]
 	} else {
 		op = Operation{Name: svcName, SpanName: svcName + " process", MinMs: 5, MaxMs: 30}
 	}
 
 	// Calculate own processing time
-	ownMs := op.MinMs + mathrand.Intn(max(op.MaxMs-op.MinMs, 1)+1)
+	ownMs := op.MinMs + h.intn(max(op.MaxMs-op.MinMs, 1)+1)
 	// Apply scenario latency multiplier
 	if sc, ok := h.scenMap[svcName]; ok && sc.Type == "latency_spike" {
 		ownMs = int(float64(ownMs) * sc.LatencyMultiple)
@@ -307,7 +528,7 @@ func (h *Harness) walkService(
 	ownDuration := time.Duration(ownMs) * time.Millisecond
 
 	isErrorSource := (errorSource == svcName)
-	childStart := startTime.Add(time.Duration(mathrand.Intn(2)+1) * time.Millisecond)
+	childStart := startTime.Add(time.Duration(h.intn(2)+1) * time.Millisecond)
 	latestEnd := childStart
 	downstreamError := false
 
@@ -317,7 +538,7 @@ func (h *Harness) walkService(
 	for _, dep := range svc.DependsOn {
 		if dep.Service != "" {
 			// Service dependency — create client span + recurse
-			clientSpanID := randomHex(8)
+			clientSpanID := h.randomHex(8)
 			clientAttrs := map[string]interface{}{
 				"net.peer.name": dep.Service,
 			}
@@ -330,7 +551,7 @@ func (h *Harness) walkService(
 				clientAttrs["url.path"] = "/" + dep.Service
 			}
 
-			downstreamStart := childStart.Add(time.Duration(mathrand.Intn(2)+1) * time.Millisecond)
+			downstreamStart := childStart.Add(time.Duration(h.intn(2)+1) * time.Millisecond)
 			depEnd, depError := h.walkService(dep.Service, traceID, clientSpanID, downstreamStart, errorSource, spans, logs, visited, depth+1)
 			if depError {
 				downstreamError = true
@@ -358,8 +579,8 @@ func (h *Harness) walkService(
 
 		} else if dep.DB != "" {
 			// DB dependency — create client span
-			dbSpanID := randomHex(8)
-			dbMs := 2 + mathrand.Intn(30)
+			dbSpanID := h.randomHex(8)
+			dbMs := 2 + h.intn(30)
 			if sc, ok := h.scenMap[svcName]; ok && sc.Type == "latency_spike" {
 				dbMs = int(float64(dbMs) * sc.LatencyMultiple)
 			}
@@ -372,7 +593,7 @@ func (h *Harness) walkService(
 			}
 			switch dep.DBSystem {
 			case "redis":
-				dbAttrs["db.statement"] = fmt.Sprintf("GET session:%s", randomHex(4))
+				dbAttrs["db.statement"] = fmt.Sprintf("GET session:%s", h.randomHex(4))
 				dbAttrs["db.operation"] = "GET"
 			default:
 				dbAttrs["db.statement"] = "SELECT * FROM items WHERE id = $1"
@@ -428,7 +649,22 @@ func (h *Harness) walkService(
 		TraceID: traceID, SpanID: spanID, ResourceAttrs: resAttrs,
 	})
 
+	if sc, ok := h.scenMap[svcName]; ok && sc.Type == "latency_spike" {
+		*logs = append(*logs, logData{
+			Timestamp: serverEnd.UnixNano(), ServiceName: svcName,
+			Severity: "WARN", SeverityNum: 13,
+			Body:    fmt.Sprintf("latency above baseline for %s", op.SpanName),
+			TraceID: traceID, SpanID: spanID, ResourceAttrs: resAttrs,
+		})
+	}
+
 	if isErrorSource {
+		*logs = append(*logs, logData{
+			Timestamp: serverEnd.UnixNano(), ServiceName: svcName,
+			Severity: "WARN", SeverityNum: 13,
+			Body:    fmt.Sprintf("degraded %s: retrying after upstream failure", op.SpanName),
+			TraceID: traceID, SpanID: spanID, ResourceAttrs: resAttrs,
+		})
 		errMsgs := []string{
 			"ConnectionTimeoutException: upstream service unreachable",
 			"NullPointerException: attempt to invoke method on null object",
@@ -439,7 +675,7 @@ func (h *Harness) walkService(
 		*logs = append(*logs, logData{
 			Timestamp: serverEnd.UnixNano(), ServiceName: svcName,
 			Severity: "ERROR", SeverityNum: 17,
-			Body:    errMsgs[mathrand.Intn(len(errMsgs))],
+			Body:    errMsgs[h.intn(len(errMsgs))],
 			TraceID: traceID, SpanID: spanID, ResourceAttrs: resAttrs,
 		})
 	}
@@ -497,78 +733,60 @@ func (h *Harness) metricsLoop() {
 
 	// Send one batch immediately so a short --duration (e.g. 5s) still
 	// produces metrics; waiting for the first tick used to leave metrics empty.
-	h.generateMetrics(counters, errCounters)
+	h.sendMetrics(time.Now(), counters, errCounters)
 
 	for {
 		select {
 		case <-h.stop:
 			return
 		case <-ticker.C:
-			h.generateMetrics(counters, errCounters)
+			h.sendMetrics(time.Now(), counters, errCounters)
 		}
 	}
 }
 
-func (h *Harness) generateMetrics(counters, errCounters map[string]int64) {
-	now := fmt.Sprintf("%d", time.Now().UnixNano())
-	hourAgo := fmt.Sprintf("%d", time.Now().Add(-time.Hour).UnixNano())
+func (h *Harness) sendMetrics(now time.Time, counters, errCounters map[string]int64) {
+	_, payload := h.buildMetrics(now, counters, errCounters)
+	h.post("/v1/metrics", payload)
+}
 
+func (h *Harness) buildMetrics(now time.Time, counters, errCounters map[string]int64) ([]Metric, map[string]interface{}) {
+	nowStr := fmt.Sprintf("%d", now.UnixNano())
+	hourAgo := fmt.Sprintf("%d", now.Add(-time.Hour).UnixNano())
+	cat := metricCatalog()
+
+	var points []Metric
 	var resourceMetrics []interface{}
 
 	for _, svc := range h.cfg.Services {
-		counters[svc.Name] += int64(5 + mathrand.Intn(15))
+		counters[svc.Name] += int64(5 + h.intn(15))
 
 		errRate := h.cfg.ErrorRate
 		if sc, ok := h.scenMap[svc.Name]; ok && sc.Type == "error_rate" {
 			errRate = sc.ErrorRate
 		}
-		if mathrand.Float64() < errRate {
+		if h.float64() < errRate {
 			errCounters[svc.Name]++
 		}
 
-		cpuUtil := 0.1 + mathrand.Float64()*0.6
-		memUsage := 200_000_000 + mathrand.Int63n(600_000_000)
+		cpuUtil := 0.1 + h.float64()*0.6
+		memUsage := 200_000_000 + h.int63n(600_000_000)
 		if sc, ok := h.scenMap[svc.Name]; ok {
 			if sc.Type == "latency_spike" {
-				cpuUtil = 0.7 + mathrand.Float64()*0.3
+				cpuUtil = 0.7 + h.float64()*0.3
 			}
 		}
+		values := []float64{
+			cpuUtil,
+			float64(memUsage),
+			float64(counters[svc.Name]),
+			float64(errCounters[svc.Name]),
+		}
 
-		metrics := []interface{}{
-			map[string]interface{}{
-				"name": "system.cpu.utilization", "unit": "%",
-				"gauge": map[string]interface{}{
-					"dataPoints": []map[string]interface{}{
-						{"timeUnixNano": now, "asDouble": cpuUtil},
-					},
-				},
-			},
-			map[string]interface{}{
-				"name": "process.memory.usage", "unit": "By",
-				"gauge": map[string]interface{}{
-					"dataPoints": []map[string]interface{}{
-						{"timeUnixNano": now, "asInt": fmt.Sprintf("%d", memUsage)},
-					},
-				},
-			},
-			map[string]interface{}{
-				"name": "http.server.request.count", "unit": "requests",
-				"sum": map[string]interface{}{
-					"isMonotonic": true, "aggregationTemporality": 2,
-					"dataPoints": []map[string]interface{}{
-						{"timeUnixNano": now, "startTimeUnixNano": hourAgo, "asInt": fmt.Sprintf("%d", counters[svc.Name])},
-					},
-				},
-			},
-			map[string]interface{}{
-				"name": "http.server.request.error.count", "unit": "errors",
-				"sum": map[string]interface{}{
-					"isMonotonic": true, "aggregationTemporality": 2,
-					"dataPoints": []map[string]interface{}{
-						{"timeUnixNano": now, "startTimeUnixNano": hourAgo, "asInt": fmt.Sprintf("%d", errCounters[svc.Name])},
-					},
-				},
-			},
+		metrics := make([]interface{}, 0, len(cat))
+		for i, def := range cat {
+			points = append(points, Metric{Name: def.name, Service: svc.Name, Value: values[i]})
+			metrics = append(metrics, otlpMetric(def, values[i], nowStr, hourAgo))
 		}
 
 		resAttrs := h.resourceAttrs(&svc)
@@ -585,21 +803,53 @@ func (h *Harness) generateMetrics(counters, errCounters map[string]int64) {
 		})
 	}
 
-	payload := map[string]interface{}{"resourceMetrics": resourceMetrics}
-	h.post("/v1/metrics", payload)
+	return points, map[string]interface{}{"resourceMetrics": resourceMetrics}
+}
+
+func otlpMetric(def metricDef, value float64, now, hourAgo string) map[string]interface{} {
+	switch def.kind {
+	case metricSum:
+		asInt := fmt.Sprintf("%d", int64(value))
+		return map[string]interface{}{
+			"name": def.name, "unit": def.unit,
+			"sum": map[string]interface{}{
+				"isMonotonic": true, "aggregationTemporality": 2,
+				"dataPoints": []map[string]interface{}{
+					{"timeUnixNano": now, "startTimeUnixNano": hourAgo, "asInt": asInt},
+				},
+			},
+		}
+	default:
+		point := map[string]interface{}{"timeUnixNano": now}
+		if def.asInt {
+			point["asInt"] = fmt.Sprintf("%d", int64(value))
+		} else {
+			point["asDouble"] = value
+		}
+		return map[string]interface{}{
+			"name": def.name, "unit": def.unit,
+			"gauge": map[string]interface{}{
+				"dataPoints": []map[string]interface{}{point},
+			},
+		}
+	}
 }
 
 // ---------- OTLP formatting + sending ----------
 
 func (h *Harness) sendTraces(spans []spanData) {
-	// Group by service
+	h.post("/v1/traces", tracePayload(spans))
+}
+
+func tracePayload(spans []spanData) map[string]interface{} {
 	byService := map[string][]spanData{}
 	for _, s := range spans {
 		byService[s.ServiceName] = append(byService[s.ServiceName], s)
 	}
 
 	var resourceSpans []interface{}
-	for svcName, svcSpans := range byService {
+	for _, svcName := range sortedKeys(byService) {
+		svcSpans := byService[svcName]
 		var otlpSpans []interface{}
 		for _, s := range svcSpans {
 			sp := map[string]interface{}{
@@ -636,18 +886,22 @@ func (h *Harness) sendTraces(spans []spanData) {
 		})
 	}
 
-	payload := map[string]interface{}{"resourceSpans": resourceSpans}
-	h.post("/v1/traces", payload)
+	return map[string]interface{}{"resourceSpans": resourceSpans}
 }
 
 func (h *Harness) sendLogs(entries []logData) {
+	h.post("/v1/logs", logPayload(entries))
+}
+
+func logPayload(entries []logData) map[string]interface{} {
 	byService := map[string][]logData{}
 	for _, l := range entries {
 		byService[l.ServiceName] = append(byService[l.ServiceName], l)
 	}
 
 	var resourceLogs []interface{}
-	for svcName, svcLogs := range byService {
+	for _, svcName := range sortedKeys(byService) {
+		svcLogs := byService[svcName]
 		var records []interface{}
 		for _, l := range svcLogs {
 			rec := map[string]interface{}{
@@ -683,21 +937,24 @@ func (h *Harness) sendLogs(entries []logData) {
 		})
 	}
 
-	payload := map[string]interface{}{"resourceLogs": resourceLogs}
-	h.post("/v1/logs", payload)
+	return map[string]interface{}{"resourceLogs": resourceLogs}
 }
 
 func (h *Harness) post(path string, payload interface{}) {
+	if err := h.postPayload(path, payload); err != nil {
+		log.Printf("[testharness] %s", err.Error())
+	}
+}
+
+func (h *Harness) postPayload(path string, payload interface{}) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("[testharness] marshal error: %v", err)
-		return
+		return fmt.Errorf("marshal error: %v", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, h.cfg.Endpoint+path, bytes.NewReader(data))
 	if err != nil {
-		log.Printf("[testharness] request error (%s): %v", path, err)
-		return
+		return fmt.Errorf("request error (%s): %v", path, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// Present the bearer token when configured, so the generator can drive a
@@ -708,21 +965,27 @@ func (h *Harness) post(path string, payload interface{}) {
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		log.Printf("[testharness] send error (%s): %v", path, err)
-		return
+		return fmt.Errorf("send error (%s): %v", path, err)
 	}
 	resp.Body.Close()
 
-	if resp.StatusCode >= 300 {
-		log.Printf("[testharness] unexpected status %d for %s", resp.StatusCode, path)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected status %d for %s", resp.StatusCode, path)
 	}
+	return nil
 }
 
 // ---------- helpers ----------
 
 func formatAttrs(attrs map[string]interface{}) []map[string]interface{} {
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var out []map[string]interface{}
-	for k, v := range attrs {
+	for _, k := range keys {
+		v := attrs[k]
 		var val map[string]interface{}
 		switch tv := v.(type) {
 		case string:
@@ -744,8 +1007,14 @@ func formatAttrs(attrs map[string]interface{}) []map[string]interface{} {
 }
 
 func formatResourceAttrs(attrs map[string]string) []map[string]interface{} {
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var out []map[string]interface{}
-	for k, v := range attrs {
+	for _, k := range keys {
+		v := attrs[k]
 		out = append(out, map[string]interface{}{
 			"key": k, "value": map[string]interface{}{"stringValue": v},
 		})
@@ -771,14 +1040,23 @@ func PascalCase(s string) string {
 	return b.String()
 }
 
-func randomHex(byteLen int) string {
+func cryptoHex(byteLen int) string {
 	b := make([]byte, byteLen)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := cryptorand.Read(b); err != nil {
 		// fallback
-		n, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+		n, _ := cryptorand.Int(cryptorand.Reader, big.NewInt(1<<62))
 		return fmt.Sprintf("%032x", n)[:byteLen*2]
 	}
 	return hex.EncodeToString(b)
+}
+
+func sortedKeys[T any](m map[string]T) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func max(a, b int) int {
