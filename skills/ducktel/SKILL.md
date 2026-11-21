@@ -302,7 +302,9 @@ is exposed they are reachable too — token-guarded. Block the path at the ingre
 
 **Feedback stays local unless a sink is on.** The sink is off by default. `--feedback-webhook-url`, or
 `--feedback-github-repo` with `--feedback-github-token`, sends the agent-written text off the machine.
-ducktel does not scrub that text. Setting both sinks makes `ducktel mcp` fail at startup. With no
+ducktel does not scrub that text. `--feedback-github-label` (default `feedback`, env
+`DUCKTEL_FEEDBACK_GITHUB_LABEL`) is the label on each GitHub issue. The label must already exist on
+the repo. Setting both sinks makes `ducktel mcp` fail at startup. With no
 `--feedback-url`, the MCP process writes its data directory. To store into a running receiver:
 
 ```bash
@@ -312,8 +314,10 @@ ducktel mcp --data-dir /data --feedback-url http://127.0.0.1:4318/feedback
 A second `ducktel serve` on that data directory will not store the report. It exits because the
 directory is locked. `POST /feedback` flushes that log before it returns success, so the result
 does not say the record is still buffered. A flush error still keeps the `report_id`. A retry does
-not write a second log. At most 20 accepted reports per tenant are stored per rolling hour. The
-window is in memory, and a restart clears it.
+not write a second log. At most 20 accepted reports per tenant are stored per rolling hour, and at
+most 30 across all tenants. `--feedback-global-limit` (env `DUCKTEL_FEEDBACK_GLOBAL_LIMIT`) changes
+the cross-tenant cap on `ducktel mcp`. The same flag on `ducktel serve` changes it for `POST /feedback`.
+Both windows are in memory, and a restart clears them.
 
 Clients that cannot call a tool can force a flush directly:
 

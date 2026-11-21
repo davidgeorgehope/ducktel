@@ -141,6 +141,61 @@ func TestRotatingTenantsHitTheGlobalCap(t *testing.T) {
 	}
 }
 
+func TestConfiguredGlobalCapAndAFailedWrite(t *testing.T) {
+	var writes atomic.Int32
+	svc, err := feedback.New(feedback.Options{
+		GlobalPerHour: 2,
+		Write: func(context.Context, feedback.Report) error {
+			writes.Add(1)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		r, err := feedback.ParseFields(validFields(fmt.Sprintf("ok-%d", i), fmt.Sprintf("t-%d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.Submit(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocked, err := feedback.ParseFields(validFields("over", "t-over"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Submit(ctx, blocked); !errors.Is(err, feedback.ErrRateLimited) {
+		t.Fatalf("third tenant = %v, want rate limit", err)
+	}
+
+	failing, err := feedback.New(feedback.Options{
+		GlobalPerHour: 1,
+		Write: func(context.Context, feedback.Report) error {
+			return errors.New("disk full")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := feedback.ParseFields(validFields("fail-1", "one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failing.Submit(ctx, first); err == nil || errors.Is(err, feedback.ErrRateLimited) {
+		t.Fatalf("failed write = %v", err)
+	}
+	second, err := feedback.ParseFields(validFields("fail-2", "two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failing.Submit(ctx, second); err == nil || errors.Is(err, feedback.ErrRateLimited) {
+		t.Fatalf("second tenant after a failed write = %v, want the write error", err)
+	}
+}
+
 func TestSameReportIDWritesOneLog(t *testing.T) {
 	var writes atomic.Int32
 	started := make(chan struct{})

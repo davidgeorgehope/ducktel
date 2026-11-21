@@ -74,9 +74,12 @@ type Receiver struct {
 // It is intentionally a separate secret from token: the query container is
 // given only flushToken. /feedback writes one feedback log, not arbitrary
 // telemetry, and it rejects the OTLP ingest token.
-func New(host string, port int, consumer Consumer, token, flushToken string, flush func() error) (*Receiver, error) {
+//
+// feedbackGlobalPerHour caps accepted POST /feedback reports across all
+// tenants in a rolling hour. Zero uses 30.
+func New(host string, port int, consumer Consumer, token, flushToken string, flush func() error, feedbackGlobalPerHour int) (*Receiver, error) {
 	r := &Receiver{consumer: consumer, token: token, flushToken: flushToken, flush: flush}
-	svc, err := feedback.New(feedback.Options{Write: r.writeFeedback})
+	svc, err := feedback.New(feedback.Options{Write: r.writeFeedback, GlobalPerHour: feedbackGlobalPerHour})
 	if err != nil {
 		return nil, err
 	}

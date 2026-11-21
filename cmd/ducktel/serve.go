@@ -23,13 +23,14 @@ const goMemLimitFraction = 70
 
 func serveCmd() *cobra.Command {
 	var (
-		host          string
-		port          int
-		flushInterval time.Duration
-		bufferSize    int
-		retention     string
-		token         string
-		flushToken    string
+		host                string
+		port                int
+		flushInterval       time.Duration
+		bufferSize          int
+		retention           string
+		token               string
+		flushToken          string
+		feedbackGlobalLimit int
 	)
 
 	cmd := &cobra.Command{
@@ -57,7 +58,10 @@ POST /feedback stores one agent-feedback log. It uses the flush token, the
 same check as POST /flush, and rejects the OTLP ingest token. It does not
 accept spans, metrics, or arbitrary logs. A second ducktel serve is not how
 another process stores feedback. Point that process at
---feedback-url http://127.0.0.1:4318/feedback.
+--feedback-url http://127.0.0.1:4318/feedback. POST /feedback stores at most
+20 accepted reports per tenant per rolling hour, and at most
+--feedback-global-limit (default 30) across all tenants. A restart clears
+both windows.
 
 TLS is not terminated here — front the receiver with a proxy or ingress if the
 token would cross an untrusted network.`,
@@ -83,6 +87,10 @@ token would cross an untrusted network.`,
 				if v := os.Getenv("DUCKTEL_MCP_TOKEN"); v != "" {
 					flushToken = v
 				}
+			}
+			feedbackGlobalLimit, err := positiveIntFlag(cmd.Flags().Changed("feedback-global-limit"), feedbackGlobalLimit, "feedback-global-limit", "DUCKTEL_FEEDBACK_GLOBAL_LIMIT")
+			if err != nil {
+				return err
 			}
 
 			retentionDur, err := writer.ParseRetention(retention)
@@ -136,7 +144,7 @@ token would cross an untrusted network.`,
 			log.Printf("starting: data-dir=%s flush-interval=%s buffer-size=%d retention=%s auth=%s",
 				dataDir, flushInterval, bufferSize, retentionState, authState)
 
-			r, err := receiver.New(host, port, w, token, flushToken, w.Flush)
+			r, err := receiver.New(host, port, w, token, flushToken, w.Flush, feedbackGlobalLimit)
 			if err != nil {
 				return err
 			}
@@ -191,6 +199,7 @@ token would cross an untrusted network.`,
 	cmd.Flags().StringVar(&retention, "retention", "", "Delete date partitions older than this window (e.g. 720h or 30d); empty keeps data forever")
 	cmd.Flags().StringVar(&token, "auth-token", "", "Require this bearer token on OTLP endpoints (env: DUCKTEL_AUTH_TOKEN)")
 	cmd.Flags().StringVar(&flushToken, "flush-token", "", "Require this bearer token on POST /flush and POST /feedback (env: DUCKTEL_FLUSH_TOKEN, or DUCKTEL_MCP_TOKEN)")
+	cmd.Flags().IntVar(&feedbackGlobalLimit, "feedback-global-limit", 30, "Accepted feedback reports across all tenants per rolling hour on POST /feedback (env: DUCKTEL_FEEDBACK_GLOBAL_LIMIT)")
 
 	return cmd
 }

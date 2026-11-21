@@ -86,6 +86,19 @@ func TestFeedbackCLIHidesOtherTenantsAndSinceZero(t *testing.T) {
 	}
 }
 
+func TestMCPRejectsNonPositiveFeedbackGlobalLimit(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		cmd := mcpCmd()
+		cmd.SetArgs([]string{"--feedback-global-limit", v})
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "--feedback-global-limit") {
+			t.Fatalf("--feedback-global-limit %s: %v", v, err)
+		}
+	}
+}
+
 func TestMCPRejectsBothFeedbackSinks(t *testing.T) {
 	prev := dataDir
 	dataDir = t.TempDir()
