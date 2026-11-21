@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -25,19 +26,21 @@ import (
 
 func mcpCmd() *cobra.Command {
 	var (
-		httpMode      bool
-		host          string
-		port          int
-		token         string
-		basePath      string
-		flushURL      string
-		dashboard     bool
-		dashURL       string
-		feedbackURL   string
-		feedbackToken string
-		webhookURL    string
-		githubRepo    string
-		githubToken   string
+		httpMode            bool
+		host                string
+		port                int
+		token               string
+		basePath            string
+		flushURL            string
+		dashboard           bool
+		dashURL             string
+		feedbackURL         string
+		feedbackToken       string
+		webhookURL          string
+		githubRepo          string
+		githubToken         string
+		githubLabel         string
+		feedbackGlobalLimit int
 	)
 
 	cmd := &cobra.Command{
@@ -82,7 +85,8 @@ ducktel.agent_feedback. log_search and the logs dashboard show it. Nothing is
 sent off the machine unless a sink is configured. A sink is off by default.
 Turning one on sends the agent-written text off the machine. ducktel does not scrub that text.
 The in-memory rate limit is 20 accepted reports per tenant
-per rolling hour and a restart clears it. POST /feedback flushes
+per rolling hour, and --feedback-global-limit (default 30) across all
+tenants. A restart clears both windows. POST /feedback flushes
 the log before it returns success. A flush error still keeps the
 report_id, so a retry does not write a second log.
 
@@ -96,6 +100,7 @@ With no --feedback-url, this process writes the data directory itself. Set at
 most one sink. Setting both fails at startup:
   --feedback-webhook-url
   --feedback-github-repo with --feedback-github-token
+  --feedback-github-label (default feedback) is applied to each issue and must already exist on the repo.
 
 Saved queries are per tenant. save_query checks the tool name and arguments
 before writing. run_saved_query can override since_minutes and until_minutes
@@ -168,6 +173,15 @@ Examples:
 					githubToken = v
 				}
 			}
+			if !cmd.Flags().Changed("feedback-github-label") {
+				if v := os.Getenv("DUCKTEL_FEEDBACK_GITHUB_LABEL"); v != "" {
+					githubLabel = v
+				}
+			}
+			feedbackGlobalLimit, err := positiveIntFlag(cmd.Flags().Changed("feedback-global-limit"), feedbackGlobalLimit, "feedback-global-limit", "DUCKTEL_FEEDBACK_GLOBAL_LIMIT")
+			if err != nil {
+				return err
+			}
 			bearer := feedbackToken
 			if bearer == "" {
 				bearer = token
@@ -178,7 +192,7 @@ Examples:
 			if bearer == "" {
 				bearer = os.Getenv("DUCKTEL_FLUSH_TOKEN")
 			}
-			feedbackSvc, err := newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken)
+			feedbackSvc, err := newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken, githubLabel, feedbackGlobalLimit)
 			if err != nil {
 				return err
 			}
@@ -228,18 +242,22 @@ Examples:
 	cmd.Flags().StringVar(&webhookURL, "feedback-webhook-url", "", "POST each stored report here. Off unless set. Sends the agent-written text off the machine; ducktel does not scrub it (env: DUCKTEL_FEEDBACK_WEBHOOK_URL)")
 	cmd.Flags().StringVar(&githubRepo, "feedback-github-repo", "", "GitHub owner/repo that receives one issue per stored report. Off unless set. Mutually exclusive with --feedback-webhook-url (env: DUCKTEL_FEEDBACK_GITHUB_REPO)")
 	cmd.Flags().StringVar(&githubToken, "feedback-github-token", "", "Bearer token for --feedback-github-repo (env: DUCKTEL_FEEDBACK_GITHUB_TOKEN)")
+	cmd.Flags().StringVar(&githubLabel, "feedback-github-label", "feedback", "Label on each GitHub issue created for a stored report. The label must already exist on the repo (env: DUCKTEL_FEEDBACK_GITHUB_LABEL)")
+	cmd.Flags().IntVar(&feedbackGlobalLimit, "feedback-global-limit", 30, "Accepted feedback reports across all tenants per rolling hour (env: DUCKTEL_FEEDBACK_GLOBAL_LIMIT)")
 	cmd.Flags().StringVar(&dashURL, "dashboard-url", "", "Public address of the dashboard, e.g. https://otel.example.com/dashboard/; query results then carry a dashboard_url that opens the same query. Discovery lists do not (env: DUCKTEL_DASHBOARD_URL)")
 	cmd.Flags().BoolVar(&dashboard, "dashboard", false, "Also serve the dashboard SPA at /dashboard and its REST API at /api, guarded by the same --auth-token")
 
 	return cmd
 }
 
-func newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken string) (*feedback.Service, error) {
+func newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken, githubLabel string, globalPerHour int) (*feedback.Service, error) {
 	opt := feedback.Options{
-		Token:       bearer,
-		WebhookURL:  webhookURL,
-		GitHubRepo:  githubRepo,
-		GitHubToken: githubToken,
+		Token:         bearer,
+		WebhookURL:    webhookURL,
+		GitHubRepo:    githubRepo,
+		GitHubToken:   githubToken,
+		GitHubLabel:   githubLabel,
+		GlobalPerHour: globalPerHour,
 	}
 	if feedbackURL != "" {
 		opt.Endpoint = feedbackURL
@@ -247,6 +265,22 @@ func newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, gi
 		opt.DataDir = dataDir
 	}
 	return feedback.New(opt)
+}
+
+func positiveIntFlag(changed bool, value int, flagName, envName string) (int, error) {
+	if !changed {
+		if v := os.Getenv(envName); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				return 0, fmt.Errorf("%s must be a positive integer", envName)
+			}
+			value = n
+		}
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("--%s must be greater than zero", flagName)
+	}
+	return value, nil
 }
 
 // serveMCPHTTP runs the MCP server over Streamable HTTP with a bearer-token

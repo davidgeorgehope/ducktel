@@ -36,7 +36,11 @@ func buildSink(opt Options, client *http.Client) (Sink, error) {
 	if err != nil {
 		return nil, err
 	}
-	return githubSink{owner: owner, repo: repo, token: opt.GitHubToken, client: client}, nil
+	label := opt.GitHubLabel
+	if label == "" {
+		label = "feedback"
+	}
+	return githubSink{owner: owner, repo: repo, token: opt.GitHubToken, label: label, client: client}, nil
 }
 
 func splitRepo(s string) (owner, repo string, err error) {
@@ -95,6 +99,7 @@ type githubSink struct {
 	owner  string
 	repo   string
 	token  string
+	label  string
 	client *http.Client
 }
 
@@ -102,9 +107,10 @@ func (g githubSink) Kind() string { return "github" }
 
 func (g githubSink) Send(ctx context.Context, r Report) error {
 	payload, err := json.Marshal(struct {
-		Title string `json:"title"`
-		Body  string `json:"body"`
-	}{IssueTitle(r), Markdown([]Report{r})})
+		Title  string   `json:"title"`
+		Body   string   `json:"body"`
+		Labels []string `json:"labels"`
+	}{IssueTitle(r), Markdown([]Report{r}), []string{g.label}})
 	if err != nil {
 		return err
 	}

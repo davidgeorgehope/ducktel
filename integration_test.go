@@ -52,7 +52,7 @@ func startTestServerWithToken(t *testing.T, token string) (string, *writer.Write
 	w.Start()
 
 	port := 14318
-	r, err := receiver.New("localhost", port, w, token, "", nil)
+	r, err := receiver.New("localhost", port, w, token, "", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

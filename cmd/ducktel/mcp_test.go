@@ -39,6 +39,8 @@ func TestMCPHelpListsEveryTool(t *testing.T) {
 		"does not scrub",
 		"save_query will not store it",
 		"--feedback-url http://127.0.0.1:4318/feedback",
+		"--feedback-github-label",
+		"--feedback-global-limit",
 		"second",
 	} {
 		if !strings.Contains(help, phrase) {

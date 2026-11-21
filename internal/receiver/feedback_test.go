@@ -18,7 +18,7 @@ import (
 func TestFeedbackRouteAuthAndQuery(t *testing.T) {
 	dir := t.TempDir()
 	w := writer.New(dir, time.Hour, 1000)
-	r, err := New("localhost", 0, w, "ingest-token", "flush-token", w.Flush)
+	r, err := New("localhost", 0, w, "ingest-token", "flush-token", w.Flush, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestFlushFailureDoesNotStoreTheReportTwice(t *testing.T) {
 	consumer := &countLogs{n: &logs, inner: w}
 	r, err := New("localhost", 0, consumer, "", "", func() error {
 		return errors.New("disk full")
-	})
+	}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

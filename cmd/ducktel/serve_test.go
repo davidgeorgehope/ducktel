@@ -22,3 +22,14 @@ func TestServeRejectsNonPositiveBufferSize(t *testing.T) {
 		}
 	}
 }
+
+func TestServeRejectsNonPositiveFeedbackGlobalLimit(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		cmd := serveCmd()
+		cmd.SetArgs([]string{"--feedback-global-limit", v})
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "--feedback-global-limit") {
+			t.Fatalf("--feedback-global-limit %s: %v", v, err)
+		}
+	}
+}

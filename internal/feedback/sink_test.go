@@ -11,6 +11,42 @@ import (
 	"github.com/davidgeorgehope/ducktel/internal/feedback"
 )
 
+func TestGitHubIssueUsesTheConfiguredLabel(t *testing.T) {
+	var labels []string
+	client := &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Labels []string `json:"labels"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Errorf("json: %v", err)
+		}
+		labels = payload.Labels
+		return &http.Response{StatusCode: 201, Status: "201 Created", Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})}
+	report, err := feedback.ParseFields(validFields("label-1", "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := feedback.New(feedback.Options{
+		Write:       func(context.Context, feedback.Report) error { return nil },
+		GitHubRepo:  "acme/ducktel",
+		GitHubToken: "ghp_test_token",
+		GitHubLabel: "triage",
+		HTTPClient:  client,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := svc.Submit(context.Background(), report)
+	if err != nil || res.SinkError != "" {
+		t.Fatalf("result = %+v %v", res, err)
+	}
+	if len(labels) != 1 || labels[0] != "triage" {
+		t.Fatalf("labels = %#v", labels)
+	}
+}
+
 func TestBothSinksFailConfig(t *testing.T) {
 	_, err := feedback.New(feedback.Options{
 		DataDir:     t.TempDir(),
@@ -81,14 +117,18 @@ func TestGitHubIssueAndNon2xx(t *testing.T) {
 		agent = r.Header.Get("User-Agent")
 		raw, _ := io.ReadAll(r.Body)
 		var payload struct {
-			Title string `json:"title"`
-			Body  string `json:"body"`
+			Title  string   `json:"title"`
+			Body   string   `json:"body"`
+			Labels []string `json:"labels"`
 		}
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			t.Errorf("json: %v", err)
 		}
 		title = payload.Title
 		body = payload.Body
+		if len(payload.Labels) != 1 || payload.Labels[0] != "feedback" {
+			t.Errorf("labels = %#v, want [feedback]", payload.Labels)
+		}
 		return &http.Response{
 			StatusCode: http.StatusForbidden,
 			Status:     "403 Forbidden",

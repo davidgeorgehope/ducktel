@@ -196,7 +196,7 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 			"log_search finds it by the attributes category, tool_name, severity, and report_id. The logs dashboard shows the body. " +
 			"Nothing is sent off the machine unless a sink is configured. " +
 			"A configured sink sends the agent-written text off the machine unchanged. ducktel does not scrub it. " +
-			"At most 20 accepted reports per tenant are stored per rolling hour. A restart clears that window. " +
+			"At most 20 accepted reports per tenant are stored per rolling hour, and a second cap (default 30) covers every tenant together. A restart clears both windows. " +
 			"A retry with the same report_id returns the first result and does not store a second log. " +
 			"save_query will not store this tool.",
 	}, s.submitFeedback)

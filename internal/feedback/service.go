@@ -17,16 +17,18 @@ import (
 )
 
 const (
-	maxPerHour    = 20
-	maxTenants    = 1024
-	maxRemembered = 4096
+	maxPerHour           = 20
+	defaultGlobalPerHour = 30
+	maxTenants           = 1024
+	maxRemembered        = 4096
 
 	httpTimeout = 10 * time.Second
 )
 
-// ErrRateLimited is returned when the tenant already stored maxPerHour
-// reports in the rolling hour. Invalid input never returns this error.
-var ErrRateLimited = errors.New("feedback rate limit exceeded: 20 accepted reports per tenant per rolling hour; a restart clears this window")
+// ErrRateLimited is returned when this process already accepted maxPerHour
+// reports for the tenant, or its global cap across tenants, in the rolling
+// hour. Invalid input never returns this error. A restart clears the window.
+var ErrRateLimited = errors.New("feedback rate limit exceeded")
 
 // Result is the success payload. Stored is true only after the log is written.
 type Result struct {
@@ -49,6 +51,11 @@ type Options struct {
 	WebhookURL  string
 	GitHubRepo  string
 	GitHubToken string
+	// GitHubLabel is applied to each created issue. Empty uses "feedback".
+	GitHubLabel string
+	// GlobalPerHour caps accepted reports across all tenants in a rolling
+	// hour. Zero uses 30. A negative value is rejected.
+	GlobalPerHour int
 	// HTTPClient is used for the feedback POST and the sink. Nil uses a
 	// client with a 10s timeout that does not follow redirects.
 	HTTPClient *http.Client
@@ -77,11 +84,13 @@ type Service struct {
 	store store
 	sink  Sink
 
-	mu       sync.Mutex
-	tenants  map[string]*tenantWindow
-	seen     map[memKey]memory
-	inflight map[memKey]*flight
-	seq      uint64
+	mu          sync.Mutex
+	tenants     map[string]*tenantWindow
+	global      []slot
+	globalLimit int
+	seen        map[memKey]memory
+	inflight    map[memKey]*flight
+	seq         uint64
 }
 
 type memKey struct {
@@ -120,6 +129,12 @@ func New(opt Options) (*Service, error) {
 	opt.WebhookURL = strings.TrimSpace(opt.WebhookURL)
 	opt.GitHubRepo = strings.TrimSpace(opt.GitHubRepo)
 	opt.GitHubToken = strings.TrimSpace(opt.GitHubToken)
+	opt.GitHubLabel = strings.TrimSpace(opt.GitHubLabel)
+	if opt.GlobalPerHour == 0 {
+		opt.GlobalPerHour = defaultGlobalPerHour
+	} else if opt.GlobalPerHour < 0 {
+		return nil, fmt.Errorf("--feedback-global-limit must be greater than zero")
+	}
 
 	client := opt.HTTPClient
 	if client == nil {
@@ -161,11 +176,12 @@ func New(opt Options) (*Service, error) {
 	}
 
 	return &Service{
-		store:    st,
-		sink:     sink,
-		tenants:  make(map[string]*tenantWindow),
-		seen:     make(map[memKey]memory),
-		inflight: make(map[memKey]*flight),
+		store:       st,
+		sink:        sink,
+		tenants:     make(map[string]*tenantWindow),
+		globalLimit: opt.GlobalPerHour,
+		seen:        make(map[memKey]memory),
+		inflight:    make(map[memKey]*flight),
 	}, nil
 }
 
@@ -229,7 +245,7 @@ func (s *Service) Submit(ctx context.Context, r Report) (Result, error) {
 		slotID, ok := s.reserve(r.Tenant, time.Now())
 		if !ok {
 			s.mu.Unlock()
-			return Result{}, ErrRateLimited
+			return Result{}, s.rateLimited()
 		}
 		f := &flight{done: make(chan struct{})}
 		s.inflight[key] = f
@@ -282,6 +298,10 @@ func (s *Service) deliver(ctx context.Context, r Report) string {
 	return ""
 }
 
+func (s *Service) rateLimited() error {
+	return fmt.Errorf("%w: %d accepted reports per tenant per rolling hour, or %d across all tenants; a restart clears this window", ErrRateLimited, maxPerHour, s.globalLimit)
+}
+
 func (s *Service) reserve(tenant string, now time.Time) (uint64, bool) {
 	w := s.tenants[tenant]
 	if w == nil {
@@ -292,34 +312,44 @@ func (s *Service) reserve(tenant string, now time.Time) (uint64, bool) {
 		s.tenants[tenant] = w
 	}
 	cutoff := now.Add(-time.Hour)
-	kept := make([]slot, 0, len(w.slots))
-	for _, sl := range w.slots {
-		if !sl.at.Before(cutoff) {
-			kept = append(kept, sl)
-		}
-	}
-	w.slots = kept
-	if len(w.slots) >= maxPerHour {
+	w.slots = pruneSlots(w.slots, cutoff)
+	s.global = pruneSlots(s.global, cutoff)
+	if len(w.slots) >= maxPerHour || len(s.global) >= s.globalLimit {
 		return 0, false
 	}
 	s.seq++
-	w.slots = append(w.slots, slot{id: s.seq, at: now})
+	sl := slot{id: s.seq, at: now}
+	w.slots = append(w.slots, sl)
+	s.global = append(s.global, sl)
 	w.last = now
 	return s.seq, true
 }
 
 func (s *Service) release(tenant string, id uint64) {
-	w := s.tenants[tenant]
-	if w == nil {
-		return
+	if w := s.tenants[tenant]; w != nil {
+		w.slots = dropSlot(w.slots, id)
 	}
-	kept := make([]slot, 0, len(w.slots))
-	for _, sl := range w.slots {
+	s.global = dropSlot(s.global, id)
+}
+
+func pruneSlots(slots []slot, cutoff time.Time) []slot {
+	kept := make([]slot, 0, len(slots))
+	for _, sl := range slots {
+		if !sl.at.Before(cutoff) {
+			kept = append(kept, sl)
+		}
+	}
+	return kept
+}
+
+func dropSlot(slots []slot, id uint64) []slot {
+	kept := make([]slot, 0, len(slots))
+	for _, sl := range slots {
 		if sl.id != id {
 			kept = append(kept, sl)
 		}
 	}
-	w.slots = kept
+	return kept
 }
 
 func (s *Service) dropIdlest() {
@@ -427,7 +457,13 @@ func (s remoteStore) Write(ctx context.Context, r Report) error {
 	defer resp.Body.Close()
 	slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return ErrRateLimited
+		msg := strings.TrimSpace(string(slurp))
+		msg = strings.TrimPrefix(msg, ErrRateLimited.Error())
+		msg = strings.TrimPrefix(msg, ": ")
+		if msg == "" {
+			return ErrRateLimited
+		}
+		return fmt.Errorf("%w: %s", ErrRateLimited, msg)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := strings.TrimSpace(string(slurp))

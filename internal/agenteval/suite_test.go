@@ -139,7 +139,7 @@ func seed(t *testing.T) (testharness.Batch, *query.Engine, string) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	r, err := receiver.New("127.0.0.1", port, w, "", "", nil)
+	r, err := receiver.New("127.0.0.1", port, w, "", "", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
