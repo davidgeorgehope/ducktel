@@ -1,0 +1,10 @@
+[Unit]
+Description=ducktel (OTLP ingest, MCP, and the collector that feeds it)
+Before=slices.target
+
+[Slice]
+# One cap for everything ducktel runs, so it cannot crowd out other services.
+MemoryAccounting=yes
+MemoryHigh=1536M
+MemoryMax=2G
+CPUWeight=50

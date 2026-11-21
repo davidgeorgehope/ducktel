@@ -1,0 +1,118 @@
+# OpenTelemetry Collector (contrib) config that feeds a local ducktel.
+# Install at /etc/otelcol-contrib/config.yaml. The bearer token comes from
+# DUCKTEL_AUTH_TOKEN in the unit's environment, never from this file.
+receivers:
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu: {}
+      memory: {}
+      load: {}
+      disk: {}
+      filesystem: {}
+      network: {}
+      paging: {}
+      processes: {}
+  journald:
+    directory: /var/log/journal
+    priority: info
+    units:
+      - kidvid-server
+      - cloudflared
+      - nginx
+      - docker
+      - shortest
+      - greenhouse-contractor-caller
+      - messaging-engine
+      - nox-voice
+      - vibecaster-backend
+      - vibecaster-frontend
+      - compintels
+      - observe-self
+      - desk-voxl
+      # Not ducktel-serve: it logs every ingest, so it would feed on itself.
+      - ducktel-mcp
+      - fail2ban
+    operators:
+      # One service per unit: service.name is the unit, e.g. kidvid-server.service.
+      - type: copy
+        if: 'body._SYSTEMD_UNIT != nil'
+        from: body._SYSTEMD_UNIT
+        to: resource["service.name"]
+      # journald PRIORITY (syslog 0-7) to OTel severity.
+      - type: severity_parser
+        if: 'body.PRIORITY != nil'
+        parse_from: body.PRIORITY
+        mapping:
+          fatal: ["0", "1", "2"]
+          error: "3"
+          warn: "4"
+          info: ["5", "6"]
+          debug: "7"
+      # Keep the log line as the body so log_search's substring match works.
+      - type: move
+        if: 'body.MESSAGE != nil'
+        from: body.MESSAGE
+        to: body
+  file_log/nginx:
+    include:
+      - /var/log/nginx/access.log
+      - /var/log/nginx/error.log
+    start_at: end
+    resource:
+      service.name: nginx-files
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 30s
+  # Lets local apps send OTLP through the collector instead of straight to ducktel.
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4328
+
+processors:
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 200
+  resourcedetection:
+    detectors: [system]
+    system:
+      hostname_sources: [os]
+  resource:
+    attributes:
+      - key: tenant.id
+        value: hetzner
+        action: upsert
+  resource/default_service:
+    attributes:
+      - key: service.name
+        value: hetzner-host
+        action: insert
+  batch:
+    timeout: 10s
+
+exporters:
+  otlphttp/ducktel:
+    endpoint: http://127.0.0.1:4318
+    compression: none
+    encoding: proto
+    headers:
+      Authorization: Bearer ${env:DUCKTEL_AUTH_TOKEN}
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    metrics:
+      receivers: [hostmetrics, docker_stats, otlp]
+      processors: [memory_limiter, resourcedetection, resource, resource/default_service, batch]
+      exporters: [otlphttp/ducktel]
+    logs:
+      receivers: [journald, file_log/nginx, otlp]
+      processors: [memory_limiter, resourcedetection, resource, resource/default_service, batch]
+      exporters: [otlphttp/ducktel]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, resource/default_service, batch]
+      exporters: [otlphttp/ducktel]
