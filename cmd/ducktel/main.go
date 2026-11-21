@@ -45,6 +45,7 @@ func main() {
 	rootCmd.AddCommand(logsCmd())
 	rootCmd.AddCommand(metricsCmd())
 	rootCmd.AddCommand(savedQueryCmd())
+	rootCmd.AddCommand(feedbackCmd())
 	rootCmd.AddCommand(testHarnessCmd())
 	rootCmd.AddCommand(mcpCmd())
 
