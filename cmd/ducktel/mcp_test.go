@@ -24,6 +24,7 @@ func TestMCPHelpListsEveryTool(t *testing.T) {
 		"save_query",
 		"run_saved_query",
 		"sql_query",
+		"submit_feedback",
 		"flush_buffer",
 	} {
 		if !strings.Contains(help, name) {
@@ -32,5 +33,16 @@ func TestMCPHelpListsEveryTool(t *testing.T) {
 	}
 	if !strings.Contains(help, "list_tenants takes no arguments") {
 		t.Error("mcp help should say list_tenants takes no tenant")
+	}
+	for _, phrase := range []string{
+		"off by default",
+		"does not scrub",
+		"save_query will not store it",
+		"--feedback-url http://127.0.0.1:4318/feedback",
+		"second",
+	} {
+		if !strings.Contains(help, phrase) {
+			t.Errorf("mcp help missing %q", phrase)
+		}
 	}
 }

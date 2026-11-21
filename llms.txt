@@ -14,7 +14,7 @@ Rows still in the receiver's memory buffer are not in the Parquet files yet. The
 
 ## MCP tools
 
-Registered by `Register` in `internal/mcp/server.go`. Fourteen tools are always registered. `flush_buffer` is registered only when a flush URL is set.
+Registered by `Register` in `internal/mcp/server.go`. Fifteen tools are always registered. `flush_buffer` is registered only when a flush URL is set. `submit_feedback` is always registered. `save_query` will not store it.
 
 - [list_tenants](skills/ducktel/SKILL.md): tenant ids with stored telemetry. No arguments. Returns only tenant ids.
 - [list_services](skills/ducktel/SKILL.md): service names for one tenant. Requires `tenant`. `source` omitted or `traces` reads spans. `source=logs` reads log records.
@@ -27,7 +27,8 @@ Registered by `Register` in `internal/mcp/server.go`. Fourteen tools are always 
 - [slow_requests](skills/ducktel/SKILL.md): the slowest requests, each with a short trace summary. Pass `metric_name` to follow that metric's exemplars. Omit it to use the slowest root spans. `limit` defaults to 5 and caps at 20.
 - [metric_query](skills/ducktel/SKILL.md): one metric over a window. Requires `metric_name` and `aggregation`. Aggregations are `avg`, `sum`, `min`, `max`, `count`, `p50`, `p95`, `p99`, `buckets`, and `exemplars`. Histograms are aggregated from their observations. A histogram result is not 0 just because the type is histogram. `buckets`, `p50`, `p95`, and `p99` need an explicit-bucket histogram. An exponential histogram supports `count`, `sum`, `avg`, `min`, and `max`. `group_by` takes a column (`service.name` means `service_name`), `attr.<key>`, or `resource.<key>`. `step` (`30s`, `1m`, `5m`, `1h`, or a number of seconds) adds a `time` column. At most 1500 buckets. `exemplars` ignores `step`. On a gauge or a sum, `count` counts exported points, not events.
 - [list_saved_queries](skills/ducktel/SKILL.md): saved MCP queries for one tenant. Requires `tenant`. Returns `name`, `description`, `tool`, and `arguments`, sorted by name.
-- [save_query](skills/ducktel/SKILL.md): save a read tool invocation for one tenant. Requires `tenant`, `name`, `tool`, and `arguments`. Optional `description`. Validates like a direct tool call before writing. Same name replaces the record.
+- [save_query](skills/ducktel/SKILL.md): save a read tool invocation for one tenant. Requires `tenant`, `name`, `tool`, and `arguments`. Optional `description`. Validates like a direct tool call before writing. Same name replaces the record. Will not store `submit_feedback`.
+- [submit_feedback](skills/ducktel/SKILL.md): report a ducktel tool that was confusing, unhelpful, wrong, or missing. Requires `tenant`, `tool_name`, `category` (`bug`, `confusing_output`, `missing_capability`, `wrong_docs`, `other`), `severity` (`low`, `medium`, `high`), `summary`, `details`, and `proposed_fix`. Optional `report_id` and `example_call`. `proposed_fix` must be a concrete change a maintainer could apply. The report is stored as a log for that tenant under service `ducktel.agent_feedback`. `log_search` and the logs dashboard show it. Nothing is sent off the machine unless a sink is configured. A sink is off by default. Turning one on sends the agent-written text off the machine. ducktel does not scrub that text. At most 20 accepted reports per tenant per rolling hour. A restart clears that window. `POST /feedback` flushes the log before it returns success. A flush error still keeps the `report_id`, so a retry does not store a second log.
 - [run_saved_query](skills/ducktel/SKILL.md): run a saved query by name for one tenant. Optional `since_minutes` and `until_minutes` override the window for this run only.
 - [sql_query](skills/ducktel/SKILL.md): one read-only SELECT or WITH for one tenant. Requires `tenant` and `sql`. The views are `spans`, `logs`, and `metrics`. `traces` is not a view. Timestamps are Unix microseconds. `limit` defaults to 200 and is rejected above 1000. No default time window.
 - [flush_buffer](skills/ducktel/SKILL.md): asks the receiver to write its buffer. No arguments. Absent from the tool list when no flush URL is configured.
@@ -68,7 +69,8 @@ Global flags: `--data-dir` (default `./data`) and `--format json|table|csv` (def
 - `ducktel services` lists service names seen in traces.
 - `ducktel saved` stores and runs SQL you want to repeat. Nothing runs it on a schedule. MCP saved queries are a separate, tenant-scoped store: `list_saved_queries`, `save_query`, and `run_saved_query`.
 - `ducktel testdata` sends synthetic OTLP to a receiver.
-- `ducktel serve` is the receiver, not a query command. Default listen address is `localhost:4318`.
+- `ducktel feedback list --tenant T [--since 168h] [--limit 50]` lists agent feedback for one tenant. `ducktel feedback export` prints markdown (or `--as json` for the report fields). `--since 0` means no time lower bound. Default limit 50, cap 1000.
+- `ducktel serve` is the receiver, not a query command. Default listen address is `localhost:4318`. `POST /feedback` stores one feedback log and uses the flush token, not the OTLP ingest token. Point MCP at it with `--feedback-url http://127.0.0.1:4318/feedback`. A second `ducktel serve` on the same data directory does not store feedback.
 
 Column types and the histogram storage columns are in [skills/ducktel/references/schema.md](skills/ducktel/references/schema.md). SQL examples are in [skills/ducktel/references/queries.md](skills/ducktel/references/queries.md).
 

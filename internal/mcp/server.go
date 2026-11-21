@@ -8,6 +8,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/davidgeorgehope/ducktel/internal/feedback"
 	"github.com/davidgeorgehope/ducktel/internal/query"
 	"github.com/davidgeorgehope/ducktel/internal/savedquery"
 	"github.com/davidgeorgehope/ducktel/internal/telemetry"
@@ -29,6 +30,8 @@ type Server struct {
 	core     *telemetry.Core
 	flusher  *telemetry.Flusher
 	mcpSaved *savedquery.MCPStore
+	dataDir  string
+	feedback *feedback.Service
 	// dashboardURL, when set, adds a dashboard link to every result.
 	dashboardURL string
 }
@@ -40,7 +43,14 @@ func NewServer(engine *query.Engine, dataDir, flushURL, flushToken string) *Serv
 		core:     telemetry.NewCore(engine),
 		flusher:  telemetry.NewFlusher(flushURL, flushToken),
 		mcpSaved: savedquery.NewMCPStore(dataDir),
+		dataDir:  dataDir,
 	}
+}
+
+// SetFeedback wires report storage. Nil leaves the tool registered and
+// makes a call return an error instead of storing anything.
+func (s *Server) SetFeedback(svc *feedback.Service) {
+	s.feedback = svc
 }
 
 // Register adds the tools to an MCP server.
@@ -159,7 +169,7 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 		Name: "save_query",
 		Description: "Save an MCP tool invocation for one tenant so it can be run again with run_saved_query. " +
 			"Requires tenant, name, tool, and arguments. Optional description. " +
-			"The tool must be a read tool that takes tenant. Rejects flush_buffer, list_tenants, and the saved-query tools. " +
+			"The tool must be a read tool that takes tenant. Rejects flush_buffer, list_tenants, submit_feedback, and the saved-query tools. " +
 			"Arguments are validated the same way as a direct tool call before anything is written. " +
 			"If arguments omit tenant, it is set to the tool's tenant. A mismatched arguments.tenant is rejected. " +
 			"Saving the same name again replaces the record and keeps created_at.",
@@ -177,6 +187,19 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 		Name:        "sql_query",
 		Description: s.core.SQLQueryDescription(),
 	}, s.sqlQuery)
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "submit_feedback",
+		Description: "Call this after a ducktel tool returned confusing, unhelpful, or wrong output, or a capability was missing. " +
+			"Include a concrete proposed fix a maintainer could apply. " +
+			"The report is stored as a log for this tenant under service ducktel.agent_feedback. " +
+			"log_search finds it by the attributes category, tool_name, severity, and report_id. The logs dashboard shows the body. " +
+			"Nothing is sent off the machine unless a sink is configured. " +
+			"A configured sink sends the agent-written text off the machine unchanged. ducktel does not scrub it. " +
+			"At most 20 accepted reports per tenant are stored per rolling hour. A restart clears that window. " +
+			"A retry with the same report_id returns the first result and does not store a second log. " +
+			"save_query will not store this tool.",
+	}, s.submitFeedback)
 
 	// Only offered when a flush endpoint is configured: without one the tool
 	// could not do anything, and advertising a tool that always fails would

@@ -236,10 +236,46 @@ func Tasks() []Task {
 			}},
 			Grade: gradeSQLServices,
 		},
+		{
+			Name:     "submit_feedback",
+			Question: "log_search was confusing. Report it, with a concrete fix.",
+			Calls: []Call{{
+				Label: "submit_feedback",
+				Tool:  "submit_feedback",
+				Args: map[string]any{
+					"report_id":    "eval-1",
+					"tenant":       tenantName,
+					"tool_name":    "log_search",
+					"category":     "confusing_output",
+					"severity":     "low",
+					"summary":      "the WARN search omitted the body",
+					"details":      "log_search returned rows without the message text",
+					"proposed_fix": "include the body column in the default log_search result",
+					"example_call": `log_search(tenant="acme", severity="WARN")`,
+				},
+			}},
+			Grade: gradeFeedback,
+		},
 	}
 }
 
 const savedWarnName = "warn-logs"
+
+func gradeFeedback(results []Result, _ Oracle) error {
+	var res struct {
+		ReportID string `json:"report_id"`
+		Stored   bool   `json:"stored"`
+		Service  string `json:"service"`
+		Sink     string `json:"sink"`
+	}
+	if err := json.Unmarshal([]byte(results[0].Text), &res); err != nil {
+		return err
+	}
+	if res.ReportID != "eval-1" || !res.Stored || res.Service != "ducktel.agent_feedback" || res.Sink != "off" {
+		return fmt.Errorf("submit_feedback result = %+v", res)
+	}
+	return nil
+}
 
 func gradeTenants(results []Result, o Oracle) error {
 	rows, err := decodeRows(results[0].Text)

@@ -334,7 +334,7 @@ func TestSaveQueryRunsSQLQuery(t *testing.T) {
 
 func TestSaveQueryRejectsNonSavableTools(t *testing.T) {
 	s := newTestServer(t)
-	for _, tool := range []string{"flush_buffer", "list_tenants", "save_query", "list_saved_queries", "run_saved_query"} {
+	for _, tool := range []string{"flush_buffer", "list_tenants", "save_query", "list_saved_queries", "run_saved_query", "submit_feedback"} {
 		_, isErr := call(t, s, "save_query", map[string]any{
 			"tenant": "acme", "name": "x", "tool": tool,
 			"arguments": map[string]any{"tenant": "acme"},

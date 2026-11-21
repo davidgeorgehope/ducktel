@@ -14,6 +14,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/davidgeorgehope/ducktel/internal/feedback"
 	"github.com/davidgeorgehope/ducktel/internal/mcp"
 	"github.com/davidgeorgehope/ducktel/internal/query"
 	"github.com/davidgeorgehope/ducktel/internal/receiver"
@@ -138,7 +139,10 @@ func seed(t *testing.T) (testharness.Batch, *query.Engine, string) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	r := receiver.New("127.0.0.1", port, w, "", "", nil)
+	r, err := receiver.New("127.0.0.1", port, w, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	go func() { _ = r.Start() }()
 
 	addr := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -194,7 +198,13 @@ func openEmpty(t *testing.T) (*query.Engine, string) {
 func connect(t *testing.T, engine *query.Engine, dataDir, flushURL, flushToken string) *sdkmcp.ClientSession {
 	t.Helper()
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-eval", Version: "eval"}, nil)
-	mcp.NewServer(engine, dataDir, flushURL, flushToken).Register(srv)
+	ds := mcp.NewServer(engine, dataDir, flushURL, flushToken)
+	fb, err := feedback.New(feedback.Options{DataDir: dataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds.SetFeedback(fb)
+	ds.Register(srv)
 	clientT, serverT := sdkmcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := srv.Connect(ctx, serverT, nil); err != nil {
