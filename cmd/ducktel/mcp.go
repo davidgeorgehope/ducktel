@@ -66,8 +66,8 @@ metrics and time, and nothing about what any attribute means:
   flush_buffer()                          make just-received telemetry queryable now
 
 Fifteen tools are always registered. flush_buffer is advertised only when
---flush-url is set. sql_query and submit_feedback are always registered.
-save_query will not store submit_feedback.
+--flush-url is set. sql_query is always registered. submit_feedback is
+always registered. save_query will not store it.
 
 list_tenants takes no arguments and returns only tenant ids. Every other tool
 except flush_buffer requires a tenant and hard-filters on the tenant.id
