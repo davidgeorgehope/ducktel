@@ -28,7 +28,7 @@ const (
 )
 
 func TestTasks(t *testing.T) {
-	batch, engine := seed(t)
+	batch, engine, dir := seed(t)
 	o := Derive(batch)
 	if err := checkOracle(o); err != nil {
 		t.Fatalf("setup: %v", err)
@@ -39,7 +39,7 @@ func TestTasks(t *testing.T) {
 	t.Logf("metrics %v", o.MetricNames)
 	t.Logf("warns %d", o.WarnCount)
 
-	session := connect(t, engine, "", "")
+	session := connect(t, engine, dir, "", "")
 	measured := runTasks(t, session, o)
 	for _, r := range measured {
 		t.Logf("payload\t%s\t%d\t%d", r.Label, r.Bytes, r.Tokens)
@@ -59,8 +59,8 @@ func TestFlushBuffer(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	const token = "flush-secret"
-	engine := openEmpty(t)
-	session := connect(t, engine, srv.URL+"/flush", token)
+	engine, dir := openEmpty(t)
+	session := connect(t, engine, dir, srv.URL+"/flush", token)
 	res := call(t, session, FlushCall, nil)
 	if res.IsError {
 		t.Fatalf("flush_buffer error: %s", res.Text)
@@ -89,9 +89,10 @@ func TestToolCoverage(t *testing.T) {
 		}
 	}
 
-	engine := openEmpty(t)
-	plain := connect(t, engine, "", "")
-	withFlush := connect(t, openEmpty(t), "http://127.0.0.1/flush", "tok")
+	engine, dir := openEmpty(t)
+	plain := connect(t, engine, dir, "", "")
+	flushEngine, flushDir := openEmpty(t)
+	withFlush := connect(t, flushEngine, flushDir, "http://127.0.0.1/flush", "tok")
 	for _, session := range []*sdkmcp.ClientSession{plain, withFlush} {
 		names := listToolNames(t, session)
 		for _, name := range names {
@@ -124,7 +125,7 @@ func checkOracle(o Oracle) error {
 	return nil
 }
 
-func seed(t *testing.T) (testharness.Batch, *query.Engine) {
+func seed(t *testing.T) (testharness.Batch, *query.Engine, string) {
 	t.Helper()
 	dir := t.TempDir()
 	w := writer.New(dir, time.Hour, 1000)
@@ -176,23 +177,24 @@ func seed(t *testing.T) (testharness.Batch, *query.Engine) {
 			t.Errorf("writer stop: %v", err)
 		}
 	})
-	return batch, engine
+	return batch, engine, dir
 }
 
-func openEmpty(t *testing.T) *query.Engine {
+func openEmpty(t *testing.T) (*query.Engine, string) {
 	t.Helper()
-	engine, err := query.Open(t.TempDir())
+	dir := t.TempDir()
+	engine, err := query.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { engine.Close() })
-	return engine
+	return engine, dir
 }
 
-func connect(t *testing.T, engine *query.Engine, flushURL, flushToken string) *sdkmcp.ClientSession {
+func connect(t *testing.T, engine *query.Engine, dataDir, flushURL, flushToken string) *sdkmcp.ClientSession {
 	t.Helper()
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-eval", Version: "eval"}, nil)
-	mcp.NewServer(engine, flushURL, flushToken).Register(srv)
+	mcp.NewServer(engine, dataDir, flushURL, flushToken).Register(srv)
 	clientT, serverT := sdkmcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := srv.Connect(ctx, serverT, nil); err != nil {

@@ -190,8 +190,43 @@ func Tasks() []Task {
 			}},
 			Grade: gradeCompare,
 		},
+		{
+			Name:     "saved_warn_logs",
+			Question: "Save the WARN log search for tenant acme under the name warn-logs, then run that saved query.",
+			Calls: []Call{
+				{
+					Label: "save_query warn-logs",
+					Tool:  "save_query",
+					Args: map[string]any{
+						"tenant":      tenantName,
+						"name":        savedWarnName,
+						"tool":        "log_search",
+						"description": "WARN logs",
+						"arguments": map[string]any{
+							"tenant":        tenantName,
+							"severity":      severityWarn,
+							"since_minutes": windowMinutes,
+							"limit":         searchLimit,
+						},
+					},
+				},
+				{
+					Label: "list_saved_queries",
+					Tool:  "list_saved_queries",
+					Args:  map[string]any{"tenant": tenantName},
+				},
+				{
+					Label: "run_saved_query warn-logs",
+					Tool:  "run_saved_query",
+					Args:  map[string]any{"tenant": tenantName, "name": savedWarnName},
+				},
+			},
+			Grade: gradeSavedWarn,
+		},
 	}
 }
+
+const savedWarnName = "warn-logs"
 
 func gradeTenants(results []Result, o Oracle) error {
 	rows, err := decodeRows(results[0].Text)
@@ -423,6 +458,33 @@ func gradeWarnLogs(results []Result, o Oracle) error {
 		}
 	}
 	return nil
+}
+
+func gradeSavedWarn(results []Result, o Oracle) error {
+	var saved struct {
+		Name   string `json:"name"`
+		Tool   string `json:"tool"`
+		Tenant string `json:"tenant"`
+	}
+	if err := json.Unmarshal([]byte(results[0].Text), &saved); err != nil {
+		return fmt.Errorf("save_query: %w: %s", err, clip(results[0].Text))
+	}
+	if saved.Name != savedWarnName || saved.Tool != "log_search" || saved.Tenant != tenantName {
+		return fmt.Errorf("save_query returned name %q tool %q tenant %q", saved.Name, saved.Tool, saved.Tenant)
+	}
+	rows, err := decodeRows(results[1].Text)
+	if err != nil {
+		return err
+	}
+	if len(rows) != 1 {
+		return fmt.Errorf("list_saved_queries returned %d rows, want 1: %s", len(rows), clip(results[1].Text))
+	}
+	name, _ := rows[0]["name"].(string)
+	tool, _ := rows[0]["tool"].(string)
+	if name != savedWarnName || tool != "log_search" {
+		return fmt.Errorf("saved query name %q tool %q", name, tool)
+	}
+	return gradeWarnLogs([]Result{results[2]}, o)
 }
 
 func gradeCompare(results []Result, o Oracle) error {

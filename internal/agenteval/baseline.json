@@ -15,6 +15,10 @@
     "max_bytes": 175,
     "max_tokens": 44
   },
+  "list_saved_queries": {
+    "max_bytes": 149,
+    "max_tokens": 38
+  },
   "list_services": {
     "max_bytes": 175,
     "max_tokens": 44
@@ -34,6 +38,14 @@
   "metric_query http.server.request.error.count sum service_name": {
     "max_bytes": 225,
     "max_tokens": 57
+  },
+  "run_saved_query warn-logs": {
+    "max_bytes": 1600,
+    "max_tokens": 400
+  },
+  "save_query warn-logs": {
+    "max_bytes": 56,
+    "max_tokens": 14
   },
   "slow_requests limit=1": {
     "max_bytes": 2261,

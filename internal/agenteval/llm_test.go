@@ -42,12 +42,12 @@ func TestLLM(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	batch, engine := seed(t)
+	batch, engine, dir := seed(t)
 	o := Derive(batch)
 	if err := checkOracle(o); err != nil {
 		t.Fatal(err)
 	}
-	session := connect(t, engine, "", "")
+	session := connect(t, engine, dir, "", "")
 	client := &xaiClient{
 		key:   key,
 		model: model,
