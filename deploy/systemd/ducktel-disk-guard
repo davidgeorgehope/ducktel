@@ -1,0 +1,52 @@
+#!/bin/sh
+# ducktel-disk-guard: stop ducktel ingest before the root filesystem fills.
+# Installed at /usr/local/sbin/ducktel-disk-guard, run by
+# ducktel-disk-guard.timer every 10 minutes.
+#
+# Above THRESHOLD percent used on /, it stops ducktel-serve and otelcol-contrib
+# and sends one "disk_guard" event to the webhook in /etc/grokbot-poke.env
+# (POKE_URL, POKE_KEY), once per trip. It never starts anything again: an
+# operator frees space and restarts the units, which clears the trip.
+# DRY_RUN=1 prints what it would do and changes nothing.
+set -eu
+
+THRESHOLD=${THRESHOLD:-92}
+STATE=/var/lib/ducktel-disk-guard
+POKE_ENV=/etc/grokbot-poke.env
+DISABLED=/var/lib/grokbot-watcher/endpoint-disabled
+
+used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+host=$(hostname)
+
+if [ "$used" -le "$THRESHOLD" ]; then
+  [ "${DRY_RUN:-0}" = 1 ] || rm -f "$STATE/tripped"
+  echo "ok: / is ${used}% used (threshold ${THRESHOLD}%)"
+  exit 0
+fi
+
+echo "TRIP: / is ${used}% used (threshold ${THRESHOLD}%)"
+if [ "${DRY_RUN:-0}" = 1 ]; then
+  echo "dry run: would stop ducktel-serve otelcol-contrib and post disk_guard"
+  exit 0
+fi
+
+systemctl stop ducktel-serve.service otelcol-contrib.service || true
+mkdir -p "$STATE"
+if [ -e "$STATE/tripped" ]; then
+  echo "already reported this trip"
+  exit 1
+fi
+
+if [ -e "$DISABLED" ]; then
+  echo "webhook disabled after an earlier 404; not posting"
+elif [ -r "$POKE_ENV" ]; then
+  set -a; . "$POKE_ENV"; set +a
+  body=$(printf '{"event":"service_down","detail":"disk_guard","unit":"ducktel-serve","host":"%s","root_used_pct":%s,"threshold_pct":%s,"action":"stopped ducktel-serve and otelcol-contrib"}' "$host" "$used" "$THRESHOLD")
+  # The key goes through stdin, never argv.
+  code=$(printf 'Authorization: Bearer %s\n' "$POKE_KEY" |
+    curl -sS -o /dev/null -w '%{http_code}' --max-time 25 --proto =https \
+      -H @- -H 'Content-Type: application/json' --data "$body" "$POKE_URL") || code=000
+  echo "posted disk_guard: http $code"
+fi
+touch "$STATE/tripped"
+exit 1

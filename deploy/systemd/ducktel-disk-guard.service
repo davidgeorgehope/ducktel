@@ -1,0 +1,7 @@
+[Unit]
+Description=Stop ducktel ingest if the root filesystem passes 92%
+
+[Service]
+Type=oneshot
+Environment=THRESHOLD=92
+ExecStart=/usr/local/sbin/ducktel-disk-guard

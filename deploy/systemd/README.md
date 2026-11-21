@@ -11,6 +11,10 @@ OpenTelemetry Collector feeding it host telemetry. They are what the
 | `ducktel-mcp.service` | `/etc/systemd/system/` |
 | `otelcol-config.yaml` | `/etc/otelcol-contrib/config.yaml` |
 | `otelcol-contrib.override.conf` | `/etc/systemd/system/otelcol-contrib.service.d/ducktel.conf` |
+| `var-lib-ducktel.mount` | `/etc/systemd/system/` |
+| `journald-size.conf` | `/etc/systemd/journald.conf.d/50-size.conf` |
+| `ducktel-disk-guard` | `/usr/local/sbin/` (mode 0755) |
+| `ducktel-disk-guard.service`, `ducktel-disk-guard.timer` | `/etc/systemd/system/` |
 
 ## Layout
 
@@ -18,8 +22,9 @@ OpenTelemetry Collector feeding it host telemetry. They are what the
   `/var/lib/ducktel`, keeping 14 days.
 - `ducktel-mcp` serves MCP at `127.0.0.1:4319/mcp` and the dashboard at
   `/dashboard/`. `flush_buffer` and `submit_feedback` go to the receiver.
-- `otelcol-contrib` (the upstream `.deb`) sends hostmetrics, docker stats,
-  journald for the listed units, and the nginx log files to the receiver. It
+- `otelcol-contrib` (the upstream `.deb`) sends hostmetrics, journald for
+  the listed units, and the nginx log files to the receiver. It is not in the
+  docker group (root-equivalent), so there are no docker stats. It
   also accepts OTLP/HTTP on `127.0.0.1:4328` for local apps. Every resource
   gets `tenant.id=hetzner`, so MCP queries use `tenant: hetzner`.
 - All three run in `ducktel.slice` (MemoryMax 2G), each with its own cap.
@@ -30,6 +35,34 @@ OpenTelemetry Collector feeding it host telemetry. They are what the
 tailscale serve --bg --https=8446 http://127.0.0.1:4319   # MCP + dashboard
 tailscale serve --bg --https=8447 http://127.0.0.1:4318   # OTLP ingest
 ```
+
+## Disk bounds
+
+ducktel's only built-in storage bound is `--retention` (whole days; 14 here).
+It has no size cap, so the host adds hard limits:
+
+- **Data volume.** `/var/lib/ducktel` is a 3G ext4 loopback image
+  (`/var/lib/ducktel.img`, fully allocated, `-m 0`, mounted by
+  `var-lib-ducktel.mount`). Parquet, flush temp files, the lock, and DuckDB
+  spill (`WorkingDirectory`) all live on it. When it is full a flush fails,
+  the records go back in the buffer (bounded by `MemoryMax`), and the next
+  flush after space returns writes them.
+- **Journal.** `journald-size.conf` caps the journal at 4G and stops it
+  growing while / has under 8G free. Each ducktel unit and the collector also
+  has `LogRateLimit*`.
+- **Collector.** No `file_storage` extension: the exporter queue and file
+  offsets are in memory only.
+- **Guard.** `ducktel-disk-guard.timer` runs every 10 minutes. Above 92% used
+  on /, it stops `ducktel-serve` and `otelcol-contrib` and posts one
+  `service_down` event (`detail: disk_guard`) to the webhook in
+  `/etc/grokbot-poke.env`. It never restarts them. Free space, then
+  `systemctl start ducktel-serve otelcol-contrib`.
+  `DRY_RUN=1 THRESHOLD=50 /usr/local/sbin/ducktel-disk-guard` shows a trip
+  without acting.
+
+Create the volume before the first start (see the comment in
+`var-lib-ducktel.mount`), then
+`systemctl enable --now var-lib-ducktel.mount ducktel-disk-guard.timer`.
 
 ## Secrets
 
