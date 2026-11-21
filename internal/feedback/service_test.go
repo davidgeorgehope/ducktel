@@ -455,6 +455,54 @@ func TestRemoteFlushErrorDoesNotPostTwice(t *testing.T) {
 	}
 }
 
+func TestConcurrentDirectWritesBothStore(t *testing.T) {
+	dir := t.TempDir()
+	svc, err := feedback.New(feedback.Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			r, err := feedback.ParseFields(validFields(fmt.Sprintf("c-%d", i), "acme"))
+			if err != nil {
+				errs <- err
+				return
+			}
+			if _, err := svc.Submit(context.Background(), r); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if t.Failed() {
+		return
+	}
+	engine, err := query.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	rows, _, err := telemetry.NewCore(engine).ListFeedback("acme", time.Time{}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != n {
+		t.Fatalf("stored %d reports, want %d", len(rows), n)
+	}
+}
+
 type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -150,7 +150,7 @@ func New(opt Options) (*Service, error) {
 	var st store
 	switch {
 	case opt.DataDir != "":
-		st = directStore{dir: opt.DataDir}
+		st = &directStore{dir: opt.DataDir}
 	case opt.Write != nil:
 		st = funcStore{write: opt.Write}
 	default:
@@ -377,9 +377,13 @@ func (f funcStore) Write(ctx context.Context, r Report) error {
 
 type directStore struct {
 	dir string
+	mu  sync.Mutex
 }
 
-func (s directStore) Write(ctx context.Context, r Report) error {
+func (s *directStore) Write(ctx context.Context, r Report) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	release, err := writer.Lock(s.dir)
 	if err != nil {
 		if errors.Is(err, writer.ErrLocked) {
