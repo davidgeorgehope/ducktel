@@ -31,6 +31,10 @@ node --test web/dashboard/*.test.mjs
 
 `make tla` model-checks the flush commit, the compaction reader view, and the tenant filter. It needs Java 21. The specs and the command are in [skills/formal-verification/SKILL.md](skills/formal-verification/SKILL.md). CI runs the same command.
 
+`go test ./...` runs `internal/agenteval`. That package seeds data with `testharness.EmitBatch` and checks every MCP tool against the records the generator emitted. `flush_buffer` is included only when a flush URL is configured. `internal/agenteval/baseline.json` records the maximum payload of each scripted call. A larger payload fails the test.
+
+The `-llm` flag runs an xAI agent loop. It accepts grok models only, reads `XAI_API_KEY`, and reads optional `XAI_MODEL` (default `grok-4`). Do not set `-llm` in CI.
+
 The dashboard has no build step and no npm install.
 
 ## Layout
