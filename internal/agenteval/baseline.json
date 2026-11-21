@@ -51,6 +51,10 @@
     "max_bytes": 2261,
     "max_tokens": 566
   },
+  "sql_query span services": {
+    "max_bytes": 175,
+    "max_tokens": 44
+  },
   "span_search service=payment-service status=error": {
     "max_bytes": 1396,
     "max_tokens": 349

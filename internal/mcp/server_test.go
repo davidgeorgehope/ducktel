@@ -174,6 +174,7 @@ func TestToolsAreRegistered(t *testing.T) {
 		"list_tenants", "list_services", "list_metric_names", "list_attribute_keys",
 		"trace_lookup", "span_search", "compare_spans", "log_search", "metric_query", "slow_requests",
 		"list_saved_queries", "save_query", "run_saved_query",
+		"sql_query",
 	} {
 		if !got[want] {
 			t.Errorf("tool %q not registered", want)
@@ -213,6 +214,81 @@ func TestFlushToolNotRegisteredWithoutFlushURL(t *testing.T) {
 	for _, tool := range res.Tools {
 		if tool.Name == "flush_buffer" {
 			t.Error("flush_buffer should not be advertised without a flush URL")
+		}
+	}
+}
+
+func TestSQLQueryTool(t *testing.T) {
+	s := newTestServer(t)
+
+	res, err := s.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var desc string
+	for _, tool := range res.Tools {
+		if tool.Name == "sql_query" {
+			desc = tool.Description
+		}
+	}
+	if desc == "" {
+		t.Fatal("sql_query is not registered")
+	}
+	for _, phrase := range []string{
+		"spans", "logs", "metrics",
+		"traces is not a view in this tool",
+		"Unix microseconds",
+		"SELECT",
+	} {
+		if !strings.Contains(desc, phrase) {
+			t.Errorf("description missing %q", phrase)
+		}
+	}
+	engine, err := query.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("opening engine: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	for _, view := range []string{"traces", "logs", "metrics"} {
+		cols, err := engine.Describe(view)
+		if err != nil {
+			t.Fatalf("describe %s: %v", view, err)
+		}
+		for _, col := range cols {
+			if !strings.Contains(desc, col.Name) {
+				t.Errorf("description missing %s column %q", view, col.Name)
+			}
+		}
+	}
+
+	body, isErr := call(t, s, "sql_query", map[string]any{
+		"tenant": "acme",
+		"sql":    "SELECT span_name, service_name FROM spans ORDER BY service_name",
+		"limit":  1,
+	})
+	if isErr {
+		t.Fatalf("sql_query error: %s", body)
+	}
+	if strings.Contains(body, " ") || strings.Contains(body, "\n") {
+		t.Fatalf("result is not compact JSON: %s", body)
+	}
+	if !strings.Contains(body, `"span_name":"op","service_name":"api"`) {
+		t.Fatalf("column order or row: %s", body)
+	}
+	if strings.Contains(body, "globex") {
+		t.Fatalf("result includes another tenant: %s", body)
+	}
+
+	body, isErr = call(t, s, "sql_query", map[string]any{
+		"tenant": "acme",
+		"sql":    "SELECT no_such_column FROM spans",
+	})
+	if !isErr {
+		t.Fatalf("expected a tool error, got %s", body)
+	}
+	for _, phrase := range []string{"list_attribute_keys", "spans", "logs", "metrics"} {
+		if !strings.Contains(body, phrase) {
+			t.Errorf("tool error %q missing %q", body, phrase)
 		}
 	}
 }

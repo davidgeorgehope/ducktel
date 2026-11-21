@@ -297,6 +297,41 @@ func TestSaveQueryUpsertOneRecord(t *testing.T) {
 	}
 }
 
+func TestSaveQueryRunsSQLQuery(t *testing.T) {
+	s := newTestServer(t)
+	body, isErr := call(t, s, "save_query", map[string]any{
+		"tenant": "acme",
+		"name":   "span-count",
+		"tool":   "sql_query",
+		"arguments": map[string]any{
+			"tenant": "acme",
+			"sql":    "SELECT count(*) AS n FROM spans",
+		},
+	})
+	if isErr {
+		t.Fatalf("save sql_query: %s", body)
+	}
+	body, isErr = call(t, s, "run_saved_query", map[string]any{
+		"tenant": "acme",
+		"name":   "span-count",
+	})
+	if isErr {
+		t.Fatalf("run sql_query: %s", body)
+	}
+	if !strings.Contains(body, `"n":`) {
+		t.Fatalf("run sql_query body = %s", body)
+	}
+	since := 5
+	_, isErr = call(t, s, "run_saved_query", map[string]any{
+		"tenant":        "acme",
+		"name":          "span-count",
+		"since_minutes": since,
+	})
+	if !isErr {
+		t.Fatal("sql_query has no time window, so since_minutes must be rejected")
+	}
+}
+
 func TestSaveQueryRejectsNonSavableTools(t *testing.T) {
 	s := newTestServer(t)
 	for _, tool := range []string{"flush_buffer", "list_tenants", "save_query", "list_saved_queries", "run_saved_query"} {

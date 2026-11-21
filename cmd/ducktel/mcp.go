@@ -55,13 +55,16 @@ metrics and time, and nothing about what any attribute means:
   list_saved_queries(tenant)              saved MCP queries for one tenant
   save_query(tenant, name, tool, ...)     save a tool invocation after validation
   run_saved_query(tenant, name)           run a saved query; optional window override
+  sql_query(sql, tenant)                  one read-only SELECT or WITH on spans, logs, and metrics
   flush_buffer()                          make just-received telemetry queryable now
 
 list_tenants takes no arguments and returns only tenant ids. Every other tool
 except flush_buffer requires a tenant and hard-filters on the tenant.id
 resource attribute, so a caller cannot widen its scope. flush_buffer is
-advertised only when --flush-url is set. list_attribute_keys samples the last
-60 minutes, at most 2000 rows per signal, not every key ever stored.
+advertised only when --flush-url is set. sql_query is always registered.
+It reads only that tenant's spans, logs, and metrics. ducktel query is not
+sandboxed. list_attribute_keys samples the last 60 minutes, at most 2000
+rows per signal, not every key ever stored.
 
 Saved queries are per tenant. save_query checks the tool name and arguments
 before writing. run_saved_query can override since_minutes and until_minutes

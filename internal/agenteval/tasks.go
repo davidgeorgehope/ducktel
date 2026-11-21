@@ -223,6 +223,19 @@ func Tasks() []Task {
 			},
 			Grade: gradeSavedWarn,
 		},
+		{
+			Name:     "sql_query_services",
+			Question: "Which services emitted spans for tenant acme? Answer with one sql_query.",
+			Calls: []Call{{
+				Label: "sql_query span services",
+				Tool:  "sql_query",
+				Args: map[string]any{
+					"tenant": tenantName,
+					"sql":    "SELECT service_name FROM spans GROUP BY service_name ORDER BY service_name",
+				},
+			}},
+			Grade: gradeSQLServices,
+		},
 	}
 }
 
@@ -485,6 +498,21 @@ func gradeSavedWarn(results []Result, o Oracle) error {
 		return fmt.Errorf("saved query name %q tool %q", name, tool)
 	}
 	return gradeWarnLogs([]Result{results[2]}, o)
+}
+
+func gradeSQLServices(results []Result, o Oracle) error {
+	rows, err := decodeRows(results[0].Text)
+	if err != nil {
+		return err
+	}
+	got, err := columnStrings(rows, "service_name")
+	if err != nil {
+		return err
+	}
+	if !sameStrings(got, o.SpanServices) {
+		return fmt.Errorf("sql_query services %v, oracle %v", got, o.SpanServices)
+	}
+	return nil
 }
 
 func gradeCompare(results []Result, o Oracle) error {

@@ -173,6 +173,11 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 			"An unknown name lists the saved query names that exist for that tenant.",
 	}, s.runSavedQuery)
 
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "sql_query",
+		Description: s.core.SQLQueryDescription(),
+	}, s.sqlQuery)
+
 	// Only offered when a flush endpoint is configured: without one the tool
 	// could not do anything, and advertising a tool that always fails would
 	// waste a caller's attempt and muddy tool selection.
@@ -247,6 +252,22 @@ type listAttributeKeysArgs struct {
 
 func (s *Server) listAttributeKeys(ctx context.Context, req *sdkmcp.CallToolRequest, args listAttributeKeysArgs) (*sdkmcp.CallToolResult, any, error) {
 	rows, cols, err := s.core.ListAttributeKeys(args.Tenant, args.Signal, args.ServiceName, args.SinceMinutes, args.Limit)
+	if err != nil {
+		return errResult(err.Error())
+	}
+	return rowsResult(rows, cols)
+}
+
+// --- sql_query ---
+
+type sqlQueryArgs struct {
+	Tenant string `json:"tenant" jsonschema:"the tenant to query; only rows whose tenant.id resource attribute equals this value are visible"`
+	SQL    string `json:"sql" jsonschema:"one read-only SELECT or WITH. The views are spans, logs, and metrics. traces is not a view"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"maximum rows to return. Default 200. Above 1000 is rejected"`
+}
+
+func (s *Server) sqlQuery(ctx context.Context, req *sdkmcp.CallToolRequest, args sqlQueryArgs) (*sdkmcp.CallToolResult, any, error) {
+	rows, cols, err := s.core.SQLQuery(ctx, args.Tenant, args.SQL, args.Limit)
 	if err != nil {
 		return errResult(err.Error())
 	}

@@ -49,7 +49,7 @@ func attrFiltersFrom(in []attrFilter) []telemetry.AttrFilter {
 }
 
 // savableTools is the allowlist of MCP tools save_query may persist.
-// A future sql_query tool is one entry here beside Register.
+// sql_query is one entry here beside Register.
 var savableTools = map[string]savableTool{
 	"list_services": {
 		window: windowNone,
@@ -184,6 +184,18 @@ var savableTools = map[string]savableTool{
 		},
 		invoke: func(s *Server, ctx context.Context, req *sdkmcp.CallToolRequest, args any) (*sdkmcp.CallToolResult, any, error) {
 			return s.slowRequests(ctx, req, args.(slowRequestsArgs))
+		},
+	},
+	"sql_query": {
+		window: windowNone,
+		decode: func(b []byte) (any, error) { return strictDecode[sqlQueryArgs](b) },
+		validate: func(s *Server, args any) error {
+			a := args.(sqlQueryArgs)
+			_, _, err := s.core.SQLQuery(context.Background(), a.Tenant, a.SQL, a.Limit)
+			return err
+		},
+		invoke: func(s *Server, ctx context.Context, req *sdkmcp.CallToolRequest, args any) (*sdkmcp.CallToolResult, any, error) {
+			return s.sqlQuery(ctx, req, args.(sqlQueryArgs))
 		},
 	},
 	"metric_query": {
