@@ -31,8 +31,6 @@ type Server struct {
 	flusher  *telemetry.Flusher
 	mcpSaved *savedquery.MCPStore
 	dataDir  string
-	// feedback is nil until the process wires storage. The tool is still
-	// registered; a call then returns a clear error.
 	feedback *feedback.Service
 	// dashboardURL, when set, adds a dashboard link to every result.
 	dashboardURL string

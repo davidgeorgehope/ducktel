@@ -136,7 +136,10 @@ token would cross an untrusted network.`,
 			log.Printf("starting: data-dir=%s flush-interval=%s buffer-size=%d retention=%s auth=%s",
 				dataDir, flushInterval, bufferSize, retentionState, authState)
 
-			r := receiver.New(host, port, w, token, flushToken, w.Flush)
+			r, err := receiver.New(host, port, w, token, flushToken, w.Flush)
+			if err != nil {
+				return err
+			}
 
 			sigCh := make(chan os.Signal, 1)
 			// SIGHUP requests an immediate flush without shutting down, so

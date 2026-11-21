@@ -52,7 +52,10 @@ func startTestServerWithToken(t *testing.T, token string) (string, *writer.Write
 	w.Start()
 
 	port := 14318
-	r := receiver.New("localhost", port, w, token, "", nil)
+	r, err := receiver.New("localhost", port, w, token, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	go r.Start()
 
 	addr := fmt.Sprintf("http://localhost:%d", port)

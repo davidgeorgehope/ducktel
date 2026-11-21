@@ -90,7 +90,6 @@ func feedbackFlags(cmd *cobra.Command, tenant *string, since *time.Duration, lim
 	cmd.Flags().IntVar(limit, "limit", 50, "Maximum reports to return (cap 1000)")
 }
 
-// reportColumns is the report field order for --as json, not the raw log row.
 var reportColumns = []string{
 	"report_id", "tenant", "tool_name", "category", "severity",
 	"summary", "details", "proposed_fix", "example_call",

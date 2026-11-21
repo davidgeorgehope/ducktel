@@ -7,9 +7,8 @@ import (
 )
 
 // ListFeedback returns stored agent feedback for one tenant, newest first.
-// since is the lower bound. The zero time means no lower bound, which
-// SearchLogs cannot express: a non-positive sinceMinutes there is 60 minutes
-// unless a trace id is set. The service is fixed to the feedback service.
+// since is the lower bound. The zero time means no lower bound.
+// The service is fixed to the feedback service.
 func (c *Core) ListFeedback(tenant string, since time.Time, limit int) ([]map[string]any, []string, error) {
 	if err := validateTenant(tenant); err != nil {
 		return nil, nil, err

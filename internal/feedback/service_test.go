@@ -69,8 +69,6 @@ func TestRateLimitIsPerTenantAndSkipsInvalidAndRetries(t *testing.T) {
 			t.Fatalf("report %d: %v %+v", i, err, res)
 		}
 	}
-	// The first id is already stored. A retry must not consume another slot
-	// and must not write again.
 	again, err := feedback.ParseFields(validFields("id-0", "acme"))
 	if err != nil {
 		t.Fatal(err)

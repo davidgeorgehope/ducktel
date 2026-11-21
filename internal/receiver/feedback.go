@@ -15,8 +15,6 @@ import (
 
 const maxFeedbackBody = 64 << 10
 
-// writeFeedback appends one log and flushes it. The serve process already
-// holds the writer lock, so this path does not take it again.
 func (r *Receiver) writeFeedback(ctx context.Context, report feedback.Report) error {
 	if r.flush == nil {
 		return errors.New("flush is not configured")

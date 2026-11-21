@@ -234,9 +234,6 @@ Examples:
 	return cmd
 }
 
-// newFeedbackService chooses the one local store and the optional sink.
-// A flush URL is used only after a successful POST to --feedback-url, and
-// the flush still uses the MCP auth token.
 func newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken, flushURL, mcpToken string) (*feedback.Service, error) {
 	opt := feedback.Options{
 		Token:       bearer,

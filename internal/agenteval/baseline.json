@@ -63,6 +63,10 @@
     "max_bytes": 8379,
     "max_tokens": 2095
   },
+  "submit_feedback": {
+    "max_bytes": 84,
+    "max_tokens": 21
+  },
   "trace_lookup detail=summary": {
     "max_bytes": 5605,
     "max_tokens": 1402

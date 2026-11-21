@@ -52,7 +52,6 @@ type otelSeverity struct {
 	number int32
 }
 
-// severities is the only map from the agent's word to the stored log severity.
 var severities = map[Severity]otelSeverity{
 	SeverityLow:    {"INFO", 9},
 	SeverityMedium: {"WARN", 13},
@@ -104,8 +103,7 @@ type Fields struct {
 	ExampleCall string `json:"example_call"`
 }
 
-// FieldError is rejected input. HTTP maps it to 400. It does not consume
-// the rate limit because Submit is only called after Parse succeeds.
+// FieldError is rejected input. HTTP maps it to 400.
 type FieldError struct {
 	Field  string
 	Reason string

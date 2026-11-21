@@ -121,8 +121,6 @@ func TestIssueTitleCutsOnRuneBoundary(t *testing.T) {
 		t.Fatalf("title = %q, want %q", got, want)
 	}
 
-	// 89 ASCII bytes plus a 2-byte rune. The 90-byte budget must drop the rune
-	// rather than split it, and the title stays within 120 bytes.
 	summary := strings.Repeat("a", 89) + "é"
 	long, err := feedback.ParseFields(feedback.Fields{
 		ReportID: "id-2", Tenant: "acme", ToolName: "log_search",

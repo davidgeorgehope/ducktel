@@ -17,7 +17,10 @@ import (
 func TestFeedbackRouteAuthAndQuery(t *testing.T) {
 	dir := t.TempDir()
 	w := writer.New(dir, time.Hour, 1000)
-	r := New("localhost", 0, w, "ingest-token", "flush-token", w.Flush)
+	r, err := New("localhost", 0, w, "ingest-token", "flush-token", w.Flush)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(r.server.Handler)
 	t.Cleanup(srv.Close)
 

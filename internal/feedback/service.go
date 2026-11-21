@@ -17,14 +17,8 @@ import (
 )
 
 const (
-	// maxPerHour is how many newly stored reports one tenant may add in a
-	// rolling hour. A retry of a stored report_id does not count. The window
-	// lives in memory, so a restart clears it.
-	maxPerHour = 20
-	// maxTenants bounds the rate-limit map. Past the cap, the tenant idle
-	// the longest is dropped.
-	maxTenants = 1024
-	// maxRemembered bounds idempotency keys kept for the life of the process.
+	maxPerHour    = 20
+	maxTenants    = 1024
 	maxRemembered = 4096
 
 	httpTimeout = 10 * time.Second
@@ -121,8 +115,6 @@ func New(opt Options) (*Service, error) {
 			CheckRedirect: refuseRedirect,
 		}
 	}
-	// Sinks are checked before the store so a startup with both flags fails
-	// even when the caller has not chosen a directory yet.
 	sink, err := buildSink(opt, client)
 	if err != nil {
 		return nil, err
@@ -377,8 +369,6 @@ func (f funcStore) Write(ctx context.Context, r Report) error {
 	return f.write(ctx, r)
 }
 
-// directStore locks the data directory for one flush. It does not call
-// writer.Start, which would run compaction and retention.
 type directStore struct {
 	dir string
 }
