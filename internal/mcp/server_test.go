@@ -173,8 +173,7 @@ func TestToolsAreRegistered(t *testing.T) {
 	for _, want := range []string{
 		"list_tenants", "list_services", "list_metric_names", "list_attribute_keys",
 		"trace_lookup", "span_search", "compare_spans", "log_search", "metric_query", "slow_requests",
-		"list_saved_queries", "save_query", "run_saved_query",
-		"sql_query",
+		"list_saved_queries", "save_query", "run_saved_query", "sql_query", "submit_feedback",
 	} {
 		if !got[want] {
 			t.Errorf("tool %q not registered", want)

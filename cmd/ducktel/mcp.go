@@ -14,6 +14,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
+	"github.com/davidgeorgehope/ducktel/internal/feedback"
 	"github.com/davidgeorgehope/ducktel/internal/httpauth"
 	"github.com/davidgeorgehope/ducktel/internal/mcp"
 	"github.com/davidgeorgehope/ducktel/internal/query"
@@ -24,14 +25,19 @@ import (
 
 func mcpCmd() *cobra.Command {
 	var (
-		httpMode  bool
-		host      string
-		port      int
-		token     string
-		basePath  string
-		flushURL  string
-		dashboard bool
-		dashURL   string
+		httpMode      bool
+		host          string
+		port          int
+		token         string
+		basePath      string
+		flushURL      string
+		dashboard     bool
+		dashURL       string
+		feedbackURL   string
+		feedbackToken string
+		webhookURL    string
+		githubRepo    string
+		githubToken   string
 	)
 
 	cmd := &cobra.Command{
@@ -56,7 +62,12 @@ metrics and time, and nothing about what any attribute means:
   save_query(tenant, name, tool, ...)     save a tool invocation after validation
   run_saved_query(tenant, name)           run a saved query; optional window override
   sql_query(sql, tenant)                  one read-only SELECT or WITH on spans, logs, and metrics
+  submit_feedback(tenant, ...)            report a confusing, wrong, or missing tool
   flush_buffer()                          make just-received telemetry queryable now
+
+Fifteen tools are always registered. flush_buffer is advertised only when
+--flush-url is set. sql_query and submit_feedback are always registered.
+save_query will not store submit_feedback.
 
 list_tenants takes no arguments and returns only tenant ids. Every other tool
 except flush_buffer requires a tenant and hard-filters on the tenant.id
@@ -65,6 +76,26 @@ advertised only when --flush-url is set. sql_query is always registered.
 It reads only that tenant's spans, logs, and metrics. ducktel query is not
 sandboxed. list_attribute_keys samples the last 60 minutes, at most 2000
 rows per signal, not every key ever stored.
+
+submit_feedback stores one log for that tenant under service
+ducktel.agent_feedback. log_search and the logs dashboard show it. Nothing is
+sent off the machine unless a sink is configured. A sink is off by default.
+Turning one on sends the agent-written text off the machine. ducktel does not scrub that text.
+The in-memory rate limit is 20 accepted reports per tenant
+per rolling hour and a restart clears it. POST /feedback flushes
+the log before it returns success. A flush error still keeps the
+report_id, so a retry does not write a second log.
+
+Point this process at the running receiver instead of starting a second
+ducktel serve on the same data directory. A second serve exits because the
+directory is locked, and it will not store the report:
+
+  --feedback-url http://127.0.0.1:4318/feedback
+
+With no --feedback-url, this process writes the data directory itself. Set at
+most one sink. Setting both fails at startup:
+  --feedback-webhook-url
+  --feedback-github-repo with --feedback-github-token
 
 Saved queries are per tenant. save_query checks the tool name and arguments
 before writing. run_saved_query can override since_minutes and until_minutes
@@ -80,8 +111,13 @@ Two transports:
                     for each so a compromised sender cannot read telemetry.
 
 --flush-url points at the receiving process's POST /flush. It is called with
-this server's own token, so the query side can request a flush without ever
-holding write access.
+this server's own token, so the query side can request a flush without
+holding the OTLP ingest token.
+
+--feedback-url points at POST /feedback on that receiver. The bearer is
+--feedback-token, else this server's token, else DUCKTEL_FEEDBACK_TOKEN, else
+DUCKTEL_FLUSH_TOKEN. The route stores one feedback log. It does not accept
+OTLP spans, metrics, or arbitrary logs.
 
 --dashboard additionally serves a human-facing dashboard (static SPA at
 /dashboard, JSON REST API at /api/*) on the same port, guarded by the same
@@ -112,6 +148,40 @@ Examples:
 					dashURL = v
 				}
 			}
+			if !cmd.Flags().Changed("feedback-url") {
+				if v := os.Getenv("DUCKTEL_FEEDBACK_URL"); v != "" {
+					feedbackURL = v
+				}
+			}
+			if !cmd.Flags().Changed("feedback-webhook-url") {
+				if v := os.Getenv("DUCKTEL_FEEDBACK_WEBHOOK_URL"); v != "" {
+					webhookURL = v
+				}
+			}
+			if !cmd.Flags().Changed("feedback-github-repo") {
+				if v := os.Getenv("DUCKTEL_FEEDBACK_GITHUB_REPO"); v != "" {
+					githubRepo = v
+				}
+			}
+			if !cmd.Flags().Changed("feedback-github-token") {
+				if v := os.Getenv("DUCKTEL_FEEDBACK_GITHUB_TOKEN"); v != "" {
+					githubToken = v
+				}
+			}
+			bearer := feedbackToken
+			if bearer == "" {
+				bearer = token
+			}
+			if bearer == "" {
+				bearer = os.Getenv("DUCKTEL_FEEDBACK_TOKEN")
+			}
+			if bearer == "" {
+				bearer = os.Getenv("DUCKTEL_FLUSH_TOKEN")
+			}
+			feedbackSvc, err := newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken, flushURL, token)
+			if err != nil {
+				return err
+			}
 
 			engine, err := query.Open(dataDir)
 			if err != nil {
@@ -127,6 +197,7 @@ Examples:
 				// The flush request is authorised with this server's own token.
 				s := mcp.NewServer(engine, dataDir, flushURL, token)
 				s.SetDashboardURL(dashURL)
+				s.SetFeedback(feedbackSvc)
 				s.Register(srv)
 				return srv
 			}
@@ -152,10 +223,37 @@ Examples:
 	cmd.Flags().StringVar(&token, "auth-token", "", "Require this bearer token in HTTP mode (env: DUCKTEL_MCP_TOKEN)")
 	cmd.Flags().StringVar(&basePath, "base-path", "/mcp", "URL path to serve the MCP endpoint on in HTTP mode")
 	cmd.Flags().StringVar(&flushURL, "flush-url", "", "Writer's POST /flush endpoint, e.g. http://localhost:4318/flush; enables the flush_buffer tool (env: DUCKTEL_FLUSH_URL)")
+	cmd.Flags().StringVar(&feedbackURL, "feedback-url", "", "POST feedback to the running receiver, e.g. http://127.0.0.1:4318/feedback. Unset writes this process's data directory (env: DUCKTEL_FEEDBACK_URL)")
+	cmd.Flags().StringVar(&feedbackToken, "feedback-token", "", "Bearer token for --feedback-url. Falls back to the MCP auth token, then DUCKTEL_FEEDBACK_TOKEN, then DUCKTEL_FLUSH_TOKEN. Sent only when non-empty")
+	cmd.Flags().StringVar(&webhookURL, "feedback-webhook-url", "", "POST each stored report here. Off unless set. Sends the agent-written text off the machine; ducktel does not scrub it (env: DUCKTEL_FEEDBACK_WEBHOOK_URL)")
+	cmd.Flags().StringVar(&githubRepo, "feedback-github-repo", "", "GitHub owner/repo that receives one issue per stored report. Off unless set. Mutually exclusive with --feedback-webhook-url (env: DUCKTEL_FEEDBACK_GITHUB_REPO)")
+	cmd.Flags().StringVar(&githubToken, "feedback-github-token", "", "Bearer token for --feedback-github-repo (env: DUCKTEL_FEEDBACK_GITHUB_TOKEN)")
 	cmd.Flags().StringVar(&dashURL, "dashboard-url", "", "Public address of the dashboard, e.g. https://otel.example.com/dashboard/; query results then carry a dashboard_url that opens the same query. Discovery lists do not (env: DUCKTEL_DASHBOARD_URL)")
 	cmd.Flags().BoolVar(&dashboard, "dashboard", false, "Also serve the dashboard SPA at /dashboard and its REST API at /api, guarded by the same --auth-token")
 
 	return cmd
+}
+
+// newFeedbackService chooses the one local store and the optional sink.
+// A flush URL is used only after a successful POST to --feedback-url, and
+// the flush still uses the MCP auth token.
+func newFeedbackService(dataDir, feedbackURL, bearer, webhookURL, githubRepo, githubToken, flushURL, mcpToken string) (*feedback.Service, error) {
+	opt := feedback.Options{
+		Token:       bearer,
+		WebhookURL:  webhookURL,
+		GitHubRepo:  githubRepo,
+		GitHubToken: githubToken,
+	}
+	if feedbackURL != "" {
+		opt.Endpoint = feedbackURL
+		if flushURL != "" {
+			flusher := telemetry.NewFlusher(flushURL, mcpToken)
+			opt.AfterStore = flusher.Flush
+		}
+	} else {
+		opt.DataDir = dataDir
+	}
+	return feedback.New(opt)
 }
 
 // serveMCPHTTP runs the MCP server over Streamable HTTP with a bearer-token
