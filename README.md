@@ -344,12 +344,14 @@ For the occasional human look at the same data, `--http --dashboard` also serves
 
 ```bash
 ducktel mcp --http --port 4319 --auth-token "$READ_TOKEN" --dashboard
-# open http://localhost:4319/dashboard and paste the read token
+# open http://localhost:4319/dashboard — the browser prompts for the
+# read token (any username, password is the token). You can also paste
+# the token into the dashboard's own gate.
 ```
 
 - **Off by default.** Without `--dashboard` nothing below is mounted.
 - **Read-only views.** Traces (search plus waterfall), logs and metrics, per tenant. The JSON API is a thin wrapper over the same query core the MCP tools use. Routes, from `internal/webapi/handlers.go`: `GET /api/traces`, `GET /api/traces/{trace_id}`, `GET /api/traces/{trace_id}/summary`, `GET /api/slow`, `GET /api/compare`, `GET /api/logs`, `GET /api/metrics`, `GET /api/tenants`, `GET /api/services`, `GET /api/metric-names`, `GET /api/config`, and `POST /api/flush`.
-- **Same token, same tenant rule.** Every `/api/*` route requires the MCP read token; every query is filtered by `tenant.id`, exactly like the MCP tools.
+- **Same token, same tenant rule.** `/dashboard` (the SPA shell) and every `/api/*` route require the MCP read token, as `Authorization: Bearer` or as HTTP Basic (password is the token, username is ignored). A 401 includes a Basic challenge so a browser will prompt. `/mcp` stays bearer-only, so existing MCP clients are unchanged. Every query is filtered by `tenant.id`, exactly like the MCP tools.
 - **No new dependencies.** Plain HTML/CSS/JS embedded in the binary; no build step, no CDN.
 - **Flush button, only with `--flush-url`.** `POST /api/flush` makes the last `--flush-interval` of buffered telemetry queryable now. It is the same request the `flush_buffer` tool sends, with the same read token; it writes no telemetry and changes no stored data. Without `--flush-url` the button is hidden and the route returns 404.
 - **Cheap to leave open.** Picker lists (tenants, services, metric names) are cached for five minutes, so page loads do not rescan every file. Each `/api` request is logged with path, parameters, status, size and duration.

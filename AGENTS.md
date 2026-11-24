@@ -47,7 +47,7 @@ The dashboard has no build step and no npm install.
 - `internal/telemetry` is the query behavior. MCP and the dashboard API both call it. `ListFeedback` is the feedback list query.
 - `internal/mcp` registers the MCP tools and adapts their arguments.
 - `internal/webapi` registers the `/api` routes.
-- `internal/httpauth` checks bearer tokens.
+- `internal/httpauth` checks bearer tokens, and HTTP Basic (password = the token) on the dashboard and `/api`.
 - `internal/savedquery` stores SQL saved queries in `saved_queries.json` and tenant-scoped MCP saved queries in `mcp_saved_queries.json`.
 - `internal/cli` formats CLI results as json, table, or csv.
 - `internal/testharness` generates the synthetic OTLP that `ducktel testdata` sends.

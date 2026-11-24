@@ -57,7 +57,7 @@ ducktel mcp --http --host 0.0.0.0 --port 4319 --data-dir /data \
   --flush-url http://localhost:4318/flush
 ```
 
-Add `--dashboard` to serve the read-only UI at `/dashboard` and the JSON routes under `/api`. Those routes call the same query core as the tools. `DUCKTEL_AUTH_TOKEN` is the ingest (write) token. `DUCKTEL_MCP_TOKEN` is the query (read) token. Use different values.
+Add `--dashboard` to serve the read-only UI at `/dashboard` and the JSON routes under `/api`. Those routes call the same query core as the tools. `/dashboard` and `/api` require the MCP read token (Bearer, or HTTP Basic with the token as the password). `/mcp` stays bearer-only. `DUCKTEL_AUTH_TOKEN` is the ingest (write) token. `DUCKTEL_MCP_TOKEN` is the query (read) token. Use different values.
 
 ## CLI
 

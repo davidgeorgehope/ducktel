@@ -24,18 +24,19 @@ type Handlers struct {
 	token   string
 }
 
-// NewHandlers builds the REST handlers. token, when non-empty, is required as
-// a bearer token on every route — the same read token the MCP server uses;
-// see internal/httpauth for the check itself.
+// NewHandlers builds the REST handlers. token, when non-empty, is required on
+// every route — the same read token the MCP server uses, as a bearer token or
+// as HTTP Basic (password = the token). See internal/httpauth.Browser.
 func NewHandlers(core *telemetry.Core, flusher *telemetry.Flusher, token string) *Handlers {
 	return &Handlers{core: core, flusher: flusher, token: token}
 }
 
-// Register mounts /api/* routes onto mux, each guarded by the same bearer
-// check as every other authenticated surface in ducktel.
+// Register mounts /api/* routes onto mux, each guarded by the dashboard
+// check: Bearer or HTTP Basic, with a Basic challenge on 401 so a browser
+// can prompt. /mcp stays on httpauth.Bearer and is not registered here.
 func (h *Handlers) Register(mux *http.ServeMux) {
 	auth := func(fn http.HandlerFunc) http.Handler {
-		return logRequests(httpauth.Bearer(h.token, fn))
+		return logRequests(httpauth.Browser(h.token, fn))
 	}
 	mux.Handle("GET /api/traces", auth(h.handleSearchSpans))
 	mux.Handle("GET /api/traces/{trace_id}", auth(h.handleLookupTrace))
