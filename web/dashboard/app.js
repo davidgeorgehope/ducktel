@@ -78,13 +78,17 @@ function clearToken() {
 // api issues an authenticated request to /api/*. A stored token is sent as
 // Bearer. Otherwise the browser may already have HTTP Basic credentials
 // from the /dashboard challenge; credentials: "same-origin" forwards them.
-// On 401 it clears the stored token and re-shows the gate.
+// A stored Bearer header replaces Basic on that request, so a leftover or
+// rotated localStorage token would 401 even when Basic is valid. On 401,
+// drop the stored token and retry once without Bearer so Basic can be
+// used. Only a second 401 re-shows the gate.
 export async function api(path, opts) {
-  const headers = Object.assign({}, (opts && opts.headers) || {});
   const token = getToken();
-  if (token) headers["Authorization"] = "Bearer " + token;
-
-  const res = await fetch(path, Object.assign({ credentials: "same-origin" }, opts, { headers }));
+  let res = await apiFetch(path, opts, token);
+  if (res.status === 401 && token) {
+    clearToken();
+    res = await apiFetch(path, opts, "");
+  }
   if (res.status === 401) {
     clearToken();
     showGate("Rejected — check the token and try again.");
@@ -105,6 +109,13 @@ export async function api(path, opts) {
   // brick the UI again.
   if (body && body.rows === null) body.rows = [];
   return body;
+}
+
+function apiFetch(path, opts, token) {
+  const headers = Object.assign({}, (opts && opts.headers) || {});
+  if (token) headers["Authorization"] = "Bearer " + token;
+  else delete headers["Authorization"];
+  return fetch(path, Object.assign({ credentials: "same-origin" }, opts, { headers }));
 }
 
 function showGate(errorMsg) {
