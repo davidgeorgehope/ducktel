@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/davidgeorgehope/ducktel/internal/httpauth"
 	"github.com/davidgeorgehope/ducktel/internal/query"
 	"github.com/davidgeorgehope/ducktel/internal/telemetry"
 	"github.com/davidgeorgehope/ducktel/internal/writer"
@@ -26,7 +27,7 @@ func seedSpan(svc, tenant, traceID string) writer.TraceSpan {
 }
 
 // newTestMux seeds a store and returns a mux with /api/* registered, guarded
-// by the given token (empty disables auth, matching httpauth.Bearer).
+// by the given token (empty disables auth, matching httpauth.Browser).
 func newTestMux(t *testing.T, token string) *http.ServeMux {
 	t.Helper()
 	return newTestMuxWithFlusher(t, token, telemetry.NewFlusher("", ""))
@@ -124,6 +125,45 @@ func TestAuthDisabledWhenNoToken(t *testing.T) {
 	rec := doReq(t, mux, "GET", "/api/traces?tenant=acme", "")
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200 with auth disabled: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthAcceptsBasicPassword(t *testing.T) {
+	mux := newTestMux(t, "secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tenants", nil)
+	req.SetBasicAuth("ducktel", "secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("basic auth = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthRejectsWrongBasicPassword(t *testing.T) {
+	mux := newTestMux(t, "secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tenants", nil)
+	req.SetBasicAuth("ducktel", "wrong")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("wrong basic auth = %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); got != httpauth.DashboardChallenge {
+		t.Errorf("WWW-Authenticate = %q, want %q", got, httpauth.DashboardChallenge)
+	}
+}
+
+func TestAuthChallengeWhenMissingToken(t *testing.T) {
+	mux := newTestMux(t, "secret")
+
+	rec := doReq(t, mux, "GET", "/api/tenants", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); got != httpauth.DashboardChallenge {
+		t.Errorf("WWW-Authenticate = %q, want %q", got, httpauth.DashboardChallenge)
 	}
 }
 

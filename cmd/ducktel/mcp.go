@@ -128,7 +128,10 @@ OTLP spans, metrics, or arbitrary logs.
 /dashboard, JSON REST API at /api/*) on the same port, guarded by the same
 --auth-token — this is a convenience view over the identical query core the
 MCP tools use, not a second trust domain, so it reuses the one read token
-rather than minting another secret.
+rather than minting another secret. Browsers may send that token as HTTP
+Basic (any username, password is the token); a 401 on /dashboard and /api
+includes a Basic challenge so the browser will prompt. /mcp stays
+bearer-only, so existing MCP clients are unchanged.
 
 Examples:
   ducktel mcp --data-dir /data
@@ -245,7 +248,7 @@ Examples:
 	cmd.Flags().StringVar(&githubLabel, "feedback-github-label", "feedback", "Label on each GitHub issue created for a stored report. The label must already exist on the repo (env: DUCKTEL_FEEDBACK_GITHUB_LABEL)")
 	cmd.Flags().IntVar(&feedbackGlobalLimit, "feedback-global-limit", 30, "Accepted feedback reports across all tenants per rolling hour (env: DUCKTEL_FEEDBACK_GLOBAL_LIMIT)")
 	cmd.Flags().StringVar(&dashURL, "dashboard-url", "", "Public address of the dashboard, e.g. https://otel.example.com/dashboard/; query results then carry a dashboard_url that opens the same query. Discovery lists do not (env: DUCKTEL_DASHBOARD_URL)")
-	cmd.Flags().BoolVar(&dashboard, "dashboard", false, "Also serve the dashboard SPA at /dashboard and its REST API at /api, guarded by the same --auth-token")
+	cmd.Flags().BoolVar(&dashboard, "dashboard", false, "Also serve the dashboard SPA at /dashboard and its REST API at /api, guarded by the same --auth-token (Bearer or HTTP Basic)")
 
 	return cmd
 }
@@ -318,19 +321,13 @@ func serveMCPHTTP(
 	if dashboard {
 		// Same Core the MCP tools query, same Flusher the flush_buffer tool
 		// calls, same token — this is a second transport onto identical
-		// query logic, not a second trust domain.
+		// query logic, not a second trust domain. Browser() also accepts
+		// HTTP Basic so a person can open /dashboard in a browser; /mcp
+		// above stays Bearer-only.
 		core := telemetry.NewCore(engine)
 		flusher := telemetry.NewFlusher(flushURL, token)
 		webapi.NewHandlers(core, flusher, token).Register(mux)
-
-		// Static assets are unauthenticated: they're app shell with no data
-		// or secrets embedded in them. Only the /api/* calls the SPA makes
-		// carry the token, checked above.
-		assets := http.FileServerFS(webui.FS())
-		mux.Handle("GET /dashboard/", http.StripPrefix("/dashboard/", assets))
-		mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
-		})
+		mountDashboard(mux, token)
 	}
 
 	addr := fmt.Sprintf("%s:%d", host, port)
@@ -365,4 +362,16 @@ func serveMCPHTTP(
 		}
 	}
 	return nil
+}
+
+// mountDashboard serves the embedded SPA at /dashboard, behind the same
+// read token as /api. A missing token is 401 with a Basic challenge so a
+// browser prompts; curl -u 'ducktel:$TOKEN' and Authorization: Bearer both
+// work.
+func mountDashboard(mux *http.ServeMux, token string) {
+	assets := httpauth.Browser(token, http.StripPrefix("/dashboard/", http.FileServerFS(webui.FS())))
+	mux.Handle("GET /dashboard/", assets)
+	mux.Handle("GET /dashboard", httpauth.Browser(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
+	})))
 }

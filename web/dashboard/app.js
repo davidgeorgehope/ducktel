@@ -2,10 +2,12 @@
 //
 // Talks to the REST API in internal/webapi, which wraps the exact same
 // internal/telemetry.Core the MCP tools use. Auth reuses the same read
-// token as the MCP server: entered once here, kept in localStorage (so it
-// survives closing the tab/browser — a deliberate convenience-over-exposure
-// tradeoff; a 401 still clears it immediately), sent as a Bearer header on
-// every /api/* call.
+// token as the MCP server. A browser that answered the HTTP Basic
+// challenge on /dashboard is already authenticated (the password is the
+// token); otherwise the token can be entered once here, kept in
+// localStorage (so it survives closing the tab/browser — a deliberate
+// convenience-over-exposure tradeoff; a 401 still clears it immediately),
+// and sent as a Bearer header on every /api/* call.
 
 import { applyInvestigateView, enterInvestigate, initInvestigate, refreshInvestigate } from "./investigate.js";
 
@@ -73,16 +75,16 @@ function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
-// api issues an authenticated request to /api/*. On 401 it clears the stored
-// token and re-shows the gate, since the token is either wrong or was never
-// set (the server has no login flow — a 401 here always means "type the
-// token again").
+// api issues an authenticated request to /api/*. A stored token is sent as
+// Bearer. Otherwise the browser may already have HTTP Basic credentials
+// from the /dashboard challenge; credentials: "same-origin" forwards them.
+// On 401 it clears the stored token and re-shows the gate.
 export async function api(path, opts) {
   const headers = Object.assign({}, (opts && opts.headers) || {});
   const token = getToken();
   if (token) headers["Authorization"] = "Bearer " + token;
 
-  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  const res = await fetch(path, Object.assign({ credentials: "same-origin" }, opts, { headers }));
   if (res.status === 401) {
     clearToken();
     showGate("Rejected — check the token and try again.");
@@ -1386,13 +1388,10 @@ function init() {
   // space both panes get).
   window.addEventListener("resize", fitTracesSplit);
 
-  // If a token is already stored (persists across tabs/restarts now — see
-  // the top-of-file note on localStorage), skip the gate.
-  if (getToken()) {
-    connect();
-  } else {
-    showGate();
-  }
+  // Try to connect even with no stored token: a browser that already
+  // answered the /dashboard Basic challenge will get in without pasting
+  // the token again. api() shows the gate on 401.
+  connect();
 }
 
 // Scripts that only import the pure helpers (the node tests) have no DOM,

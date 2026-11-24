@@ -21,7 +21,9 @@ OpenTelemetry Collector feeding it host telemetry. They are what the
 - `ducktel-serve` takes OTLP/HTTP on `127.0.0.1:4318` and writes Parquet to
   `/var/lib/ducktel`, keeping 14 days.
 - `ducktel-mcp` serves MCP at `127.0.0.1:4319/mcp` and the dashboard at
-  `/dashboard/`. `flush_buffer` and `submit_feedback` go to the receiver.
+  `/dashboard/`. The dashboard and `/api` require the MCP read token
+  (HTTP Basic in a browser, or Bearer). `/mcp` stays bearer-only.
+  `flush_buffer` and `submit_feedback` go to the receiver.
 - `otelcol-contrib` (the upstream `.deb`) sends hostmetrics, journald for
   the listed units, and the nginx log files to the receiver. It is not in the
   docker group (root-equivalent), so there are no docker stats. It
