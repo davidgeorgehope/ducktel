@@ -85,6 +85,7 @@ type Service struct {
 	sink  Sink
 
 	mu          sync.Mutex
+	onStored    func(Report)
 	tenants     map[string]*tenantWindow
 	global      []slot
 	globalLimit int
@@ -270,7 +271,28 @@ func (s *Service) Submit(ctx context.Context, r Report) (Result, error) {
 		delete(s.inflight, key)
 		close(f.done)
 		s.mu.Unlock()
+		s.emit(r)
 		return res, nil
+	}
+}
+
+// SetOnStored registers a hook for the first successful store of a report.
+// A retry of the same report id does not call it. nil clears the hook.
+func (s *Service) SetOnStored(fn func(Report)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onStored = fn
+	s.mu.Unlock()
+}
+
+func (s *Service) emit(r Report) {
+	s.mu.Lock()
+	fn := s.onStored
+	s.mu.Unlock()
+	if fn != nil {
+		fn(r)
 	}
 }
 

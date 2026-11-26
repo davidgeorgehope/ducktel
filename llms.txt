@@ -33,6 +33,15 @@ Registered by `Register` in `internal/mcp/server.go`. Fifteen tools are always r
 - [sql_query](skills/ducktel/SKILL.md): one read-only SELECT or WITH for one tenant. Requires `tenant` and `sql`. The views are `spans`, `logs`, and `metrics`. `traces` is not a view. Timestamps are Unix microseconds. `limit` defaults to 200 and is rejected above 1000. No default time window.
 - [flush_buffer](skills/ducktel/SKILL.md): asks the receiver to write its buffer. No arguments. Absent from the tool list when no flush URL is configured.
 
+## MCP events
+
+The server advertises `io.modelcontextprotocol/events`. These are not tools. `events/list` returns two event types. Both require `tenant` in `arguments`, and a subscriber receives only that tenant's events.
+
+- `span.error` is an error span flushed to this data directory after the first scan. Optional `service` is an exact `service.name`. Optional `severity` is `error`, `ERROR`, or `STATUS_CODE_ERROR`. Any other severity matches nothing. The payload is `trace_id`, `span_id`, `service`, `span_name`, `status`, and `summary` (the status message).
+- `feedback.submitted` is a new `submit_feedback` report this MCP process accepts. A retry of the same `report_id` does not emit a second event. Optional `service` matches `ducktel.agent_feedback`. Optional `severity` is `low`, `medium`, or `high`. The payload is `report_id`, `service`, `tool_name`, `severity`, and `summary`.
+
+Delivery is `poll` (`events/poll`) and `push` (`events/stream`). Webhook is not offered. A null cursor starts from now and returns no events. Spans already stored at the first scan are not replayed. Each tenant keeps 64 events. The process keeps 128 tenant rings, 16 push streams per tenant, and 128 push streams in total. One payload is at most 512 bytes. `events/poll` recommends `nextPollMs` of 5000.
+
 Row results are compact JSON, with no extra whitespace.
 
 Span filters on `status_code` accept `ok`, `error`, or `unset`, and on `span_kind` accept `server`, `client`, `internal`, `producer`, or `consumer`, as well as the stored `STATUS_CODE_*` and `SPAN_KIND_*` values. `log_search` `severity=warning` also matches `WARN`, `err` matches `ERROR`, and `information` matches `INFO`. A bare dotted `group_by` such as `host.name` is rejected with a suggestion such as `resource.host.name`.

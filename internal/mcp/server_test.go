@@ -103,7 +103,7 @@ func newTestServerWithSpans(t *testing.T, configure func(*Server), extra []write
 	}
 	t.Cleanup(func() { engine.Close() })
 
-	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
+	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, SDKOptions())
 	ds := NewServer(engine, dir, "", "")
 	if configure != nil {
 		configure(ds)

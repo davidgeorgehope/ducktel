@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/davidgeorgehope/ducktel/internal/events"
 	"github.com/davidgeorgehope/ducktel/internal/feedback"
 	"github.com/davidgeorgehope/ducktel/internal/query"
 	"github.com/davidgeorgehope/ducktel/internal/savedquery"
@@ -34,6 +36,12 @@ type Server struct {
 	feedback *feedback.Service
 	// dashboardURL, when set, adds a dashboard link to every result.
 	dashboardURL string
+
+	events     *events.Hub
+	scanMu     sync.Mutex
+	spanPrimed bool
+	spanStart  int64
+	spanID     string
 }
 
 // NewServer wires the query engine into an MCP server. An empty flushURL
@@ -44,6 +52,7 @@ func NewServer(engine *query.Engine, dataDir, flushURL, flushToken string) *Serv
 		flusher:  telemetry.NewFlusher(flushURL, flushToken),
 		mcpSaved: savedquery.NewMCPStore(dataDir),
 		dataDir:  dataDir,
+		events:   events.NewHub(),
 	}
 }
 
@@ -51,6 +60,9 @@ func NewServer(engine *query.Engine, dataDir, flushURL, flushToken string) *Serv
 // makes a call return an error instead of storing anything.
 func (s *Server) SetFeedback(svc *feedback.Service) {
 	s.feedback = svc
+	if svc != nil {
+		svc.SetOnStored(s.publishFeedback)
+	}
 }
 
 // Register adds the tools to an MCP server.
@@ -214,6 +226,7 @@ func (s *Server) Register(srv *sdkmcp.Server) {
 				"repeat the query. Accepts no arguments.",
 		}, s.flushBuffer)
 	}
+	s.registerEvents(srv)
 }
 
 // --- discovery ---

@@ -87,7 +87,7 @@ func main() {
 }
 
 func connect(engine *query.Engine, dataDir string) *sdkmcp.ClientSession {
-	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "measure", Version: "0"}, nil)
+	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "measure", Version: "0"}, mcp.SDKOptions())
 	mcp.NewServer(engine, dataDir, "", "").Register(srv)
 	clientT, serverT := sdkmcp.NewInMemoryTransports()
 	ctx := context.Background()

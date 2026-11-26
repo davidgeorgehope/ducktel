@@ -3,6 +3,14 @@
     "max_bytes": 1140,
     "max_tokens": 285
   },
+  "events/list": {
+    "max_bytes": 1794,
+    "max_tokens": 449
+  },
+  "events/poll feedback.submitted occurrence": {
+    "max_bytes": 132,
+    "max_tokens": 33
+  },
   "flush_buffer": {
     "max_bytes": 82,
     "max_tokens": 21

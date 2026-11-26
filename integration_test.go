@@ -858,7 +858,7 @@ func TestDiscoveryThroughMCP(t *testing.T) {
 // served from the discovery cache of an earlier empty read.
 func readHarnessDiscovery(t *testing.T, engine *query.Engine) (tenants, services, metrics, keys []map[string]any, problem string) {
 	t.Helper()
-	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
+	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, mcp.SDKOptions())
 	mcp.NewServer(engine, t.TempDir(), "", "").Register(srv)
 	clientT, serverT := sdkmcp.NewInMemoryTransports()
 	ctx := context.Background()

@@ -90,6 +90,20 @@ tenants. A restart clears both windows. POST /feedback flushes
 the log before it returns success. A flush error still keeps the
 report_id, so a retry does not write a second log.
 
+The server advertises the MCP extension io.modelcontextprotocol/events.
+events/list returns span.error and feedback.submitted. Both require
+tenant, and a subscriber receives only that tenant's events. span.error
+is an error span flushed to this data directory after the first scan.
+Filter it with service (exact service.name) and severity (error, ERROR,
+or STATUS_CODE_ERROR). feedback.submitted is a new submit_feedback
+report this process accepts. Filter it with service
+(ducktel.agent_feedback) and severity (low, medium, or high). Delivery
+is events/poll and events/stream. Webhook is not offered. A null cursor
+starts from now. Spans already stored at the first scan are not
+replayed. Each tenant keeps 64 events. The process keeps 128 tenant
+rings, 16 push streams per tenant, and 128 push streams in total. A
+payload is at most 512 bytes.
+
 Point this process at the running receiver instead of starting a second
 ducktel serve on the same data directory. A second serve exits because the
 directory is locked, and it will not store the report:
@@ -210,7 +224,7 @@ Examples:
 				srv := sdkmcp.NewServer(&sdkmcp.Implementation{
 					Name:    "ducktel",
 					Version: "0.1.0",
-				}, nil)
+				}, mcp.SDKOptions())
 				// The flush request is authorised with this server's own token.
 				s := mcp.NewServer(engine, dataDir, flushURL, token)
 				s.SetDashboardURL(dashURL)
