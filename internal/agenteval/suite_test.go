@@ -197,7 +197,7 @@ func openEmpty(t *testing.T) (*query.Engine, string) {
 
 func connect(t *testing.T, engine *query.Engine, dataDir, flushURL, flushToken string) *sdkmcp.ClientSession {
 	t.Helper()
-	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-eval", Version: "eval"}, nil)
+	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-eval", Version: "eval"}, mcp.SDKOptions())
 	ds := mcp.NewServer(engine, dataDir, flushURL, flushToken)
 	fb, err := feedback.New(feedback.Options{DataDir: dataDir})
 	if err != nil {

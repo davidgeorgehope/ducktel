@@ -203,6 +203,15 @@ Sixteen tools. They know about spans, attributes, logs, metrics, and time, and t
 | `submit_feedback(tenant, tool_name, category, severity, summary, details, proposed_fix)` | call this after a ducktel tool returned confusing, unhelpful, or wrong output, or a capability was missing. Include a concrete proposed fix. Stored as a log for this tenant under service `ducktel.agent_feedback`. `log_search` and the logs dashboard show it. Nothing is sent off the machine unless a sink is configured |
 | `flush_buffer()` | make just-received telemetry queryable now (see Flush semantics) |
 
+The server advertises `io.modelcontextprotocol/events`. These are not tools. Call `events/list`, then `events/poll` or `events/stream`.
+
+| Event | Arguments | Payload |
+|-------|-----------|---------|
+| `span.error` | `tenant` required. Optional `service` (exact `service.name`) and `severity` (`error`, `ERROR`, or `STATUS_CODE_ERROR`). Any other severity matches nothing | `trace_id`, `span_id`, `service`, `span_name`, `status`, `summary` |
+| `feedback.submitted` | `tenant` required. Optional `service` (`ducktel.agent_feedback`) and `severity` (`low`, `medium`, or `high`) | `report_id`, `service`, `tool_name`, `severity`, `summary` |
+
+A subscriber receives only the tenant in `arguments`. Delivery is `poll` and `push`. Webhook is not offered. A null cursor starts from now and returns no events. Pass the returned cursor on the next poll. Spans already stored when the server first scans are not replayed. An error span shows up after it is flushed to this process's data directory. Feedback fires when this process accepts a new `submit_feedback` report. A retry of the same `report_id` does not emit again. Each tenant keeps 64 events. The process keeps 128 tenant rings, 16 push streams per tenant, and 128 push streams in total. One payload is at most 512 bytes.
+
 A filter object is `{key, value, op}`. `op` is `=` (default) or `!=`. `!=` drops records where the key has that value, and keeps records that lack the key.
 
 **Time series and resource grouping.** `step` turns `metric_query` into a time

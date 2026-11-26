@@ -45,7 +45,8 @@ The dashboard has no build step and no npm install.
 - `internal/query` opens DuckDB and defines the `traces`, `logs`, and `metrics` views.
 - `internal/feedback` validates an agent feedback report, stores it as one log, and optionally sends one sink.
 - `internal/telemetry` is the query behavior. MCP and the dashboard API both call it. `ListFeedback` is the feedback list query.
-- `internal/mcp` registers the MCP tools and adapts their arguments.
+- `internal/events` is the in-memory tenant ring for MCP events.
+- `internal/mcp` registers the MCP tools and adapts their arguments. It also adapts the Events extension.
 - `internal/webapi` registers the `/api` routes.
 - `internal/httpauth` checks bearer tokens, and HTTP Basic (password = the token) on the dashboard and `/api`.
 - `internal/savedquery` stores SQL saved queries in `saved_queries.json` and tenant-scoped MCP saved queries in `mcp_saved_queries.json`.

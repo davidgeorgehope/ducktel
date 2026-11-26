@@ -356,7 +356,7 @@ func TestSavedToolsAlwaysRegistered(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer engine.Close()
-		srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
+		srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, SDKOptions())
 		NewServer(engine, dir, "http://localhost/flush", "tok").Register(srv)
 		clientT, serverT := sdkmcp.NewInMemoryTransports()
 		ctx := context.Background()

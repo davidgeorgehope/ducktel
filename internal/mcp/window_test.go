@@ -60,7 +60,7 @@ func newWindowServer(t *testing.T) *sdkmcp.ClientSession {
 	}
 	t.Cleanup(func() { engine.Close() })
 
-	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, nil)
+	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ducktel-test", Version: "test"}, SDKOptions())
 	NewServer(engine, dir, "", "").Register(srv)
 	clientT, serverT := sdkmcp.NewInMemoryTransports()
 	ctx := context.Background()
